@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.config import get_logger
-from src.jwt_auth.api import router as auth_router
+# from src.jwt_auth.api import router as auth_router
 
 logger = get_logger(__name__)
 
@@ -20,7 +20,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(auth_router)
+# app.include_router(auth_router)
 
 
 @app.get("/health_check")
