@@ -16,6 +16,7 @@ psycopg = {extras = ["binary"], version = "^3.3.4"}
 alembic = "^1.19.1"
 pwdlib = {extras = ["argon2"], version = "^0.3.1"}
 pyjwt = "^2.13.0"
+python-multipart = "^0.0.32"
 mysql-connector-python = "^26.7.0"
 pyodbc = "^5.3.0"
 uuid6 = "^2025.0.1"
