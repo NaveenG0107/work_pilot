@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Invitation Already Accepted</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f7f6f3; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; max-width: 400px; width: 100%; border: 1px solid #ececec; }
+        .icon { font-size: 48px; color: #16a34a; margin-bottom: 20px; }
+        h1 { font-size: 24px; color: #141414; margin-bottom: 16px; font-weight: 600; }
+        p { color: #4a4a4a; font-size: 15px; line-height: 1.6; margin-bottom: 24px; }
+        .btn { display: inline-block; background-color: #141414; color: white; text-decoration: none; padding: 12px 32px; border-radius: 6px; font-size: 15px; font-weight: 600; transition: background-color 0.2s; }
+        .btn:hover { background-color: #2a2a2a; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">✅</div>
+        <h1>Already Joined</h1>
+        <p>This invitation has already been accepted. You are already a member of the organization.</p>
+        <a href="{{.DashboardURL}}" class="btn">Go to Dashboard</a>
+    </div>
+</body>
+</html>
