@@ -19,7 +19,7 @@ class User(Base):
     username = Column(String(30), nullable=False, unique=True, index=True)
     email = Column(String(100), nullable=False, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
-    role_id = Column(String(36), ForeignKey("roles.id"), nullable=False, index=True)
+    role_id = Column(String(36), ForeignKey("roles.id"), nullable=True, index=True)
     avatar_url = Column(String(500), nullable=True)
     color = Column(String(7), nullable=False, default="#3498DB")
     timezone = Column(String(50), nullable=True, default="UTC")
