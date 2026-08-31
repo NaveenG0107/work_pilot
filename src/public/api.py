@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import get_logger
 from src.database import get_db
 from src.public.schema import (
@@ -21,12 +21,12 @@ router = APIRouter()
 country_cache = CountryCache(ttl=timedelta(hours=24))
 
 
-def get_public_service(db: Session = Depends(get_db)) -> PublicService:
+def get_public_service(db: AsyncSession = Depends(get_db)) -> PublicService:
     return PublicService(db=db, country_cache=country_cache)
 
 
 @router.get("/health", response_model=HealthResponse | FullHealthResponse, tags=["Public"])
-def health_check(full: bool = Query(default=False), db: Session = Depends(get_db)):
+async def health_check(full: bool = Query(default=False), db: AsyncSession = Depends(get_db)):
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     if not full:
@@ -37,7 +37,7 @@ def health_check(full: bool = Query(default=False), db: Session = Depends(get_db
         )
 
     try:
-        db.execute(text("SELECT 1"))
+        await db.execute(text("SELECT 1"))
 
         return FullHealthResponse(
             status="healthy",
@@ -78,9 +78,9 @@ def health_check(full: bool = Query(default=False), db: Session = Depends(get_db
 
 
 @router.get("/countries", response_model=CountriesResponse, tags=["Lookup"])
-def get_all_countries(name: str | None = Query(default=None, description="Filter countries by name"), service: PublicService = Depends(get_public_service),):
+async def get_all_countries(name: str | None = Query(default=None, description="Filter countries by name"), service: PublicService = Depends(get_public_service),):
     try:
-        countries = service.get_countries(name=name)
+        countries = await service.get_countries(name=name)
 
         logger.info(
             "Countries retrieved successfully: count=%s filter=%s",
