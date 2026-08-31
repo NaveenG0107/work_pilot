@@ -9,6 +9,8 @@ package-mode = false
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
 fastapi = "^0.141.1"
+pydantic = "^2.12.0"
+pydantic-settings = "^2.0.0"
 uvicorn = {extras = ["standard"], version = "^0.52.3"}
 sqlalchemy = "^2.0.52"
 python-dotenv = "^1.2.3"
@@ -16,8 +18,15 @@ psycopg = {extras = ["binary"], version = "^3.3.4"}
 alembic = "^1.19.1"
 pwdlib = {extras = ["argon2"], version = "^0.3.1"}
 pyjwt = "^2.13.0"
+bcrypt = "^4.0.1"
+email-validator = "^2.2.0"
+python-multipart = "^0.0.20"
+redis = "^6.4.0"
+httpx = "^0.28.1"
+boto3 = "^1.40.0"
 mysql-connector-python = "^26.7.0"
 pyodbc = "^5.3.0"
+uuid6 = "^2025.0.1"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.0"

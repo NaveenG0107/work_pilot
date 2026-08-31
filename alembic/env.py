@@ -8,7 +8,20 @@ from alembic import context
 import os
 from dotenv import load_dotenv
 from src.database import Base
-
+from src.audit import models
+from src.auth import models
+from src.comments import models
+from src.custom_status import models
+from src.favorite import models
+from src.label import models
+from src.organization import models
+from src.project import models
+from src.public import models
+from src.serial import models
+from src.sprint import models
+from src.task import models
+from src.user_story import models
+from src.user_story_status import models
 
 load_dotenv()
 
