@@ -1,12 +1,9 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, DateTime
+from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy import Text
-
-from uuid6 import uuid7
-
 from src.database import Base
+from uuid6 import uuid7
 
 
 class Country(Base):
