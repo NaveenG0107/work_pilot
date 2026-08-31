@@ -25,9 +25,9 @@ from src.project.schema import (
     PaginationResponse,
     ProjectActivityResponse,
     ProjectDetail,
+    ProjectListResponse,
     ProjectMemberResponse,
     ProjectMetrics,
-    ProjectSummary,
     SprintResponse,
     UpdateProjectMemberRequest,
     UpdateProjectRequest,
@@ -272,7 +272,7 @@ class ProjectService:
             ).scalars()
         )
         return (
-            await self._summaries(projects, include_sprints),
+            await self._summaries(projects, include_sprints, user_id),
             self.pagination(page, page_size, total),
         )
 
@@ -280,29 +280,14 @@ class ProjectService:
         self,
         projects: list[Project],
         include_sprints: bool,
-    ) -> list[ProjectSummary]:
+        user_id: str | None = None,
+    ) -> list[ProjectListResponse]:
         if not projects:
             return []
 
         project_ids = [project.id for project in projects]
         organization_ids = {project.organization_id for project in projects}
 
-        async def grouped_counts(model, foreign_key) -> dict[str, int]:
-            rows = (
-                await self.db.execute(
-                    select(foreign_key, func.count(model.id))
-                    .where(
-                        foreign_key.in_(project_ids),
-                        model.deleted_at.is_(None),
-                    )
-                    .group_by(foreign_key)
-                )
-            ).all()
-            return {str(item_id): count for item_id, count in rows}
-
-        task_counts = await grouped_counts(Task, Task.project_id)
-        member_counts = await grouped_counts(ProjectMember, ProjectMember.project_id)
-        sprint_counts = await grouped_counts(Sprint, Sprint.project_id)
         organization_names = dict(
             (
                 await self.db.execute(
@@ -313,44 +298,36 @@ class ProjectService:
             ).all()
         )
 
-        sprints_by_project: dict[str, list[SprintResponse]] = {}
-        if include_sprints:
-            sprint_rows = (
+        role_by_project: dict[str, str] = {}
+        if user_id:
+            role_rows = (
                 await self.db.execute(
-                    select(Sprint)
+                    select(ProjectMember.project_id, Role.name)
+                    .join(Role, Role.id == ProjectMember.role_id)
                     .where(
-                        Sprint.project_id.in_(project_ids),
-                        Sprint.deleted_at.is_(None),
+                        ProjectMember.user_id == user_id,
+                        ProjectMember.project_id.in_(project_ids),
+                        ProjectMember.deleted_at.is_(None),
+                        Role.deleted_at.is_(None),
                     )
-                    .order_by(Sprint.created_at.desc())
                 )
-            ).scalars()
-            for sprint in sprint_rows:
-                sprints_by_project.setdefault(str(sprint.project_id), []).append(
-                    SprintResponse.model_validate(sprint, from_attributes=True)
-                )
+            ).all()
+            role_by_project = {str(pid): name for pid, name in role_rows}
 
-        summaries: list[ProjectSummary] = []
+        summaries: list[ProjectListResponse] = []
         for project in projects:
             project_id = str(project.id)
             key = self._project_key(project.name)
             summaries.append(
-                ProjectSummary(
-                    id=project_id,
-                    organization_id=str(project.organization_id),
-                    organization_name=organization_names.get(project.organization_id),
-                    name=project.name,
+                ProjectListResponse(
                     key=key,
+                    organization_name=organization_names.get(project.organization_id),
+                    project_id=project_id,
                     project_key=key,
-                    description=project.description,
+                    project_name=project.name,
+                    project_slug=project.slug,
+                    role=role_by_project.get(project_id),
                     status=project.status,
-                    created_by=str(project.created_by),
-                    created_at=project.created_at,
-                    sprint_count=sprint_counts.get(project_id, 0),
-                    total_tasks=task_counts.get(project_id, 0),
-                    total_members=member_counts.get(project_id, 0),
-                    slug=project.slug,
-                    sprints=sprints_by_project.get(project_id) if include_sprints else None,
                 )
             )
         return summaries
@@ -581,12 +558,19 @@ class ProjectService:
             completed_tasks_percentage=int(complete * 100 / total) if total else 0,
             total_sprints=len(sprints), active_sprints=active,
             completed_sprints=completed_sprints, total_members=len(members))
+        sprint_responses = [
+            SprintResponse.model_validate(s, from_attributes=True) for s in sprints
+        ]
+        active_sprint = next(
+            (sr for sr in sprint_responses if sr.status == "active"), None
+        )
         return ProjectDetail(id=str(project.id), organization_id=str(project.organization_id),
             organization_name=None, name=project.name, key=None, project_key=None,
             description=project.description, status=project.status,
             created_by=str(project.created_by), creator=creator,
             created_at=project.created_at, members=members,
-            sprints=[SprintResponse.model_validate(s, from_attributes=True) for s in sprints],
+            sprints=sprint_responses,
+            active_sprint=active_sprint,
             metrics=metrics, slug=project.slug)
 
     async def delete(self, project_id: str, user_id: str, organization_id: str):

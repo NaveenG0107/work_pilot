@@ -385,7 +385,7 @@ async def remove_member(
 
 
 @router.patch("/{project_id}/member/{user_id}", tags=["Projects"])
-# @require_jwt
+@require_jwt
 async def update_member(
     project_id: str,
     user_id: str,
@@ -396,8 +396,8 @@ async def update_member(
     try:
         project_id = validated_uuid(project_id)
         user_id = validated_uuid(user_id)
-        actor = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' #request.state.user_id
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        actor = request.state.user_id
+        org_id = request.state.organization_id
         await service.update_member(project_id, user_id, body, actor, org_id)
         return success("Project member updated successfully", {"ProjectID": project_id})
     except Exception as exc:
@@ -405,7 +405,7 @@ async def update_member(
 
 
 @router.get("/{project_id}/activity/{type}", tags=["Projects"])
-# @require_jwt
+@require_jwt
 async def project_activity(
     project_id: str,
     request: Request,
@@ -453,7 +453,7 @@ async def project_activity(
                     user_story_id = parsed
                 else:
                     sprint_id = parsed
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        org_id = request.state.organization_id
         page, page_size = max(1, page), page_size if page_size > 0 else 10
         page_size = min(page_size, 100)
         data, meta = await service.activities(
@@ -482,15 +482,15 @@ async def project_activity(
 
 
 @router.get("/{project_id}/detail", tags=["Projects"])
-#@require_jwt
+@require_jwt
 async def project_detail(
     project_id: str,
     request: Request,
     service: ProjectService = Depends(get_project_service),
 ):
     try:
-        user_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' #request.state.user_id
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
         return success(
             "Project retrieved successfully.",
             dumped(await service.detail(project_id, user_id, org_id)),
@@ -500,16 +500,16 @@ async def project_detail(
 
 
 @router.delete("/{project_id}", tags=["Projects"])
-#@require_jwt
+@require_jwt
 async def delete_project(
     project_id: str,
     request: Request,
     service: ProjectService = Depends(get_project_service),
 ):
     try:
-        user_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' #request.state.user_id
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
-        role = 'org_admin' #request.state.role
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
+        role = request.state.role
         if role != "org_admin":
             return authorization_failure()
         project_id = validated_uuid(project_id)
@@ -520,7 +520,7 @@ async def delete_project(
 
 
 @router.get("/user/{user_id}", tags=["Projects"])
-#@require_jwt
+@require_jwt
 async def projects_by_user(
     user_id: str,
     request: Request,
@@ -528,7 +528,7 @@ async def projects_by_user(
 ):
     try:
         user_id = validated_uuid(user_id)
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        org_id = request.state.organization_id
         return success(
             "Project retrieved successfully.",
             dumped(await service.user_projects(user_id, org_id)),
@@ -538,13 +538,13 @@ async def projects_by_user(
 
 
 @router.get("/recent", tags=["Projects"])
-# @require_jwt
+@require_jwt
 async def recent_projects(
     request: Request, service: ProjectService = Depends(get_project_service)
 ):
     try:
-        user_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' #request.state.user_id
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
         return success(
             "Recent projects retrieved successfully.",
             dumped(await service.user_projects(user_id, org_id, recent=True)),
@@ -554,7 +554,7 @@ async def recent_projects(
 
 
 @router.get("/{project_id}/user-role", tags=["Projects"])
-#@require_jwt
+@require_jwt
 async def project_role(
     project_id: str,
     request: Request,
@@ -562,8 +562,8 @@ async def project_role(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' #request.state.user_id
-        org_id = '6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' #request.state.organization_id
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
         return success(
             "User project role retrieved successfully.",
             dumped(await service.user_role(project_id, user_id, org_id)),

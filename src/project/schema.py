@@ -82,6 +82,7 @@ class SprintResponse(BaseModel):
     status: str = ""
     start_date: datetime | None = None
     end_date: datetime | None = None
+    tasks: list[Any] = Field(default_factory=list, exclude_if=omit_empty)
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -114,6 +115,17 @@ class ProjectSummary(BaseModel):
     sprints: list[SprintResponse] | None = Field(default=None, exclude_if=omit_empty)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectListResponse(BaseModel):
+    key: str | None = Field(default=None, exclude_if=omit_empty)
+    organization_name: str | None = Field(default=None, exclude_if=omit_empty)
+    project_id: str
+    project_key: str | None = Field(default=None, exclude_if=omit_empty)
+    project_name: str
+    project_slug: str | None = Field(default=None, exclude_if=omit_empty)
+    role: str | None = Field(default=None, exclude_if=omit_empty)
+    status: str
 
 
 class ProjectMemberResponse(BaseModel):
@@ -153,6 +165,7 @@ class ProjectDetail(BaseModel):
     created_at: datetime
     members: list[ProjectMemberResponse] = Field(default_factory=list)
     sprints: list[SprintResponse] = Field(default_factory=list)
+    active_sprint: SprintResponse | None = Field(default=None, exclude_if=omit_empty)
     metrics: ProjectMetrics
     slug: str | None = Field(default=None, exclude_if=omit_empty)
 

@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.audit.models import AuditLog, AuditLogType
-from src.audit.schemas import (
+from src.audit.schema import (
     AuditFilter,
     AuditLogResponse,
     AuditLogResponseWrapper,
@@ -26,10 +27,10 @@ logger = get_logger(__name__)
 
 
 class AuditService:
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
-    def get_audit_logs(
+    async def get_audit_logs(
         self,
         filters: AuditFilter,
     ) -> tuple[AuditLogResponseWrapper, PaginationResponse]:
@@ -123,7 +124,9 @@ class AuditService:
 
             count_stmt = select(func.count(AuditLog.id)).where(*conditions)
 
-            total_items = self.db.execute(count_stmt).scalar_one()
+            total_items = (
+                await self.db.execute(count_stmt)
+            ).scalar_one()
 
             offset = (filters.page - 1) * filters.page_size
 
@@ -138,7 +141,9 @@ class AuditService:
                 .offset(offset)
             )
 
-            audits = list(self.db.execute(stmt).scalars().all())
+            audits = list(
+                (await self.db.execute(stmt)).scalars().all()
+            )
 
             total_pages = max(
                 1,
@@ -154,9 +159,9 @@ class AuditService:
                 has_previous=(filters.page > 1),
             )
 
-            activities = self._build_audit_responses(audits)
+            activities = await self._build_audit_responses(audits)
 
-            user = self._get_user_summary(filters.user_id)
+            user = await self._get_user_summary(filters.user_id)
 
             wrapper = AuditLogResponseWrapper(
                 user=user,
@@ -164,7 +169,7 @@ class AuditService:
             )
 
             if filters.user_id:
-                self.create_audit_log(
+                await self.create_audit_log(
                     user_id=filters.user_id,
                     organization_id=(filters.organization_id),
                     action="viewed",
@@ -195,7 +200,7 @@ class AuditService:
 
             raise RuntimeError("Failed to process audit logs") from exc
 
-    def create_audit_log(
+    async def create_audit_log(
         self,
         *,
         action: str,
@@ -228,14 +233,14 @@ class AuditService:
             )
 
             self.db.add(audit)
-            self.db.commit()
+            await self.db.commit()
 
         except SQLAlchemyError:
-            self.db.rollback()
+            await self.db.rollback()
 
             logger.exception("Failed to create audit log")
 
-    def _get_user_summary(
+    async def _get_user_summary(
         self,
         user_id: str | None,
     ) -> UserSummary | None:
@@ -244,8 +249,10 @@ class AuditService:
             return None
 
         try:
-            user = self.db.execute(
-                select(User).where(User.id == user_id)
+            user = (
+                await self.db.execute(
+                    select(User).where(User.id == user_id).options(selectinload(User.role))
+                )
             ).scalar_one_or_none()
 
             if user is None:
@@ -262,26 +269,10 @@ class AuditService:
 
             return UserSummary(
                 id=str(user.id),
-                full_name=getattr(
-                    user,
-                    "full_name",
-                    None,
-                ),
-                email=getattr(
-                    user,
-                    "email",
-                    None,
-                ),
-                avatar_url=getattr(
-                    user,
-                    "avatar_url",
-                    None,
-                ),
-                color=getattr(
-                    user,
-                    "color",
-                    None,
-                ),
+                full_name=(getattr(user, "full_name", None) or ""),
+                email=(getattr(user, "email", None) or ""),
+                avatar_url=(getattr(user, "avatar_url", None) or ""),
+                color=(getattr(user, "color", None) or ""),
                 role=role_name,
             )
 
@@ -290,7 +281,7 @@ class AuditService:
 
             return None
 
-    def _build_audit_responses(
+    async def _build_audit_responses(
         self,
         audits: list[AuditLog],
     ) -> list[AuditLogResponse]:
@@ -349,11 +340,11 @@ class AuditService:
             elif resource_type == "sprint":
                 sprint_ids.add(resource_id)
 
-        task_map = self._get_task_map(task_ids)
-        story_map = self._get_story_map(story_ids)
-        project_map = self._get_project_map(project_ids)
-        sprint_map = self._get_sprint_map(sprint_ids)
-        user_map = self._get_user_map(user_ids)
+        task_map = await self._get_task_map(task_ids)
+        story_map = await self._get_story_map(story_ids)
+        project_map = await self._get_project_map(project_ids)
+        sprint_map = await self._get_sprint_map(sprint_ids)
+        user_map = await self._get_user_map(user_ids)
 
         responses = []
 
@@ -458,7 +449,7 @@ class AuditService:
 
         return responses
 
-    def _get_task_map(
+    async def _get_task_map(
         self,
         ids: set[str],
     ) -> dict[str, dict]:
@@ -466,12 +457,14 @@ class AuditService:
         if not ids:
             return {}
 
-        rows = self.db.execute(
-            select(
-                Task.id,
-                Task.title,
-                Task.key,
-            ).where(Task.id.in_(ids))
+        rows = (
+            await self.db.execute(
+                select(
+                    Task.id,
+                    Task.title,
+                    Task.key,
+                ).where(Task.id.in_(ids))
+            )
         ).all()
 
         return {
@@ -482,7 +475,7 @@ class AuditService:
             for row in rows
         }
 
-    def _get_story_map(
+    async def _get_story_map(
         self,
         ids: set[str],
     ) -> dict[str, dict]:
@@ -490,11 +483,13 @@ class AuditService:
         if not ids:
             return {}
 
-        rows = self.db.execute(
-            select(
-                UserStory.id,
-                UserStory.title,
-            ).where(UserStory.id.in_(ids))
+        rows = (
+            await self.db.execute(
+                select(
+                    UserStory.id,
+                    UserStory.title,
+                ).where(UserStory.id.in_(ids))
+            )
         ).all()
 
         return {
@@ -504,7 +499,7 @@ class AuditService:
             for row in rows
         }
 
-    def _get_project_map(
+    async def _get_project_map(
         self,
         ids: set[str],
     ) -> dict[str, str]:
@@ -512,16 +507,18 @@ class AuditService:
         if not ids:
             return {}
 
-        rows = self.db.execute(
-            select(
-                Project.id,
-                Project.name,
-            ).where(Project.id.in_(ids))
+        rows = (
+            await self.db.execute(
+                select(
+                    Project.id,
+                    Project.name,
+                ).where(Project.id.in_(ids))
+            )
         ).all()
 
         return {str(row.id): row.name for row in rows}
 
-    def _get_sprint_map(
+    async def _get_sprint_map(
         self,
         ids: set[str],
     ) -> dict[str, str]:
@@ -529,16 +526,18 @@ class AuditService:
         if not ids:
             return {}
 
-        rows = self.db.execute(
-            select(
-                Sprint.id,
-                Sprint.name,
-            ).where(Sprint.id.in_(ids))
+        rows = (
+            await self.db.execute(
+                select(
+                    Sprint.id,
+                    Sprint.name,
+                ).where(Sprint.id.in_(ids))
+            )
         ).all()
 
         return {str(row.id): row.name for row in rows}
 
-    def _get_user_map(
+    async def _get_user_map(
         self,
         ids: set[str],
     ) -> dict[str, UserSummary]:
@@ -546,7 +545,13 @@ class AuditService:
         if not ids:
             return {}
 
-        users = self.db.execute(select(User).where(User.id.in_(ids))).scalars().all()
+        users = (
+            await self.db.execute(
+                select(User)
+                .where(User.id.in_(ids))
+                .options(selectinload(User.role))
+            )
+        ).scalars().all()
 
         result = {}
 

@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from src.config import get_logger
 from src.database import get_db
-from src.public.schemas import (
+from src.public.schema import (
     CountriesResponse,
     FullHealthResponse,
     HealthDependencies,
@@ -17,7 +17,7 @@ from src.public.service import CountryCache, PublicService
 
 logger = get_logger(__name__)
 
-router = APIRouter(tags=["Public"])
+router = APIRouter()
 country_cache = CountryCache(ttl=timedelta(hours=24))
 
 
@@ -25,7 +25,7 @@ def get_public_service(db: Session = Depends(get_db)) -> PublicService:
     return PublicService(db=db, country_cache=country_cache)
 
 
-@router.get("/health", response_model=HealthResponse | FullHealthResponse)
+@router.get("/health", response_model=HealthResponse | FullHealthResponse, tags=["Public"])
 def health_check(full: bool = Query(default=False), db: Session = Depends(get_db)):
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

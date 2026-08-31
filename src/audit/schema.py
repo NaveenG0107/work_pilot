@@ -20,8 +20,8 @@ class UserSummary(BaseModel):
     id: str
     full_name: str = Field(default="", serialization_alias="name")
     email: str = ""
-    avatar_url: str = ""
-    color: str = ""
+    avatar_url: str | None = Field(default=None, exclude_if=omit_empty)
+    color: str | None = Field(default=None, exclude_if=omit_empty)
     role: str | None = Field(default=None, exclude_if=omit_empty)
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
@@ -48,7 +48,7 @@ class AuditLogResponse(BaseModel):
     id: str
 
     project_id: str | None = Field(default=None, exclude_if=omit_empty)
-    project_name: str = Field(default="", exclude_if=omit_empty)
+    project_name: str | None = Field(default=None, exclude_if=omit_empty)
 
     organization_id: str | None = Field(default=None, exclude_if=omit_empty)
 
@@ -58,19 +58,19 @@ class AuditLogResponse(BaseModel):
     resource_type: str
     resource_id: str | None = Field(default=None, exclude_if=omit_empty)
 
-    details: str = Field(default="", exclude_if=omit_empty)
+    details: str | None = Field(default=None, exclude_if=omit_empty)
     created_at: datetime
 
-    task_key: str = Field(default="", exclude_if=omit_empty)
+    task_key: str | None = Field(default=None, exclude_if=omit_empty)
     task_id: str | None = Field(default=None, exclude_if=omit_empty)
 
     user_story_id: str | None = Field(default=None, exclude_if=omit_empty)
 
-    title: str = Field(default="", exclude_if=omit_empty)
+    title: str | None = Field(default=None, exclude_if=omit_empty)
 
-    task_name: str = Field(default="", exclude_if=omit_empty)
-    user_story_name: str = Field(default="", exclude_if=omit_empty)
-    sprint_name: str = Field(default="", exclude_if=omit_empty)
+    task_name: str | None = Field(default=None, exclude_if=omit_empty)
+    user_story_name: str | None = Field(default=None, exclude_if=omit_empty)
+    sprint_name: str | None = Field(default=None, exclude_if=omit_empty)
 
     type: str | None = Field(default=None, exclude_if=omit_empty)
 
