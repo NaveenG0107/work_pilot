@@ -8,11 +8,15 @@ import uuid
 import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Optional, Union, Dict, Tuple
+from functools import wraps
+from typing import Any, Callable, Optional, Union, Dict, Tuple
 
 import bcrypt
 import jwt  # PyJWT
-from fastapi import Response
+from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from src.auth.schema import UserProfile
 
 from src.utils.setting import get_settings
@@ -53,8 +57,6 @@ def success_response(
         "meta": meta,
     }
 
-
-from fastapi.responses import JSONResponse
 
 class APIError(JSONResponse):
     """Error envelope that also exposes .code/.message/.status_code as attributes.
@@ -410,3 +412,194 @@ def UserProfileFromModel(user_model: Any) -> UserProfile:
         joined_at=getattr(user_model, "joined_at", None),
         require_password_change=user_model.require_password_change,
     )
+
+
+# ---------------------------------------------------------------------------
+# GoJSONResponse — Gin content type (application/json; charset=utf-8)
+# ---------------------------------------------------------------------------
+
+class GoJSONResponse(JSONResponse):
+    """JSON response with the content type emitted by Gin."""
+
+    media_type = "application/json; charset=utf-8"
+
+
+# ---------------------------------------------------------------------------
+# Bearer scheme + token extraction (mirrors Go transport/http middleware)
+# ---------------------------------------------------------------------------
+
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Access token obtained from the login endpoint",
+)
+
+
+def _extract_bearer_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str | None:
+    """Return the bearer token from the header (or ``access_token`` cookie)."""
+    token: str | None = None
+
+    if isinstance(credentials, HTTPAuthorizationCredentials) and credentials.credentials:
+        token = credentials.credentials.strip()
+    else:
+        authorization = request.headers.get("Authorization", "")
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            token = value.strip()
+        elif request.cookies.get("access_token"):
+            token = request.cookies["access_token"]
+
+    return token or None
+
+
+def _set_auth_state(request: Request, claims: Dict[str, Any]) -> None:
+    """Populate request.state from verified JWT claims."""
+    user_id = claims.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token claims",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    request.state.user_id = str(user_id)
+    request.state.organization_id = (
+        str(claims["organization_id"])
+        if claims.get("organization_id") is not None
+        else None
+    )
+    request.state.role = str(claims.get("role") or "")
+    request.state.claims = claims
+
+
+# ---------------------------------------------------------------------------
+# require_jwt — works BOTH as a FastAPI dependency and as a @decorator
+# ---------------------------------------------------------------------------
+
+def require_jwt(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+):
+    """Verify the request JWT and expose the claims via ``request.state``.
+
+    Two usage modes (Go-style parity):
+
+    1. Dependency mode (router/route level)::
+
+        router = APIRouter(dependencies=[Depends(require_jwt)])
+        current = Depends(require_jwt)
+
+    2. Decorator mode on an endpoint that accepts ``request: Request``::
+
+        @router.get("/...")
+        @require_jwt
+        async def handler(request: Request, ...):
+            ...
+    """
+    if callable(request):
+        # Decorator mode: ``request`` is actually the endpoint function.
+        return _require_jwt_decorator(request)
+
+    # Dependency mode: verify the JWT and populate request.state.
+    token = _extract_bearer_token(request, credentials)
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    claims, error = verify_jwt(token)
+
+    if error or claims is None:
+        message = (
+            "Token expired"
+            if error and error.get("code") == "TOKEN_EXPIRED"
+            else "Invalid token"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=message,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    _set_auth_state(request, claims)
+    return claims
+
+
+def _require_jwt_decorator(endpoint: Callable) -> Callable:
+    """Wrap an endpoint so it verifies the JWT before running."""
+
+    @wraps(endpoint)
+    async def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        request = kwargs.get("request")
+        if request is None or not isinstance(request, Request):
+            request = next(
+                (arg for arg in args if isinstance(arg, Request)),
+                None,
+            )
+
+        if request is None:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "code": "UNAUTHORIZED",
+                    "status_code": 401,
+                    "message": "Authentication required",
+                },
+            )
+
+        auth_error = await authenticate_request(request)
+        if auth_error is not None:
+            return auth_error
+
+        return await endpoint(*args, **kwargs)
+
+    return _wrapper
+
+
+# ---------------------------------------------------------------------------
+# authenticate_request — Go-style middleware helper
+# ---------------------------------------------------------------------------
+
+async def authenticate_request(request: Request) -> Optional[JSONResponse]:
+    """Verify the request JWT.
+
+    Returns a JSON error response on failure (401 Unauthorized) or ``None``
+    when the token is valid (with ``request.state`` populated). Call it at the
+    top of a route handler:
+
+        auth_error = await authenticate_request(request)
+        if auth_error is not None:
+            return auth_error
+    """
+    try:
+        require_jwt(request)
+        return None
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "code": "UNAUTHORIZED",
+                "status_code": status.HTTP_401_UNAUTHORIZED,
+                "message": exc.detail,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
+# jwt_handler — async FastAPI dependency (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
+
+async def jwt_handler(request: Request) -> Dict[str, Any]:
+    """Verify the request JWT and expose its claims through ``request.state``.
+
+    Tokens are accepted from either ``Authorization: Bearer <token>`` or the
+    ``access_token`` cookie. Keeping this dependency inside ``core`` lets
+    non-auth routers protect themselves without changing the auth module.
+    """
+    require_jwt(request)
+    return request.state.claims

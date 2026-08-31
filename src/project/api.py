@@ -14,8 +14,12 @@ from src.project.schema import (
     UpdateProjectRequest,
 )
 from src.project.service import ProjectService, ProjectServiceError
-from src.utils.jwt_handler import authenticate_request, bearer_scheme, require_jwt
-from src.utils.responses import GoJSONResponse as JSONResponse
+from src.utils.core import (
+    GoJSONResponse as JSONResponse,
+    authenticate_request,
+    bearer_scheme,
+    require_jwt,
+)
 
 
 class GoValidationRoute(APIRoute):

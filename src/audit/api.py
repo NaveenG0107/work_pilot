@@ -17,8 +17,7 @@ from src.audit.schema import (
 from src.audit.service import AuditService
 from src.config import get_logger
 from src.database import get_db
-from src.utils.jwt_handler import authenticate_request, bearer_scheme
-from src.utils.responses import GoJSONResponse as JSONResponse
+from src.utils.core import GoJSONResponse as JSONResponse, authenticate_request, bearer_scheme
 
 
 logger = get_logger(__name__)
