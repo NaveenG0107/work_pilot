@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 class CountryResponse(BaseModel):
     id: str
     name: str

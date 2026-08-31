@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from src.config import get_logger
 from src.public.models import Country
-from src.public.schemas import CountryResponse
+from src.public.schema import CountryResponse
 
 logger = get_logger(__name__)
 

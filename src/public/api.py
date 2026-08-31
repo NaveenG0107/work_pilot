@@ -21,20 +21,12 @@ router = APIRouter(tags=["Public"])
 country_cache = CountryCache(ttl=timedelta(hours=24))
 
 
-def get_public_service(
-    db: Session = Depends(get_db),
-) -> PublicService:
+def get_public_service(db: Session = Depends(get_db)) -> PublicService:
     return PublicService(db=db, country_cache=country_cache)
 
 
-@router.get(
-    "/health",
-    response_model=HealthResponse | FullHealthResponse,
-)
-def health_check(
-    full: bool = Query(default=False),
-    db: Session = Depends(get_db),
-):
+@router.get("/health", response_model=HealthResponse | FullHealthResponse)
+def health_check(full: bool = Query(default=False), db: Session = Depends(get_db)):
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     if not full:
@@ -85,18 +77,8 @@ def health_check(
         )
 
 
-@router.get(
-    "/countries",
-    response_model=CountriesResponse,
-    tags=["Lookup"],
-)
-def get_all_countries(
-    name: str | None = Query(
-        default=None,
-        description="Filter countries by name",
-    ),
-    service: PublicService = Depends(get_public_service),
-):
+@router.get("/countries", response_model=CountriesResponse, tags=["Lookup"])
+def get_all_countries(name: str | None = Query(default=None, description="Filter countries by name"), service: PublicService = Depends(get_public_service),):
     try:
         countries = service.get_countries(name=name)
 
