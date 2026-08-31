@@ -9,7 +9,7 @@ from src.database import Base, engine
 from src.auth.api import router as auth_router
 from src.public.api import router as public_router
 from src.project.api import router as project_router
-# from src.audit.api import router as audit_router
+from src.audit.api import router as audit_router
 
 
 
@@ -67,13 +67,7 @@ app.include_router(
     prefix="/api/v1",
 )
 
-
-@app.get("/health_check")
-def health_check():
-    return {"message": "Work Pilot backend is running"}
-
-
-# app.include_router(
-#     audit_router,
-#     prefix="/api/v1",
-# )
+app.include_router(
+    audit_router,
+    prefix="/api/v1",
+)
