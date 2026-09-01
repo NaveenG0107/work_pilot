@@ -711,17 +711,24 @@ async def upload_attachment(
                 f"Maximum of {max_files} files can be uploaded per request.",
             )
         files: list[tuple[str, bytes]] = []
+        max_size_bytes = max_size_mb * 1024 * 1024
         for upload in uploads:
-            if upload.size is not None and upload.size > max_size_mb * 1024 * 1024:
+            if upload.size is not None and upload.size > max_size_bytes:
                 raise TaskServiceError(
                     413,
                     "PAYLOAD_TOO_LARGE",
                     f"File {upload.filename} exceeds the maximum allowed size of {max_size_mb} MB.",
                 )
             try:
-                content = await upload.read()
+                content = await upload.read(max_size_bytes + 1)
             finally:
                 await upload.close()
+            if len(content) > max_size_bytes:
+                raise TaskServiceError(
+                    413,
+                    "PAYLOAD_TOO_LARGE",
+                    f"File {upload.filename} exceeds the maximum allowed size of {max_size_mb} MB.",
+                )
             files.append((upload.filename or "attachment", content))
         attachments = await service.upload_attachments(
             project_id, task_id, user_id, files
@@ -771,13 +778,13 @@ async def download_attachment(
     attachment_id: str,
     service: TaskService = Depends(get_task_service),
 ):
-    del task_id  # The Go handler validates ownership through the attachment record.
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = parse_uuid(task_id)
         attachment_id = parse_uuid(attachment_id)
         content, filename, mime_type, size = await service.download_attachment(
-            project_id, attachment_id, user_id
+            project_id, task_id, attachment_id, user_id
         )
         filename = filename.replace("\r", "").replace("\n", "")
         fallback = filename.encode("ascii", "ignore").decode() or "attachment"
@@ -810,12 +817,12 @@ async def delete_attachment(
     attachment_id: str,
     service: TaskService = Depends(get_task_service),
 ):
-    del task_id  # Matches the Go service's attachment-based hierarchy check.
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = parse_uuid(task_id)
         attachment_id = parse_uuid(attachment_id)
-        await service.delete_attachment(project_id, attachment_id, user_id)
+        await service.delete_attachment(project_id, task_id, attachment_id, user_id)
         return success_response("Attachment deleted successfully")
     except Exception as exc:
         return failure(exc)

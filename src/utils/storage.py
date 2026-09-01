@@ -5,7 +5,8 @@ Mirrors internal/pkg/storage/s3.go in Go backend.
 """
 
 from io import BytesIO
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
+
 import boto3
 from botocore.client import Config
 
@@ -15,14 +16,34 @@ from src.utils.setting import get_settings
 logger = get_logger(__name__)
 
 
+class StorageConfigurationError(RuntimeError):
+    """Raised when required S3/Supabase configuration is missing."""
+
+
+def validate_s3_configuration() -> None:
+    """Ensure all settings required for Supabase S3 operations are present."""
+    settings = get_settings()
+    required = {
+        "S3_ENDPOINT": settings.s3_endpoint,
+        "S3_ACCESS_KEY_ID": settings.s3_access_key_id,
+        "S3_SECRET_ACCESS_KEY": settings.s3_secret_access_key,
+        "S3_BUCKET": settings.s3_bucket,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise StorageConfigurationError(
+            f"S3 storage is not configured; missing: {', '.join(missing)}"
+        )
+
+
 def get_s3_client():
     """Builds an S3-compatible client (AWS S3 / Supabase S3 / MinIO) using centralized Settings."""
+    validate_s3_configuration()
     settings = get_settings()
-    endpoint_url = settings.s3_endpoint if settings.s3_endpoint else None
 
     return boto3.client(
         "s3",
-        endpoint_url=endpoint_url,
+        endpoint_url=settings.s3_endpoint,
         region_name=settings.s3_region or "ap-south-1",
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
@@ -30,17 +51,30 @@ def get_s3_client():
     )
 
 
-def upload_comment_attachment_to_s3(
+def get_public_url(key: str) -> str:
+    """Build the public object URL for an S3 storage key."""
+    validate_s3_configuration()
+    settings = get_settings()
+    endpoint = (settings.s3_public_endpoint or settings.s3_endpoint).rstrip("/")
+    if endpoint.endswith("/s3"):
+        endpoint = endpoint[:-3] + "/object/public"
+    elif "/s3/" in endpoint:
+        endpoint = endpoint.replace("/s3/", "/object/public/", 1)
+    elif "/object/public" not in endpoint:
+        endpoint += "/object/public"
+    return f"{endpoint}/{settings.s3_bucket}/{key}"
+
+
+def upload_s3_object(
     file_bytes: bytes,
     key: str,
     content_type: str,
 ) -> str:
-    """
-    Uploads a comment attachment to S3 and returns the public URL.
-    Mirrors UploadCommentAttachment in internal/pkg/storage/s3.go.
-    """
+    """Upload bytes to S3-compatible storage and return their public URL."""
     settings = get_settings()
-    logger.info("Uploading object to S3 key: %s (size: %d bytes)", key, len(file_bytes))
+    logger.info(
+        "Uploading object to S3 key: %s (size: %d bytes)", key, len(file_bytes)
+    )
     client = get_s3_client()
     client.put_object(
         Bucket=settings.s3_bucket,
@@ -49,13 +83,18 @@ def upload_comment_attachment_to_s3(
         ContentType=content_type,
         ContentLength=len(file_bytes),
     )
-
-    public_endpoint = settings.s3_public_endpoint.rstrip("/") if settings.s3_public_endpoint else (
-        settings.s3_endpoint.rstrip("/") if settings.s3_endpoint else "https://s3.amazonaws.com"
-    )
-    public_url = f"{public_endpoint}/{settings.s3_bucket}/{key}"
+    public_url = get_public_url(key)
     logger.info("Attachment successfully uploaded to S3: %s", public_url)
     return public_url
+
+
+def upload_comment_attachment_to_s3(
+    file_bytes: bytes,
+    key: str,
+    content_type: str,
+) -> str:
+    """Backward-compatible wrapper used by the comment attachment service."""
+    return upload_s3_object(file_bytes, key, content_type)
 
 
 def delete_s3_object(key: str) -> None:
@@ -83,21 +122,24 @@ def delete_object(storage_key: str) -> None:
     delete_s3_object(storage_key)
 
 
-def get_s3_object(key: str) -> Tuple[any, int, str]:
+def get_s3_object(key: str) -> Tuple[Any, int, str]:
     """
     Retrieves an object stream from S3.
     Mirrors GetObject in internal/pkg/storage/s3.go.
     Returns (body_stream, content_length, content_type).
     """
     from fastapi import HTTPException, status
+
     settings = get_settings()
-    client = get_s3_client()
     try:
+        client = get_s3_client()
         response = client.get_object(Bucket=settings.s3_bucket, Key=key)
         stream = response["Body"]
         content_length = response.get("ContentLength", 0)
         content_type = response.get("ContentType", "application/octet-stream")
         return stream, content_length, content_type
+    except StorageConfigurationError:
+        raise
     except Exception as exc:
         logger.error("Failed to get file from S3 (key: %s): %s", key, exc)
         raise HTTPException(

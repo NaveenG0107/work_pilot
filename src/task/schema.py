@@ -12,7 +12,6 @@ from pydantic import (
     model_validator,
 )
 
-
 TASK_STATUSES = [
     "todo",
     "in_progress",
