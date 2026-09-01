@@ -1,13 +1,7 @@
 # src/utils/email.py
 """
 Email sending via Brevo (primary) with Resend as fallback.
-
-Mirrors internal/pkg/email in Go:
-  - sendEmail -> sendViaBrevo (primary) -> sendViaResend (fallback)
-  - SendOrganizationInvitation -> validate address, render template, send
-
-HTML templates live in src/utils/templates/ (mirrors
-internal/pkg/utils/templates/*.html in Go). Credentials are read from env
+HTML templates live in src/utils/templates/. Credentials are read from env
 (BREVO_*/RESEND_*) and can be left empty until provisioned.
 """
 
@@ -31,7 +25,7 @@ logger = get_logger(__name__)
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# Where HTML email templates live. Mirrors internal/pkg/utils/templates in Go.
+# Where HTML email templates live.
 _TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
 
@@ -127,7 +121,7 @@ def _render_go_template(source: str, data: Dict[str, Any]) -> str:
 def _render_organization_invitation(
     organization_name: str, invite_link: str, temp_password: str = ""
 ) -> str:
-    """Render the organization invitation HTML (mirrors RenderEmbeddedTemplate)."""
+    """Render the organization invitation HTML."""
     return _render_template(
         "organization_invitation.html",
         {
@@ -208,7 +202,7 @@ def _execute(req: urllib_request.Request) -> None:
 
 
 def send_email(to_email: str, subject: str, html_content: str) -> None:
-    """Primary: Brevo API; fallback: Resend API. Mirrors sendEmail in Go."""
+    """Primary: Brevo API; fallback: Resend API."""
     brevo_from = BREVO_FROM_EMAIL or RESEND_FROM_EMAIL
     brevo_err: Optional[Exception] = None
     try:
@@ -234,7 +228,7 @@ def send_organization_invitation(
     invite_link: str,
     temporary_password: str = "",
 ) -> None:
-    """Send an organization invitation email (mirrors SendOrganizationInvitation)."""
+    """Send an organization invitation email."""
     if not _is_valid_email(email):
         raise ValueError(f"invalid recipient email address: {email}")
 

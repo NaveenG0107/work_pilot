@@ -1,7 +1,6 @@
 # src/utils/storage.py
 """
 S3 Object Storage implementation.
-Mirrors internal/pkg/storage/s3.go in Go backend.
 """
 
 from io import BytesIO
@@ -100,7 +99,6 @@ def upload_comment_attachment_to_s3(
 def delete_s3_object(key: str) -> None:
     """
     Deletes an object from S3.
-    Mirrors DeleteObject in internal/pkg/storage/s3.go.
     """
     settings = get_settings()
     logger.info("Deleting object from S3: %s", key)
@@ -125,7 +123,6 @@ def delete_object(storage_key: str) -> None:
 def get_s3_object(key: str) -> Tuple[Any, int, str]:
     """
     Retrieves an object stream from S3.
-    Mirrors GetObject in internal/pkg/storage/s3.go.
     Returns (body_stream, content_length, content_type).
     """
     from fastapi import HTTPException, status

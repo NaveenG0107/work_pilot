@@ -188,8 +188,6 @@ class PaginationResponse(TaskSchema):
 
 
 class TaskResponse(TaskSchema):
-    # Field order intentionally mirrors the Go struct because JSON preserves
-    # struct/model field order in both implementations.
     id: str
     project_id: str
     project_name: str = Field(default="", exclude_if=omit_empty)

@@ -22,8 +22,6 @@ def _extract_token(request: Request) -> Optional[str]:
 
 async def get_current_user(request: Request) -> dict:
     """
-    FastAPI dependency mirroring Go's ValidateJWT middleware.
-
     Populates and returns a dict with `user_id`, `role` and `organization_id`
     decoded from the access token. Raises 401/403 on missing/invalid tokens.
     """
@@ -57,8 +55,7 @@ async def get_current_user(request: Request) -> dict:
 
 def require_role(*allowed_roles: str):
     """
-    Dependency factory mirroring Go's Authorize(rolesAllowed ...) middleware.
-
+    Role authorization dependency.
     Usage: `current_user: dict = Depends(require_role("admin", "member"))`
     """
 

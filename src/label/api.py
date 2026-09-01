@@ -35,7 +35,6 @@ async def create_label(
 ):
     """
     Create a new label for a project.
-    Mirrors lbl.POST("", middleware.ValidateJWT(), labelHandler.CreateLabel)
     """
     valid_project_id = validate_uuid(project_id)
     user_id = current_user["user_id"]
@@ -71,7 +70,6 @@ async def get_labels(
 ):
     """
     Get all labels for a project.
-    Mirrors lbl.GET("", middleware.ValidateJWT(), labelHandler.GetLabels)
     """
     valid_project_id = validate_uuid(project_id)
     user_id = current_user["user_id"]
@@ -110,7 +108,6 @@ async def update_label(
 ):
     """
     Update an existing label for a project.
-    Mirrors lbl.PATCH("/:label_id", middleware.ValidateJWT(), labelHandler.UpdateLabel)
     """
     valid_project_id = validate_uuid(project_id)
     valid_label_id = validate_uuid(label_id)
@@ -151,7 +148,6 @@ async def delete_label(
 ):
     """
     Delete an existing label for a project.
-    Mirrors lbl.DELETE("/:label_id", middleware.ValidateJWT(), labelHandler.DeleteLabel)
     """
     valid_project_id = validate_uuid(project_id)
     valid_label_id = validate_uuid(label_id)

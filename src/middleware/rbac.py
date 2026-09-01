@@ -12,7 +12,7 @@ from src.organization.models import Role
 from src.project.models import ProjectMember
 
 
-# DEFAULT_ROLE_PERMISSIONS mirrors defaultRolePermissions from authorization.go
+# Default role permissions mapping
 DEFAULT_ROLE_PERMISSIONS = {
     "org_admin": [
         "projects:view", "projects:add", "projects:modify", "projects:delete",

@@ -28,9 +28,6 @@ class LabelService:
     async def _check_permission(
         self, user: User, project: Project, resource: str, action: str
     ) -> bool:
-        """
-        Mirrors CheckPermission in authorization.go
-        """
         # Super admins cannot perform project activities
         if user.role and user.role.name == "super_admin":
             return False

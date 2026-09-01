@@ -42,7 +42,6 @@ async def create_custom_status(
 ):
     """
     Create a new custom status for a project.
-    Mirrors st.POST("", middleware.ValidateJWT(), statusHandler.CreateStatus)
     """
     logger.info("Received request to create custom status in project %s", project_id)
     valid_project_id = validate_uuid(project_id, "project_id")
@@ -93,7 +92,6 @@ async def get_custom_statuses(
 ):
     """
     Get all custom statuses for a project.
-    Mirrors st.GET("", middleware.ValidateJWT(), statusHandler.GetStatuses)
     """
     logger.info("Received request to get custom statuses for project %s", project_id)
     valid_project_id = validate_uuid(project_id, "project_id")
@@ -145,7 +143,6 @@ async def update_custom_status(
 ):
     """
     Update an existing custom status.
-    Mirrors st.PATCH("/:status_id", middleware.ValidateJWT(), statusHandler.UpdateStatus)
     """
     logger.info("Received request to update custom status %s in project %s", status_id, project_id)
     valid_project_id = validate_uuid(project_id, "project_id")
@@ -199,7 +196,6 @@ async def delete_custom_status(
 ):
     """
     Delete an existing custom status.
-    Mirrors st.DELETE("/:status_id", middleware.ValidateJWT(), statusHandler.DeleteStatus)
     """
     logger.info("Received request to delete custom status %s in project %s", status_id, project_id)
     valid_project_id = validate_uuid(project_id, "project_id")
