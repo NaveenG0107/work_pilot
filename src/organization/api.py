@@ -21,10 +21,12 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.middleware.auth import get_current_user
+from src.auth.deps import get_current_user
+
 from src.utils import storage as storage_service
 from src.organization.schemas import (
     CreateRoleRequest,
@@ -44,7 +46,7 @@ from src.response import error, success
 router = APIRouter(tags=["Organizations"])
 
 
-def _service(db: Session = Depends(get_db)) -> OrganizationService:
+async def _service(db: AsyncSession = Depends(get_db)) -> OrganizationService:
     return OrganizationService(db)
 
 
@@ -52,12 +54,12 @@ def _service(db: Session = Depends(get_db)) -> OrganizationService:
 
 
 @router.delete("/organization/delete")
-def delete_organization(
+async def delete_organization(
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    service.delete_organization(org_id, UUID(current_user["user_id"]))
+    await service.delete_organization(org_id, UUID(current_user["user_id"]))
     return success("Organization deleted successfully", data={"organizationID": str(org_id)})
 
 
@@ -65,7 +67,7 @@ def delete_organization(
 
 
 @router.patch("/organization/update")
-def update_organization(
+async def update_organization(
     name: Optional[str] = Form(None),
     domain: Optional[str] = Form(None),
     team_size: Optional[str] = Form(None),
@@ -86,13 +88,13 @@ def update_organization(
     if country_id:
         if uploaded_key:
             storage_service.delete_object(uploaded_key)
-        country = _get_country(service.db, country_id)
+        country = await _get_country(service.db, country_id)
         if country is None:
-            return error("Invalid country id", 400)
+            return error("Invalid country id", 400, code="VALIDATION_ERROR")
         country_name = country.name
 
-    service.update_organization(
-        org_id, name=name, domain=domain, team_size=team_size, country=country_name
+    await service.update_organization(
+        org_id, UUID(current_user["user_id"]), name=name, domain=domain, team_size=team_size, country=country_name
     )
     return success("Updated Organization successfully", data={"organizationID": str(org_id)})
 
@@ -101,12 +103,12 @@ def update_organization(
 
 
 @router.get("/organization/get")
-def get_organization(
+async def get_organization(
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    org = service.get_organization_by_id(org_id, UUID(current_user["user_id"]))
+    org = await service.get_organization_by_id(org_id, UUID(current_user["user_id"]))
     return success(
         "Organization detail received successfully",
         data=service.to_summary(org).model_dump(mode="json"),
@@ -117,12 +119,12 @@ def get_organization(
 
 
 @router.get("/organization")
-def get_all_organizations(
+async def get_all_organizations(
     filter_: OrganizationFilterRequest = Query(),
     service: OrganizationService = Depends(_service),
     _: dict = Depends(get_current_user),
 ):
-    summaries, pagination = service.get_all_organizations(filter_)
+    summaries, pagination = await service.get_all_organizations(filter_)
     return success(
         "All organizations retrieved successfully",
         data=[s.model_dump(mode="json") for s in summaries],
@@ -134,13 +136,13 @@ def get_all_organizations(
 
 
 @router.patch("/organization/status/{organization_id}")
-def update_organization_status(
+async def update_organization_status(
     organization_id: UUID,
     payload: UpdateOrganizationStatusRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
-    service.update_organization_status(organization_id, payload.is_active, UUID(current_user["user_id"]))
+    await service.update_organization_status(organization_id, payload.is_active, UUID(current_user["user_id"]))
     message = "Organization activated successfully" if payload.is_active else "Organization deactivated successfully"
     return success(
         message,
@@ -152,7 +154,7 @@ def update_organization_status(
 
 
 @router.post("/organization/create", status_code=201)
-def create_organization(
+async def create_organization(
     name: str = Form(...),
     domain: str = Form(...),
     industry: str = Form(...),
@@ -168,13 +170,13 @@ def create_organization(
         "Information_Technology", "Finance", "Healthcare", "Education",
         "Manufacturing", "Retail", "Real Estate", "Logistics", "Hospitality", "Other",
     }:
-        return error("Invalid industry", 400)
+        return error("Invalid industry", 400, code="VALIDATION_ERROR")
     if team_size not in {"1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"}:
-        return error("Invalid team_size", 400)
+        return error("Invalid team_size", 400, code="VALIDATION_ERROR")
 
-    country = _get_country(service.db, country_id)
+    country = await _get_country(service.db, country_id)
     if country is None:
-        return error("Invalid country id", 400)
+        return error("Invalid country id", 400, code="VALIDATION_ERROR")
 
     logo_url = None
     uploaded_key = None
@@ -184,7 +186,7 @@ def create_organization(
         )
 
     try:
-        tokens = service.create_organization(
+        tokens = await service.create_organization(
             name=name, domain=domain, industry=industry, team_size=team_size,
             country=country.name, created_by=user_id, logo_url=logo_url,
         )
@@ -193,10 +195,8 @@ def create_organization(
             storage_service.delete_object(uploaded_key)
         raise
 
-    base_url = os.getenv("FRONTEND_DASHBOARD_URL", "http://localhost:3000")
     response = success(
         "Successfully Created",
-        data=tokens,
         status_code=201,
     )
     secure = os.getenv("COOKIE_SECURE", "") in ("true", "1", "yes")
@@ -213,13 +213,13 @@ def create_organization(
 
 
 @router.patch("/organization/user-status")
-def update_user_status(
+async def update_user_status(
     payload: UserStatusRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    service.update_user_status(org_id, payload.user_id, payload.is_active)
+    await service.update_user_status(org_id, payload.user_id, payload.is_active)
     return success(
         "Updated User Status successfully",
         data={"OrganizationID": str(org_id), "user_id": str(payload.user_id)},
@@ -230,15 +230,15 @@ def update_user_status(
 
 
 @router.patch("/organization/user-role")
-def update_user_role(
+async def update_user_role(
     payload: UserRoleRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     if payload.role not in ("org_admin", "member"):
-        return error("Role must be one of org_admin or member.", 400)
+        return error("Role must be one of org_admin or member.", 400, code="VALIDATION_ERROR")
     org_id = UUID(current_user["organization_id"])
-    service.update_user_role(org_id, payload.user_id, payload.role)
+    await service.update_user_role(org_id, payload.user_id, payload.role)
     return success(
         "Updated User Role successfully",
         data={"OrganizationID": str(org_id), "user_id": str(payload.user_id)},
@@ -249,13 +249,13 @@ def update_user_role(
 
 
 @router.get("/organization/get-users")
-def get_users_in_organization(
+async def get_users_in_organization(
     filter_: OrganizationMemberListFilter = Query(),
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    users, pagination = service.get_users_in_organization(org_id, filter_)
+    users, pagination = await service.get_users_in_organization(org_id, filter_)
     return success(
         "Organization detail received successfully",
         data=[u.model_dump(mode="json") for u in users],
@@ -267,12 +267,12 @@ def get_users_in_organization(
 
 
 @router.get("/organization/all-members")
-def get_all_members(
+async def get_all_members(
     filter_: GlobalMemberListFilter = Query(),
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
-    users, pagination = service.get_all_members(filter_)
+    users, pagination = await service.get_all_members(filter_)
     return success(
         "All members retrieved successfully.",
         data=[u.model_dump(mode="json") for u in users],
@@ -284,13 +284,13 @@ def get_all_members(
 
 
 @router.delete("/organization/remove-user/{user_id}")
-def remove_user(
+async def remove_user(
     user_id: UUID,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    service.remove_user(org_id, user_id)
+    await service.remove_user(org_id, user_id)
     return success(
         "Removed User Successfully",
         data={"OrganizationID": str(org_id), "user_id": str(user_id)},
@@ -301,14 +301,14 @@ def remove_user(
 
 
 @router.post("/organization/invite", status_code=201)
-def invite_member(
+async def invite_member(
     payload: InviteOrganizationMemberRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
     user_id = UUID(current_user["user_id"])
-    service.invite_member(org_id, user_id, payload)
+    await service.invite_member(org_id, user_id, payload)
     return success("Invitation sent successfully", status_code=201)
 
 
@@ -316,7 +316,7 @@ def invite_member(
 
 
 @router.get("/organization/invitations/accept", response_class=HTMLResponse)
-def accept_invitation_page(
+async def accept_invitation_page(
     token: str = Query(...),
     service: OrganizationService = Depends(_service),
 ):
@@ -324,7 +324,7 @@ def accept_invitation_page(
     dashboard_url = f"{base_url}/dashboard"
     login_url = f"{base_url}/signin"
 
-    invitation = service.get_invitation_by_token(token)
+    invitation = await service.get_invitation_by_token(token)
     if invitation is None:
         return _html(f"<h2>Invitation not found</h2><a href='{dashboard_url}'>Go to dashboard</a>")
     if invitation.status == "accepted":
@@ -345,7 +345,7 @@ def accept_invitation_page(
 
 
 @router.post("/organization/invitations/accept")
-def accept_invitation(
+async def accept_invitation(
     request: Request,
     token: str = Form(None),
     service: OrganizationService = Depends(_service),
@@ -355,7 +355,7 @@ def accept_invitation(
     content_type = request.headers.get("content-type", "")
     is_form = "application/x-www-form-urlencoded" in content_type
     try:
-        service.accept_invitation(UUID(user_id), token)
+        await service.accept_invitation(UUID(user_id), token)
     except HTTPException as exc:
         if is_form:
             return _html(f"<h2>{exc.detail}</h2>")
@@ -373,13 +373,13 @@ def accept_invitation(
 
 
 @router.post("/organization/roles", status_code=201)
-def create_role(
+async def create_role(
     payload: CreateRoleRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    role = service.create_role(org_id, payload)
+    role = await service.create_role(org_id, payload)
     return success(
         "Role created successfully",
         data=role.model_dump(mode="json"),
@@ -388,12 +388,12 @@ def create_role(
 
 
 @router.get("/organization/roles")
-def get_roles(
+async def get_roles(
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    roles = service.get_roles_by_organization_id(org_id)
+    roles = await service.get_roles_by_organization_id(org_id)
     return success(
         "Roles fetched successfully",
         data=[r.model_dump(mode="json") for r in roles],
@@ -401,13 +401,13 @@ def get_roles(
 
 
 @router.get("/organization/roles/{role_id}")
-def get_role(
+async def get_role(
     role_id: UUID,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    role = service.get_role_by_id(org_id, role_id)
+    role = await service.get_role_by_id(org_id, role_id)
     return success(
         "Role fetched successfully",
         data=role.model_dump(mode="json"),
@@ -415,14 +415,14 @@ def get_role(
 
 
 @router.patch("/organization/roles/{role_id}")
-def update_role(
+async def update_role(
     role_id: UUID,
     payload: UpdateRoleRequest,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    role = service.update_role(org_id, role_id, payload)
+    role = await service.update_role(org_id, role_id, payload)
     return success(
         "Role updated successfully",
         data=role.model_dump(mode="json"),
@@ -430,13 +430,13 @@ def update_role(
 
 
 @router.delete("/organization/roles/{role_id}")
-def delete_role(
+async def delete_role(
     role_id: UUID,
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = UUID(current_user["organization_id"])
-    service.delete_role(org_id, role_id)
+    await service.delete_role(org_id, role_id)
     return success("Role deleted successfully", data=None)
 
 
@@ -452,5 +452,6 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _get_country(db: Session, country_id: str) -> Optional[Country]:
-    return db.query(Country).filter(Country.id == country_id).first()
+async def _get_country(db: AsyncSession, country_id: str) -> Optional[Country]:
+    result = await db.execute(select(Country).where(Country.id == country_id))
+    return result.scalar_one_or_none()

@@ -3,7 +3,7 @@
 Organization service logic.
 
 Mirrors internal/services/organization.go. DB access is done inline using the
-synchronous SQLAlchemy Session (the FastAPI project uses sync sessions).
+asynchronous SQLAlchemy AsyncSession (the FastAPI project uses async sessions).
 """
 
 import math
@@ -12,15 +12,15 @@ import re
 import secrets
 import string
 import uuid as uuid_lib
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.audit.models import AuditLog
 from src.auth.models import RefreshToken, User
@@ -170,23 +170,26 @@ def _normalize_page(page: int, page_size: int, default_page_size: int = 10) -> T
     return page, page_size
 
 
-def _fill_audit(db: Session, **kwargs) -> None:
+async def _fill_audit(db: AsyncSession, **kwargs) -> None:
     """Create an audit log row (mirrors s.auditRepo.CreateAuditLog)."""
     kwargs.setdefault("type", "audit")
     kwargs.setdefault("created_at", datetime.now(timezone.utc))
     log = AuditLog(id=str(uuid_lib.uuid4()), **kwargs)
     db.add(log)
-    db.commit()
+    await db.commit()
 
 
 class OrganizationService:
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     # ---------------------------------------------------------------- get
 
-    def get_organization_by_id(self, org_id: UUID, user_id: UUID) -> Organization:
-        org = self.db.query(Organization).filter(Organization.id == str(org_id)).first()
+    async def get_organization_by_id(self, org_id: UUID, user_id: UUID) -> Organization:
+        result = await self.db.execute(
+            select(Organization).where(Organization.id == str(org_id))
+        )
+        org = result.scalar_one_or_none()
         if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
         self.db.add(AuditLog(
@@ -194,7 +197,7 @@ class OrganizationService:
             action="viewed", resource_type="organization", resource_id=str(org_id),
             type="audit", created_at=datetime.now(timezone.utc),
         ))
-        self.db.commit()
+        await self.db.commit()
         return org
 
     def to_summary(self, org: Organization, project_count: int = 0, member_count: int = 0) -> OrganizationSummary:
@@ -206,25 +209,25 @@ class OrganizationService:
             total_projects=project_count, total_members=member_count,
         )
 
-    def get_all_organizations(self, filter_: OrganizationFilterRequest) -> Tuple[List[OrganizationSummary], Pagination]:
+    async def get_all_organizations(self, filter_: OrganizationFilterRequest) -> Tuple[List[OrganizationSummary], Pagination]:
         page, page_size = _normalize_page(filter_.page, filter_.page_size)
-        query = self.db.query(Organization)
+        query = select(Organization)
 
         if filter_.name:
-            query = query.filter(func.lower(Organization.name).like(f"%{filter_.name.strip().lower()}%"))
+            query = query.where(func.lower(Organization.name).like(f"%{filter_.name.strip().lower()}%"))
         if filter_.domain:
-            query = query.filter(func.lower(Organization.domain).like(f"%{filter_.domain.strip().lower()}%"))
+            query = query.where(func.lower(Organization.domain).like(f"%{filter_.domain.strip().lower()}%"))
         if filter_.industry:
-            query = query.filter(func.lower(Organization.industry) == filter_.industry.strip().lower())
+            query = query.where(func.lower(Organization.industry) == filter_.industry.strip().lower())
         if filter_.team_size:
-            query = query.filter(Organization.team_size == filter_.team_size.strip())
+            query = query.where(Organization.team_size == filter_.team_size.strip())
         if filter_.country:
-            query = query.filter(func.lower(Organization.country) == filter_.country.strip().lower())
+            query = query.where(func.lower(Organization.country) == filter_.country.strip().lower())
         if filter_.is_active is not None:
-            query = query.filter(Organization.is_active == filter_.is_active)
+            query = query.where(Organization.is_active == filter_.is_active)
         if filter_.search:
             term = f"%{filter_.search.strip().lower()}%"
-            query = query.filter(or_(
+            query = query.where(or_(
                 func.lower(Organization.name).like(term),
                 func.lower(Organization.domain).like(term),
                 func.lower(Organization.slug).like(term),
@@ -242,37 +245,39 @@ class OrganizationService:
         col = getattr(Organization, sort_by)
         query = query.order_by(col.asc() if sort_order == "ASC" else col.desc())
 
-        total_items = query.count()
-        rows = query.offset((page - 1) * page_size).limit(page_size).all()
+        total_result = await self.db.execute(
+            select(func.count()).select_from(query.subquery())
+        )
+        total_items = total_result.scalar_one()
+        result = await self.db.execute(query.offset((page - 1) * page_size).limit(page_size))
+        rows = result.scalars().all()
 
-        counts = self.get_project_member_counts([str(o.id) for o in rows])
+        counts = await self.get_project_member_counts([str(o.id) for o in rows])
         summaries = [
             self.to_summary(o, project_count=counts[o.id][0], member_count=counts[o.id][1])
             for o in rows
         ]
         return summaries, _page_meta(page, page_size, total_items)
 
-    def get_project_member_counts(self, org_ids: List[str]) -> dict:
+    async def get_project_member_counts(self, org_ids: List[str]) -> dict:
         counts: dict = {oid: (0, 0) for oid in org_ids}
         if not org_ids:
             return counts
-        project_rows = (
-            self.db.query(Project.organization_id, func.count(Project.id))
-            .filter(Project.organization_id.in_(org_ids), Project.deleted_at.is_(None))
+        project_result = await self.db.execute(
+            select(Project.organization_id, func.count(Project.id))
+            .where(Project.organization_id.in_(org_ids), Project.deleted_at.is_(None))
             .group_by(Project.organization_id)
-            .all()
         )
-        member_rows = (
-            self.db.query(User.organization_id, func.count(User.id))
-            .filter(User.organization_id.in_(org_ids), User.deleted_at.is_(None))
+        member_result = await self.db.execute(
+            select(User.organization_id, func.count(User.id))
+            .where(User.organization_id.in_(org_ids), User.deleted_at.is_(None))
             .group_by(User.organization_id)
-            .all()
         )
-        for oid, cnt in project_rows:
+        for oid, cnt in project_result.all():
             counts.setdefault(oid, (0, 0))
             p, m = counts[oid]
             counts[oid] = (cnt, m)
-        for oid, cnt in member_rows:
+        for oid, cnt in member_result.all():
             counts.setdefault(oid, (0, 0))
             p, m = counts[oid]
             counts[oid] = (p, cnt)
@@ -280,8 +285,8 @@ class OrganizationService:
 
     # ---------------------------------------------------------------- create
 
-    def create_organization(self, name: str, domain: str, industry: str, team_size: str,
-                            country: str, created_by: str, logo_url: Optional[str]) -> AuthTokensResponse:
+    async def create_organization(self, name: str, domain: str, industry: str, team_size: str,
+                                  country: str, created_by: str, logo_url: Optional[str]) -> AuthTokensResponse:
         slug = _slug_from_domain(domain)
         org = Organization(
             id=str(uuid_lib.uuid4()), name=name, domain=domain, industry=industry,
@@ -291,85 +296,139 @@ class OrganizationService:
         )
         self.db.add(org)
         try:
-            self.db.commit()
+            await self.db.commit()
         except IntegrityError as exc:
-            self.db.rollback()
+            await self.db.rollback()
             _parse_org_duplicate(exc)
 
-        self.db.refresh(org)
+        await self.db.refresh(org)
 
         # Seed default roles for the new org
-        self.create_default_roles_for_org(org.id)
+        await self.create_default_roles_for_org(org.id)
 
-        org_admin_role = self._get_role_by_name_and_org("org_admin", org.id)
+        org_admin_role = await self._get_role_by_name_and_org("org_admin", org.id)
         if org_admin_role is None:
-            self._hard_delete_org(org.id)
+            await self._hard_delete_org(org.id)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
-        user = self.db.query(User).filter(User.id == created_by).first()
+        user_result = await self.db.execute(
+            select(User)
+            .where(User.id == created_by)
+            .options(selectinload(User.role), selectinload(User.organization))
+        )
+        user = user_result.scalar_one_or_none()
         if user is None:
-            self._hard_delete_org(org.id)
+            await self._hard_delete_org(org.id)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
         user.organization_id = org.id
         user.role_id = org_admin_role.id
         user.is_active = True
         user.joined_at = datetime.now(timezone.utc)
-        self.db.commit()
+        await self.db.commit()
+        await self.db.refresh(user)
 
-        tokens = self._issue_tokens(user, role_name="org_admin", org_id=org.id)
+        tokens = await self._issue_tokens(user, role_name="org_admin", org_id=org.id)
 
-        _fill_audit(
+        await _fill_audit(
             self.db, user_id=created_by, organization_id=org.id, action="created",
             resource_type="organization", resource_id=org.id, details="created",
         )
         return tokens
 
-    def _issue_tokens(self, user: User, role_name: str, org_id: str, platform: str = "web") -> AuthTokensResponse:
+    async def _issue_tokens(
+        self,
+        user: User,
+        role_name: str,
+        org_id: str,
+        platform: str = "web",
+    ) -> AuthTokensResponse:
+
+        user_id = user.id
+        user_email = user.email
+        require_password_change = user.require_password_change
+
         access_token = create_access_token(
-            user_id=user.id, email=user.email, role=role_name,
-            organization_id=org_id, platform=platform,
+            user_id=user_id,
+            email=user_email,
+            role=role_name,
+            organization_id=org_id,
+            platform=platform,
         )
-        # Opaque refresh token (Go parity): hash a random value and store it.
+
         refresh_value = secrets.token_urlsafe(48)
         hashed = hash_password(refresh_value)
+
         expires_in = JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60
         refresh_expires_in = JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
-        stored = RefreshToken(
-            id=str(uuid_lib.uuid4()), user_id=user.id, token_hash=hashed,
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=refresh_expires_in),
-            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+
+        now = datetime.now(timezone.utc)
+
+        result = await self.db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user_id
+            )
         )
-        self.db.add(stored)
-        self.db.commit()
+
+        stored = result.scalar_one_or_none()
+
+        if stored:
+            # Update existing refresh token
+            stored.token_hash = hashed
+            stored.expires_at = now + timedelta(
+                seconds=refresh_expires_in
+            )
+            stored.revoked_at = None
+            stored.updated_at = now
+
+        else:
+            # Create new refresh token
+            stored = RefreshToken(
+                id=str(uuid_lib.uuid4()),
+                user_id=user_id,
+                token_hash=hashed,
+                expires_at=now + timedelta(
+                    seconds=refresh_expires_in
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+
+            self.db.add(stored)
+
+        await self.db.commit()
+        await self.db.refresh(stored)
+
         return AuthTokensResponse(
             access_token=access_token,
             refresh_token=f"{stored.id}.{refresh_value}",
             token_type="Bearer",
             expires_in=expires_in,
             refresh_expires_in=refresh_expires_in,
-            require_password_change=bool(user.require_password_change),
+            require_password_change=bool(require_password_change),
         )
 
-    def _hard_delete_org(self, org_id: str) -> None:
-        self.db.query(Organization).filter(Organization.id == org_id).delete()
-        self.db.commit()
+    async def _hard_delete_org(self, org_id: str) -> None:
+        await self.db.execute(delete(Organization).where(Organization.id == org_id))
+        await self.db.commit()
 
     # ------------------------------------------------------------- roles
 
-    def _get_role_by_name_and_org(self, name: str, org_id: str) -> Optional[Role]:
-        return (
-            self.db.query(Role)
-            .filter(Role.name == name, Role.organization_id == org_id)
-            .first()
-        )
+    async def _get_role_by_name_and_org(self, name: str, org_id: str, load_permissions: bool = False) -> Optional[Role]:
+        stmt = select(Role).where(Role.name == name, Role.organization_id == org_id)
+        if load_permissions:
+            stmt = stmt.options(selectinload(Role.permissions))
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
 
-    def create_default_roles_for_org(self, org_id: str) -> None:
-        perms = self.db.query(Permission).all()
+    async def create_default_roles_for_org(self, org_id: str) -> None:
+        perm_result = await self.db.execute(select(Permission))
+        perms = perm_result.scalars().all()
         for name, scope in DEFAULT_ROLE_SCOPE.items():
-            existing = self.db.query(Role).filter(
-                Role.name == name, Role.organization_id == org_id
-            ).first()
+            existing_result = await self.db.execute(
+                select(Role).where(Role.name == name, Role.organization_id == org_id)
+            )
+            existing = existing_result.scalar_one_or_none()
             if existing:
                 continue
             role = Role(
@@ -378,7 +437,7 @@ class OrganizationService:
                 created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
             )
             self.db.add(role)
-            self.db.flush()
+            await self.db.flush()
 
             selected = perms
             if name == "project_manager":
@@ -388,13 +447,16 @@ class OrganizationService:
 
             for perm in selected:
                 self.db.add(RolePermission(role_id=role.id, permission_id=perm.id))
-        self.db.commit()
+        await self.db.commit()
 
     # --------------------------------------------------------------- update
 
-    def update_organization(self, org_id: UUID, name: Optional[str], domain: Optional[str],
-                            team_size: Optional[str], country: Optional[str]) -> None:
-        org = self.db.query(Organization).filter(Organization.id == str(org_id)).first()
+    async def update_organization(self, org_id: UUID, user_id: UUID, name: Optional[str], domain: Optional[str],
+                                  team_size: Optional[str], country: Optional[str]) -> None:
+        result = await self.db.execute(
+            select(Organization).where(Organization.id == str(org_id))
+        )
+        org = result.scalar_one_or_none()
         if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
         if domain is not None and domain.strip():
@@ -409,27 +471,39 @@ class OrganizationService:
             org.country = country
         org.updated_at = datetime.now(timezone.utc)
         try:
-            self.db.commit()
+            await self.db.commit()
         except IntegrityError as exc:
-            self.db.rollback()
+            await self.db.rollback()
             _parse_org_duplicate(exc)
-        _fill_audit(
-            self.db, user_id=org_id, organization_id=org_id, action="updated",
+        await _fill_audit(
+            self.db, user_id=user_id, organization_id=org_id, action="updated",
             resource_type="organization", resource_id=org_id, details="updated",
         )
 
-    def delete_organization(self, org_id: UUID, user_id: UUID) -> None:
-        result = self.db.query(Organization).filter(Organization.id == str(org_id)).delete()
-        if result == 0:
+    async def delete_organization(self, org_id: UUID, user_id: UUID) -> None:
+        result = await self.db.execute(
+            select(Organization).where(Organization.id == str(org_id))
+        )
+        org = result.scalar_one_or_none()
+        if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
-        self.db.commit()
-        _fill_audit(
+        # Soft delete (Go parity: SoftDeleteOrganization sets is_active=false
+        # and deleted_at=NOW()). A hard DELETE would fail on FK references
+        # (roles, users, projects, ...).
+        org.is_active = False
+        org.deleted_at = datetime.now(timezone.utc)
+        org.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await _fill_audit(
             self.db, user_id=user_id, organization_id=org_id, action="deleted",
             resource_type="organization", resource_id=org_id, details="deleted",
         )
 
-    def update_organization_status(self, org_id: UUID, is_active: bool, actor_id: UUID) -> None:
-        org = self.db.query(Organization).filter(Organization.id == str(org_id)).first()
+    async def update_organization_status(self, org_id: UUID, is_active: bool, actor_id: UUID) -> None:
+        result = await self.db.execute(
+            select(Organization).where(Organization.id == str(org_id))
+        )
+        org = result.scalar_one_or_none()
         if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
         org.is_active = is_active
@@ -438,9 +512,9 @@ class OrganizationService:
         else:
             org.deleted_at = datetime.now(timezone.utc)
         org.updated_at = datetime.now(timezone.utc)
-        self.db.commit()
+        await self.db.commit()
         status_str = "activated" if is_active else "deactivated"
-        _fill_audit(
+        await _fill_audit(
             self.db, user_id=actor_id, organization_id=org_id, action="updated",
             resource_type="organization_status", resource_id=org_id,
             details=f"organization {org.name} ({status_str})",
@@ -448,60 +522,55 @@ class OrganizationService:
 
     # ------------------------------------------------------------ user mgmt
 
-    def update_user_status(self, org_id: UUID, user_id: UUID, is_active: bool) -> None:
-        user = self.db.query(User).filter(User.id == str(user_id)).first()
+    async def _get_user_checked(self, org_id: UUID, user_id: UUID) -> User:
+        result = await self.db.execute(
+            select(User)
+            .where(User.id == str(user_id))
+            .options(selectinload(User.role), selectinload(User.organization))
+        )
+        user = result.scalar_one_or_none()
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        if user.organization_id is None:
+        if user.organization_id is None or user.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
-        if user.organization_id != str(org_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
+        return user
+
+    async def update_user_status(self, org_id: UUID, user_id: UUID, is_active: bool) -> None:
+        user = await self._get_user_checked(org_id, user_id)
         user.is_active = is_active
         user.status = "active" if is_active else "inactive"
-        self.db.commit()
-        _fill_audit(
+        await self.db.commit()
+        await _fill_audit(
             self.db, user_id=str(user_id), organization_id=str(org_id), action="updated",
             resource_type="user_status", resource_id=str(user_id),
             details=f"updated user status for {user.email}",
         )
 
-    def update_user_role(self, org_id: UUID, user_id: UUID, role: str) -> None:
-        user = self.db.query(User).filter(User.id == str(user_id)).first()
-        if user is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        if user.organization_id is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
-        if user.organization_id != str(org_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
+    async def update_user_role(self, org_id: UUID, user_id: UUID, role: str) -> None:
+        user = await self._get_user_checked(org_id, user_id)
         role_name = "org_admin" if role == "org_admin" else GLOBAL_ROLE
-        role_obj = self._get_role_by_name_and_org(role_name, str(org_id))
+        role_obj = await self._get_role_by_name_and_org(role_name, str(org_id))
         if role_obj is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
         user.role_id = role_obj.id
-        self.db.commit()
-        _fill_audit(
+        await self.db.commit()
+        await _fill_audit(
             self.db, user_id=str(user_id), organization_id=str(org_id), action="updated",
             resource_type="user_role", resource_id=str(user_id),
             details=f"updated user role for {user.email}",
         )
 
-    def remove_user(self, org_id: UUID, user_id: UUID) -> None:
-        user = self.db.query(User).filter(User.id == str(user_id)).first()
-        if user is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    async def remove_user(self, org_id: UUID, user_id: UUID) -> None:
+        user = await self._get_user_checked(org_id, user_id)
         if user.role is not None and user.role.name == "org_admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized access: cannot remove organization admin")
-        if user.organization_id is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
-        if user.organization_id != str(org_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
         # Detach from the organization instead of deleting (Go parity).
         user.organization_id = None
-        user.role_id = "00000000-0000-0000-0000-000000000000"
+        user.role_id = None
         user.is_active = False
         user.joined_at = None
-        self.db.commit()
-        _fill_audit(
+        await self.db.commit()
+        await _fill_audit(
             self.db, user_id=str(user_id), organization_id=str(org_id), action="removed",
             resource_type="organization_user", resource_id=str(user_id),
             details="Removed user from organization",
@@ -509,93 +578,110 @@ class OrganizationService:
 
     # -------------------------------------------------------------- members
 
-    def get_users_in_organization(self, org_id: UUID, filter_: OrganizationMemberListFilter) -> Tuple[List[UserProfile], Pagination]:
+    async def get_users_in_organization(self, org_id: UUID, filter_: OrganizationMemberListFilter) -> Tuple[List[UserProfile], Pagination]:
         page, page_size = _normalize_page(filter_.page, filter_.page_size)
         now = datetime.now(timezone.utc)
 
         # expire pending invitations and pending users
-        self.db.query(OrganizationInvitation).filter(
-            OrganizationInvitation.organization_id == str(org_id),
-            OrganizationInvitation.status == InvitationStatus.PENDING,
-            OrganizationInvitation.expires_at < now,
-        ).update({"status": InvitationStatus.EXPIRED}, synchronize_session=False)
-        expired_emails = [
-            r[0] for r in self.db.query(OrganizationInvitation.email).filter(
+        await self.db.execute(
+            update(OrganizationInvitation)
+            .where(
+                OrganizationInvitation.organization_id == str(org_id),
+                OrganizationInvitation.status == InvitationStatus.PENDING,
+                OrganizationInvitation.expires_at < now,
+            )
+            .values(status=InvitationStatus.EXPIRED)
+        )
+        expired_emails_result = await self.db.execute(
+            select(OrganizationInvitation.email).where(
                 OrganizationInvitation.organization_id == str(org_id),
                 OrganizationInvitation.status == InvitationStatus.EXPIRED,
-            ).all()
-        ]
+            )
+        )
+        expired_emails = [r for r in expired_emails_result.scalars().all()]
         if expired_emails:
-            self.db.query(User).filter(
-                User.organization_id == str(org_id),
-                User.status == "pending",
-                User.email.in_(expired_emails),
-            ).update({"status": "expired"}, synchronize_session=False)
-        self.db.commit()
+            await self.db.execute(
+                update(User)
+                .where(
+                    User.organization_id == str(org_id),
+                    User.status == "pending",
+                    User.email.in_(expired_emails),
+                )
+                .values(status="expired")
+            )
+        await self.db.commit()
 
         query = (
-            self.db.query(User)
+            select(User)
             .outerjoin(Role, (Role.id == User.role_id) & (Role.deleted_at.is_(None)))
-            .filter(User.organization_id == str(org_id))
+            .where(User.organization_id == str(org_id))
+            .options(selectinload(User.organization), selectinload(User.role))
         )
         if filter_.full_name:
-            query = query.filter(User.full_name.ilike(f"%{filter_.full_name.strip()}%"))
+            query = query.where(User.full_name.ilike(f"%{filter_.full_name.strip()}%"))
         if filter_.email:
-            query = query.filter(User.email.ilike(f"%{filter_.email.strip()}%"))
+            query = query.where(User.email.ilike(f"%{filter_.email.strip()}%"))
         if filter_.username:
-            query = query.filter(User.username.ilike(f"%{filter_.username.strip()}%"))
+            query = query.where(User.username.ilike(f"%{filter_.username.strip()}%"))
         if filter_.role:
-            query = query.filter(func.lower(Role.name) == filter_.role.strip().lower())
+            query = query.where(func.lower(Role.name) == filter_.role.strip().lower())
         if filter_.is_active is not None:
-            query = query.filter(User.is_active == filter_.is_active)
+            query = query.where(User.is_active == filter_.is_active)
         if filter_.is_verified is not None:
-            query = query.filter(User.is_verified == filter_.is_verified)
+            query = query.where(User.is_verified == filter_.is_verified)
         if filter_.status:
-            query = query.filter(User.status == filter_.status.strip().lower())
+            query = query.where(User.status == filter_.status.strip().lower())
         if filter_.timezone:
-            query = query.filter(User.timezone.ilike(f"%{filter_.timezone.strip()}%"))
+            query = query.where(User.timezone.ilike(f"%{filter_.timezone.strip()}%"))
         if not filter_.include_org_admins:
-            query = query.filter((func.lower(Role.name) != "org_admin") | (Role.name.is_(None)))
+            query = query.where((func.lower(Role.name) != "org_admin") | (Role.name.is_(None)))
 
-        total_items = query.count()
-        users = query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        total_result = await self.db.execute(
+            select(func.count()).select_from(query.subquery())
+        )
+        total_items = total_result.scalar_one()
+        result = await self.db.execute(
+            query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        )
+        users = result.scalars().all()
 
-        _fill_audit(
+        await _fill_audit(
             self.db, organization_id=str(org_id), action="viewed",
             resource_type="users_in_organization", resource_id=str(org_id),
             details="view users in organization",
         )
         return [self._to_profile(u) for u in users], _page_meta(page, page_size, total_items)
 
-    def get_all_members(self, filter_: GlobalMemberListFilter) -> Tuple[List[UserProfile], Pagination]:
+    async def get_all_members(self, filter_: GlobalMemberListFilter) -> Tuple[List[UserProfile], Pagination]:
         page, page_size = _normalize_page(filter_.page, filter_.page_size)
         query = (
-            self.db.query(User)
+            select(User)
             .outerjoin(Role, (Role.id == User.role_id) & (Role.deleted_at.is_(None)))
+            .options(selectinload(User.organization), selectinload(User.role))
         )
         if filter_.organization_id is not None:
-            query = query.filter(User.organization_id == str(filter_.organization_id))
+            query = query.where(User.organization_id == str(filter_.organization_id))
         if filter_.search:
             term = f"%{filter_.search.strip().lower()}%"
-            query = query.filter(or_(
+            query = query.where(or_(
                 func.lower(User.full_name).like(term),
                 func.lower(User.email).like(term),
                 func.lower(User.username).like(term),
             ))
         if filter_.full_name:
-            query = query.filter(func.lower(User.full_name).like(f"%{filter_.full_name.strip().lower()}%"))
+            query = query.where(func.lower(User.full_name).like(f"%{filter_.full_name.strip().lower()}%"))
         if filter_.email:
-            query = query.filter(func.lower(User.email).like(f"%{filter_.email.strip().lower()}%"))
+            query = query.where(func.lower(User.email).like(f"%{filter_.email.strip().lower()}%"))
         if filter_.username:
-            query = query.filter(func.lower(User.username).like(f"%{filter_.username.strip().lower()}%"))
+            query = query.where(func.lower(User.username).like(f"%{filter_.username.strip().lower()}%"))
         if filter_.role:
-            query = query.filter(func.lower(Role.name) == filter_.role.strip().lower())
+            query = query.where(func.lower(Role.name) == filter_.role.strip().lower())
         if filter_.is_active is not None:
-            query = query.filter(User.is_active == filter_.is_active)
+            query = query.where(User.is_active == filter_.is_active)
         if filter_.is_verified is not None:
-            query = query.filter(User.is_verified == filter_.is_verified)
+            query = query.where(User.is_verified == filter_.is_verified)
         if filter_.timezone:
-            query = query.filter(func.lower(User.timezone).like(f"%{filter_.timezone.strip().lower()}%"))
+            query = query.where(func.lower(User.timezone).like(f"%{filter_.timezone.strip().lower()}%"))
 
         allowed = {"full_name", "name", "email", "username", "role", "created_at", "joined_at", "is_active"}
         sort_by = (filter_.sort_by or "created_at").strip()
@@ -611,12 +697,16 @@ class OrganizationService:
             sort_by = None
         col = getattr(User, sort_by) if sort_by else None
 
-        total_items = query.count()
+        total_result = await self.db.execute(
+            select(func.count()).select_from(query.subquery())
+        )
+        total_items = total_result.scalar_one()
         if col is not None:
             query = query.order_by(col.asc() if sort_order == "ASC" else col.desc())
-        users = query.offset((page - 1) * page_size).limit(page_size).all()
+        result = await self.db.execute(query.offset((page - 1) * page_size).limit(page_size))
+        users = result.scalars().all()
 
-        _fill_audit(
+        await _fill_audit(
             self.db, action="viewed", resource_type="all_users",
             type="audit", details="Super Admin viewed all system users/members",
             created_at=datetime.now(timezone.utc),
@@ -638,8 +728,13 @@ class OrganizationService:
 
     # ------------------------------------------------------------ invitations
 
-    def invite_member(self, org_id: UUID, inviter_id: UUID, payload: InviteOrganizationMemberRequest) -> None:
-        inviter = self.db.query(User).filter(User.id == str(inviter_id)).first()
+    async def invite_member(self, org_id: UUID, inviter_id: UUID, payload: InviteOrganizationMemberRequest) -> None:
+        inviter_result = await self.db.execute(
+            select(User)
+            .where(User.id == str(inviter_id))
+            .options(selectinload(User.role))
+        )
+        inviter = inviter_result.scalar_one_or_none()
         if (inviter is None or inviter.role is None or inviter.role.name != "org_admin"
                 or inviter.organization_id is None or inviter.organization_id != str(org_id)):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to perform this action")
@@ -647,16 +742,22 @@ class OrganizationService:
         if not payload.members:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one member invitation is required")
 
-        developer_role = self._get_role_by_name_and_org(GLOBAL_ROLE, str(org_id))
+        developer_role = await self._get_role_by_name_and_org(GLOBAL_ROLE, str(org_id))
         if developer_role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-        org = self.db.query(Organization).filter(Organization.id == str(org_id)).first()
+        org_result = await self.db.execute(
+            select(Organization).where(Organization.id == str(org_id))
+        )
+        org = org_result.scalar_one_or_none()
         if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
 
         for item in payload.members:
             invite_email = item.email.strip().lower()
-            existing_user = self.db.query(User).filter(User.email == invite_email).first()
+            existing_user_result = await self.db.execute(
+                select(User).where(User.email == invite_email)
+            )
+            existing_user = existing_user_result.scalar_one_or_none()
 
             user_existed = existing_user is not None
             if existing_user is not None:
@@ -666,13 +767,18 @@ class OrganizationService:
                 existing_user.role_id = developer_role.id
                 existing_user.is_active = False
                 existing_user.status = "pending"
-                self.db.commit()
+                await self.db.commit()
 
-            existing_pending = self.db.query(OrganizationInvitation).filter(
-                OrganizationInvitation.organization_id == str(org_id),
-                OrganizationInvitation.email == invite_email,
-                OrganizationInvitation.status == InvitationStatus.PENDING,
-            ).order_by(OrganizationInvitation.created_at.desc()).first()
+            existing_pending_result = await self.db.execute(
+                select(OrganizationInvitation)
+                .where(
+                    OrganizationInvitation.organization_id == str(org_id),
+                    OrganizationInvitation.email == invite_email,
+                    OrganizationInvitation.status == InvitationStatus.PENDING,
+                )
+                .order_by(OrganizationInvitation.created_at.desc())
+            )
+            existing_pending = existing_pending_result.scalars().first()
 
             expires_at = datetime.now(timezone.utc) + timedelta(days=1)
             token = str(uuid_lib.uuid4())
@@ -691,27 +797,27 @@ class OrganizationService:
                     created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
                 )
                 self.db.add(invitation)
-            self.db.commit()
+            await self.db.commit()
 
             invite_link = f"{os.getenv('BACKEND_API_URL', 'http://localhost:6369')}/api/v1/organization/invitations/accept?token={token}"
             temp_password = ""
             if not user_existed:
-                temp_password = self._create_temp_user(invite_email, str(org_id), developer_role.id)
+                temp_password = await self._create_temp_user(invite_email, str(org_id), developer_role.id)
 
             email_service.send_organization_invitation(
                 invite_email, org.name, developer_role.name, invite_link, temp_password,
             )
 
-            _fill_audit(
+            await _fill_audit(
                 self.db, user_id=str(inviter_id), organization_id=str(org_id),
                 action="invitation_sended", resource_type="organization_invitation",
                 resource_id=token, details=f"Invited {invite_email} to {org.name}",
             )
 
-    def _create_temp_user(self, email: str, org_id: str, role_id: str) -> str:
+    async def _create_temp_user(self, email: str, org_id: str, role_id: str) -> str:
         temp_password = self._generate_temp_password(12)
         password_hash = hash_password(temp_password)
-        username = self._generate_unique_username(email)
+        username = await self._generate_unique_username(email)
         user = User(
             id=str(uuid_lib.uuid4()), email=email,
             full_name=self._full_name_from_email(email), username=username,
@@ -722,11 +828,11 @@ class OrganizationService:
         )
         self.db.add(user)
         try:
-            self.db.commit()
+            await self.db.commit()
         except IntegrityError as exc:
-            self.db.rollback()
+            await self.db.rollback()
             _parse_user_duplicate(exc)
-        _fill_audit(
+        await _fill_audit(
             self.db, organization_id=org_id, action="created",
             resource_type="temp_user", resource_id=user.id, details="create temp user",
         )
@@ -738,11 +844,14 @@ class OrganizationService:
         chars = string.ascii_letters + string.digits
         return "".join(secrets.choice(chars) for _ in range(length))
 
-    def _generate_unique_username(self, email: str) -> str:
+    async def _generate_unique_username(self, email: str) -> str:
         base = self._username_from_email(email)
         for attempt in range(5):
             candidate = base if attempt == 0 else f"{base}{attempt}"
-            exists = self.db.query(User).filter(User.username == candidate).first() is not None
+            exists_result = await self.db.execute(
+                select(User.username).where(User.username == candidate).limit(1)
+            )
+            exists = exists_result.first() is not None
             if not exists:
                 return candidate
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Unable to generate unique username for invited user")
@@ -765,12 +874,13 @@ class OrganizationService:
         words = [p[0].upper() + p[1:].lower() for p in parts]
         return " ".join(words)
 
-    def accept_invitation(self, user_id: UUID, token: str) -> None:
+    async def accept_invitation(self, user_id: UUID, token: str) -> None:
         if not token:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation token is required")
-        invitation = self.db.query(OrganizationInvitation).filter(
-            OrganizationInvitation.token == token
-        ).first()
+        invitation_result = await self.db.execute(
+            select(OrganizationInvitation).where(OrganizationInvitation.token == token)
+        )
+        invitation = invitation_result.scalar_one_or_none()
         if invitation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
         if invitation.status == InvitationStatus.ACCEPTED:
@@ -778,10 +888,15 @@ class OrganizationService:
         if invitation.status == InvitationStatus.EXPIRED or invitation.expires_at < datetime.now(timezone.utc):
             invitation.status = InvitationStatus.EXPIRED
             invitation.updated_at = datetime.now(timezone.utc)
-            self.db.commit()
+            await self.db.commit()
             raise HTTPException(status_code=status.HTTP_410_GONE, detail="Invitation has expired")
 
-        user = self.db.query(User).filter(User.id == str(user_id)).first()
+        user_result = await self.db.execute(
+            select(User)
+            .where(User.id == str(user_id))
+            .options(selectinload(User.organization), selectinload(User.role))
+        )
+        user = user_result.scalar_one_or_none()
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         if user.email.lower() != invitation.email.lower():
@@ -794,25 +909,26 @@ class OrganizationService:
         user.is_active = True
         user.status = "active"
         user.joined_at = datetime.now(timezone.utc)
-        self.db.commit()
+        await self.db.commit()
 
         accepted_at = datetime.now(timezone.utc)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.accepted_at = accepted_at
         invitation.updated_at = accepted_at
-        self.db.commit()
+        await self.db.commit()
 
-        _fill_audit(
+        await _fill_audit(
             self.db, user_id=str(user_id), organization_id=invitation.organization_id,
             action="accepted", resource_type="invitation", resource_id=invitation.token,
             details="accepted invitation",
         )
 
-    def get_invitation_by_token(self, token: str) -> OrganizationInvitation:
-        invitation = self.db.query(OrganizationInvitation).filter(
-            OrganizationInvitation.token == token
-        ).first()
-        _fill_audit(
+    async def get_invitation_by_token(self, token: str) -> OrganizationInvitation:
+        invitation_result = await self.db.execute(
+            select(OrganizationInvitation).where(OrganizationInvitation.token == token)
+        )
+        invitation = invitation_result.scalar_one_or_none()
+        await _fill_audit(
             self.db, organization_id=(invitation.organization_id if invitation else None),
             action="viewed", resource_type="invitation",
             resource_id=(invitation.token if invitation else token),
@@ -856,18 +972,23 @@ class OrganizationService:
             updated_at=role.updated_at,
         )
 
-    def _get_role_by_id_raw(self, role_id: UUID) -> Role:
-        role = self.db.query(Role).filter(Role.id == str(role_id)).first()
+    async def _get_role_by_id_raw(self, role_id: UUID) -> Role:
+        result = await self.db.execute(
+            select(Role)
+            .where(Role.id == str(role_id))
+            .options(selectinload(Role.permissions))
+        )
+        role = result.scalar_one_or_none()
         if role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
         return role
 
-    def _get_permission_by_resource_action(self, resource: str, action: str) -> Permission:
-        perm = (
-            self.db.query(Permission)
-            .filter(Permission.resource == resource, Permission.action == action)
-            .first()
+    async def _get_permission_by_resource_action(self, resource: str, action: str) -> Permission:
+        result = await self.db.execute(
+            select(Permission)
+            .where(Permission.resource == resource, Permission.action == action)
         )
+        perm = result.scalar_one_or_none()
         if perm is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -875,32 +996,38 @@ class OrganizationService:
             )
         return perm
 
-    def _resolve_enabled_permissions(self, permissions: Dict[str, Dict[str, bool]]) -> List[Permission]:
+    async def _resolve_enabled_permissions(self, permissions: Dict[str, Dict[str, bool]]) -> List[Permission]:
         resolved: List[Permission] = []
         for resource, action_map in permissions.items():
             for action, enabled in action_map.items():
                 if enabled:
-                    resolved.append(self._get_permission_by_resource_action(resource, action))
+                    resolved.append(await self._get_permission_by_resource_action(resource, action))
         return resolved
 
-    def _is_role_assigned(self, role_id: UUID) -> bool:
+    async def _is_role_assigned(self, role_id: UUID) -> bool:
         role_id_str = str(role_id)
-        user = self.db.query(User).filter(User.role_id == role_id_str).first()
-        if user is not None:
+        user_result = await self.db.execute(
+            select(User.id).where(User.role_id == role_id_str).limit(1)
+        )
+        if user_result.first() is not None:
             return True
-        member = self.db.query(ProjectMember).filter(ProjectMember.role_id == role_id_str).first()
-        if member is not None:
+        member_result = await self.db.execute(
+            select(ProjectMember.id).where(ProjectMember.role_id == role_id_str).limit(1)
+        )
+        if member_result.first() is not None:
             return True
-        invite = self.db.query(OrganizationInvitation).filter(OrganizationInvitation.role_id == role_id_str).first()
-        if invite is not None:
+        invite_result = await self.db.execute(
+            select(OrganizationInvitation.id).where(OrganizationInvitation.role_id == role_id_str).limit(1)
+        )
+        if invite_result.first() is not None:
             return True
         return False
 
-    def create_role(self, org_id: UUID, req: CreateRoleRequest) -> RoleResponse:
+    async def create_role(self, org_id: UUID, req: CreateRoleRequest) -> RoleResponse:
         name = req.name.strip()
         if not name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role name is required")
-        permissions_to_attach = self._resolve_enabled_permissions(req.permissions)
+        permissions_to_attach = await self._resolve_enabled_permissions(req.permissions)
 
         role = Role(
             id=str(uuid_lib.uuid4()),
@@ -914,35 +1041,36 @@ class OrganizationService:
         role.permissions = permissions_to_attach
         self.db.add(role)
         try:
-            self.db.commit()
+            await self.db.commit()
         except IntegrityError as exc:
-            self.db.rollback()
+            await self.db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A role with this name already exists in the organization",
             ) from exc
-        saved = self._get_role_by_id_raw(UUID(role.id))
+        saved = await self._get_role_by_id_raw(UUID(role.id))
         return self._map_role_response(saved)
 
-    def get_roles_by_organization_id(self, org_id: UUID) -> List[RoleResponse]:
-        rows = (
-            self.db.query(Role)
-            .filter(
+    async def get_roles_by_organization_id(self, org_id: UUID) -> List[RoleResponse]:
+        result = await self.db.execute(
+            select(Role)
+            .where(
                 (Role.organization_id == str(org_id))
                 | (Role.organization_id.is_(None) & (Role.is_system.is_(True)))
             )
-            .all()
+            .options(selectinload(Role.permissions))
         )
+        rows = result.scalars().all()
         return [self._map_role_response(r) for r in rows]
 
-    def get_role_by_id(self, org_id: UUID, role_id: UUID) -> RoleResponse:
-        role = self._get_role_by_id_raw(role_id)
+    async def get_role_by_id(self, org_id: UUID, role_id: UUID) -> RoleResponse:
+        role = await self._get_role_by_id_raw(role_id)
         if role.organization_id is not None and role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this role")
         return self._map_role_response(role)
 
-    def update_role(self, org_id: UUID, role_id: UUID, req: UpdateRoleRequest) -> RoleResponse:
-        role = self._get_role_by_id_raw(role_id)
+    async def update_role(self, org_id: UUID, role_id: UUID, req: UpdateRoleRequest) -> RoleResponse:
+        role = await self._get_role_by_id_raw(role_id)
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to modify this role")
 
@@ -955,31 +1083,38 @@ class OrganizationService:
             role.description = req.description
 
         if req.permissions is not None:
-            permissions_to_attach = self._resolve_enabled_permissions(req.permissions)
+            permissions_to_attach = await self._resolve_enabled_permissions(req.permissions)
             role.permissions = permissions_to_attach
         role.updated_at = datetime.now(timezone.utc)
         try:
-            self.db.commit()
+            await self.db.commit()
         except IntegrityError as exc:
-            self.db.rollback()
+            await self.db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A role with this name already exists in the organization",
             ) from exc
-        updated = self._get_role_by_id_raw(role_id)
+        updated = await self._get_role_by_id_raw(role_id)
         return self._map_role_response(updated)
 
-    def delete_role(self, org_id: UUID, role_id: UUID) -> None:
-        role = self._get_role_by_id_raw(role_id)
+    async def delete_role(self, org_id: UUID, role_id: UUID) -> None:
+        role = await self._get_role_by_id_raw(role_id)
         if role.is_system:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System roles cannot be deleted")
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to delete this role")
-        assigned = self._is_role_assigned(role_id)
+        assigned = await self._is_role_assigned(role_id)
         if assigned:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Role cannot be deleted because it is currently assigned to users, project members, or invitations",
             )
-        self.db.query(Role).filter(Role.id == str(role_id)).delete()
-        self.db.commit()
+        # Remove the role-permission association rows first (FK constraint),
+        # then delete the role itself.
+        await self.db.execute(
+            delete(RolePermission).where(RolePermission.role_id == str(role_id))
+        )
+        await self.db.execute(
+            delete(Role).where(Role.id == str(role_id))
+        )
+        await self.db.commit()

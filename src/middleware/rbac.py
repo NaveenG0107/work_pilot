@@ -6,8 +6,8 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from src.auth.models import User
+from src.auth.deps import get_current_user
 from src.database import get_db
-from src.middleware.auth import get_current_user
 from src.organization.models import Role
 from src.project.models import ProjectMember
 

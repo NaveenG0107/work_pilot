@@ -39,7 +39,9 @@ async def get_current_user(request: Request) -> dict:
             status_code=401, detail="Authentication required"
         )
 
-    user_id = claims.get("user_id")
+    # jwt_handler.create_access_token stores user_id under "sub" (JWT standard),
+    # while core.create_jwt stores it under "user_id" (Go compat).  Accept both.
+    user_id = claims.get("user_id") or claims.get("sub")
     if not user_id:
         raise HTTPException(
             status_code=403,

@@ -3,8 +3,11 @@
 Response envelope helpers mirroring internal/pkg/response in Go.
 """
 
+from datetime import datetime, date
 from typing import Any, Optional
+from uuid import UUID
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 ERROR_CODES = {
@@ -18,6 +21,21 @@ ERROR_CODES = {
 }
 
 
+def _serialize(value: Any) -> Any:
+    """Convert incoming response data into a JSON-serializable structure.
+
+    Uses FastAPI's ``jsonable_encoder`` so Pydantic models, dataclasses,
+    UUIDs, datetime and other non-JSON types are handled automatically.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, JSONResponse):
+        return value
+
+    return jsonable_encoder(value)
+
+
 def success(message: str, data: Any = None, meta: Optional[dict] = None,
             status_code: int = 200) -> JSONResponse:
     body: dict = {
@@ -25,10 +43,11 @@ def success(message: str, data: Any = None, meta: Optional[dict] = None,
         "status_code": status_code,
         "message": message,
     }
+    data = _serialize(data)
     if data is not None:
         body["data"] = data
     if meta is not None:
-        body["meta"] = meta
+        body["meta"] = _serialize(meta)
     return JSONResponse(status_code=status_code, content=body)
 
 
