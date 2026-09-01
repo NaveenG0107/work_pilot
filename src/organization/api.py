@@ -1,9 +1,7 @@
 # src/organization/api.py
 """
 FastAPI router for the organization module.
-
-Mirrors internal/handlers/http/organization.go. All routes require a valid
-access token; service-level checks enforce org-level authorization.
+All routes require a valid access token; service-level checks enforce org-level authorization.
 """
 
 import os
@@ -367,9 +365,7 @@ async def accept_invitation(
 
 
 # ------------------------------------------------------------------ roles
-#
-# Mirrors internal/handlers/http/role.go — mounted under /organization/roles
-# in Go routes/organization.go. Roles are custom (non-system) org-scoped roles.
+# Roles are custom (non-system) org-scoped roles.
 
 
 @router.post("/organization/roles", status_code=201)

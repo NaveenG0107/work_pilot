@@ -181,7 +181,7 @@ def create_jwt(
     if organization_id is not None:
         claims["organization_id"] = organization_id
 
-    # Platform expiry logic (mirrors Go JWT_EXPIRY, in seconds).
+    # Platform expiry logic (JWT_EXPIRY in seconds).
     expires_in_seconds = int(get_settings().jwt_expiry or 900)
     if platform != "mobile":
         # web clients get an expiry
@@ -425,7 +425,7 @@ class GoJSONResponse(JSONResponse):
 
 
 # ---------------------------------------------------------------------------
-# Bearer scheme + token extraction (mirrors Go transport/http middleware)
+# Bearer scheme + token extraction
 # ---------------------------------------------------------------------------
 
 bearer_scheme = HTTPBearer(

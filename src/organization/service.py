@@ -1,9 +1,6 @@
 # src/organization/service.py
 """
 Organization service logic.
-
-Mirrors internal/services/organization.go. DB access is done inline using the
-asynchronous SQLAlchemy AsyncSession (the FastAPI project uses async sessions).
 """
 
 import math
@@ -68,8 +65,7 @@ TEAM_SIZE_VALUES = {"1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"}
 
 GLOBAL_ROLE = "developer"
 
-# Default role permission filters mirroring CreateDefaultRolesForOrg in
-# organization-repo/organization.go. A role starts with '' (all) or a subset.
+# Default role permission filters. A role starts with '' (all) or a subset.
 DEFAULT_ROLE_SCOPE: dict = {
     "org_admin": None,  # all permissions
     "project_manager": None,  # all except projects add/delete is applied below
@@ -171,7 +167,7 @@ def _normalize_page(page: int, page_size: int, default_page_size: int = 10) -> T
 
 
 async def _fill_audit(db: AsyncSession, **kwargs) -> None:
-    """Create an audit log row (mirrors s.auditRepo.CreateAuditLog)."""
+    """Create an audit log row."""
     kwargs.setdefault("type", "audit")
     kwargs.setdefault("created_at", datetime.now(timezone.utc))
     log = AuditLog(id=str(uuid_lib.uuid4()), **kwargs)
@@ -938,13 +934,11 @@ class OrganizationService:
 
     # ----------------------------------------------------------------- roles
     #
-    # Mirrors internal/services/role.go + internal/handlers/http/role.go.
-    # These are custom (non-system) roles scoped to an organization. The five
-    # role endpoints live under /organization/roles in Go.
+    # These are custom (non-system) roles scoped to an organization.
 
     @staticmethod
     def _role_permission_map(role: Role) -> Dict[str, Dict[str, bool]]:
-        """Mirrors responsedto.MapToRoleResponse in Go."""
+        """Maps role permissions to dictionary structure."""
         resource_actions = {
             "projects": ["view", "add", "modify", "delete"],
             "sprints": ["view", "add", "modify", "delete"],

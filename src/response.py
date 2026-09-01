@@ -1,6 +1,6 @@
 # src/response.py
 """
-Response envelope helpers mirroring internal/pkg/response in Go.
+Response envelope helpers.
 """
 
 from datetime import datetime, date

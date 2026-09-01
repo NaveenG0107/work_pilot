@@ -1,10 +1,6 @@
 # src/organization/schemas.py
 """
 Pydantic schemas for the organization module.
-
-Mirrors the Go DTOs:
-  internal/handlers/dto/request/organization.go
-  internal/handlers/dto/response/auth.go (OrganizationSummary, UserProfile)
 """
 
 from datetime import datetime
@@ -207,26 +203,20 @@ class SimpleSuccess(BaseModel):
 
 
 class CreateRoleRequest(BaseModel):
-    """Mirrors requestdto.CreateRoleRequest in Go."""
-
     name: str = Field(..., min_length=2, max_length=100)
     description: Optional[str] = None
     permissions: Dict[str, Dict[str, bool]] = Field(..., min_length=1)
 
 
 class UpdateRoleRequest(BaseModel):
-    """Mirrors requestdto.UpdateRoleRequest in Go."""
-
     name: Optional[str] = Field(None, min_length=2, max_length=100)
     description: Optional[str] = None
     permissions: Optional[Dict[str, Dict[str, bool]]] = None
 
 
 class RoleResponse(BaseModel):
-    """Mirrors responsedto.RoleResponse in Go.
-
-    permissions is a map of resource -> {action: enabled}; resources/actions
-    not assigned to the role are filled with ``False`` (Go MapToRoleResponse).
+    """
+    Role response with permissions map.
     """
 
     id: UUID

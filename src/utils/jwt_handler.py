@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from src.config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, JWT_ALGORITHM, JWT_REFRESH_TOKEN_EXPIRE_DAYS, JWT_SECRET_KEY
 
 
-# Platform-specific token lifetimes (mirrors generate.go)
+# Platform-specific token lifetimes
 PLATFORM_TOKEN_LIFETIMES = {
     "web": {
         "access_expires": timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
