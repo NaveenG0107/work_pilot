@@ -52,6 +52,13 @@ from src.task.schema import (
 from src.user_story.models import UserStory
 from src.user_story_status.models import UserStoryStatus
 from src.utils.setting import get_settings
+from src.utils.storage import (
+    StorageConfigurationError,
+    delete_s3_object,
+    get_s3_object,
+    upload_s3_object,
+    validate_s3_configuration,
+)
 
 
 class TaskServiceError(Exception):
@@ -2009,48 +2016,11 @@ class TaskService:
             final_mime = expected
         return cls._sanitize_filename(filename), final_mime
 
-    @staticmethod
-    def _storage_client():
-        settings = get_settings()
-        if not (
-            settings.s3_endpoint
-            and settings.s3_access_key_id
-            and settings.s3_secret_access_key
-            and settings.s3_bucket
-        ):
-            raise TaskServiceError(
-                503,
-                "SERVICE_UNAVAILABLE",
-                "Supabase S3 storage is not configured.",
-            )
-        import boto3
-        from botocore.config import Config
-
-        return boto3.client(
-            "s3",
-            endpoint_url=settings.s3_endpoint or None,
-            aws_access_key_id=settings.s3_access_key_id,
-            aws_secret_access_key=settings.s3_secret_access_key,
-            region_name=settings.s3_region or None,
-            config=Config(s3={"addressing_style": "path"}),
-        )
-
-    @staticmethod
-    def _attachment_url(key: str) -> str:
-        settings = get_settings()
-        endpoint = (settings.s3_public_endpoint or settings.s3_endpoint).rstrip("/")
-        if endpoint.endswith("/s3"):
-            endpoint = endpoint[:-3] + "/object/public"
-        elif "/s3/" in endpoint:
-            endpoint = endpoint.replace("/s3/", "/object/public/", 1)
-        elif endpoint and "/object/public" not in endpoint:
-            endpoint += "/object/public"
-        return f"{endpoint}/{settings.s3_bucket}/{key}"
-
     async def _can_access_attachment_task(
         self,
         task: Task,
         user: User,
+        action: str,
     ) -> bool:
         if _role_name(getattr(user.role, "name", None)) == "super_admin":
             raise TaskServiceError(
@@ -2058,7 +2028,7 @@ class TaskService:
                 "FORBIDDEN",
                 "Super admins are not allowed to perform organization-level activities",
             )
-        return await self._has_permission(task.project, user, "tasks", "view")
+        return await self._has_permission(task.project, user, "attachments", action)
 
     @staticmethod
     def _attachment_response(attachment: TaskAttachment) -> AttachmentResponse:
@@ -2093,7 +2063,7 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Task does not belong to the specified project"
             )
-        if not await self._can_access_attachment_task(task, user):
+        if not await self._can_access_attachment_task(task, user, "add"):
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
             )
@@ -2101,21 +2071,12 @@ class TaskService:
             (filename, data, *self._validate_attachment(filename, data, max_size_mb))
             for filename, data in files
         ]
-        client = self._storage_client()
-        settings = get_settings()
         uploaded_keys: list[str] = []
         attachments: list[TaskAttachment] = []
         try:
             for original, data, sanitized, mime_type in prepared:
                 key = f"tasks/{task_id}/attachments/{uuid.uuid4()}-{sanitized}"
-                await asyncio.to_thread(
-                    client.put_object,
-                    Bucket=settings.s3_bucket,
-                    Key=key,
-                    Body=data,
-                    ContentType=mime_type,
-                    ContentLength=len(data),
-                )
+                url = await asyncio.to_thread(upload_s3_object, data, key, mime_type)
                 uploaded_keys.append(key)
                 attachment = TaskAttachment(
                     task_id=task_id,
@@ -2124,7 +2085,7 @@ class TaskService:
                     mime_type=mime_type,
                     file_size=len(data),
                     storage_path=key,
-                    url=self._attachment_url(key),
+                    url=url,
                     uploaded_by=user_id,
                     uploaded_at=datetime.now(timezone.utc),
                 )
@@ -2134,15 +2095,18 @@ class TaskService:
         except TaskServiceError:
             await self.db.rollback()
             raise
+        except StorageConfigurationError as exc:
+            await self.db.rollback()
+            raise TaskServiceError(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "Supabase S3 storage is not configured.",
+            ) from exc
         except Exception as exc:
             await self.db.rollback()
             for storage_path in uploaded_keys:
                 try:
-                    await asyncio.to_thread(
-                        client.delete_object,
-                        Bucket=settings.s3_bucket,
-                        Key=storage_path,
-                    )
+                    await asyncio.to_thread(delete_s3_object, storage_path)
                 except Exception:
                     pass
             if isinstance(exc, SQLAlchemyError):
@@ -2182,7 +2146,7 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Task does not belong to the specified project"
             )
-        if not await self._can_access_attachment_task(task, user):
+        if not await self._can_access_attachment_task(task, user, "view"):
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
             )
@@ -2220,6 +2184,7 @@ class TaskService:
     async def download_attachment(
         self,
         project_id: str,
+        task_id: str,
         attachment_id: str,
         user_id: str,
     ) -> tuple[bytes, str, str, int]:
@@ -2230,23 +2195,28 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        if not await self._can_access_attachment_task(task, user):
+        if str(attachment.task_id) != task_id:
+            raise TaskServiceError(
+                400, "BAD_REQUEST", "Attachment does not belong to the specified task"
+            )
+        if not await self._can_access_attachment_task(task, user, "view"):
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
             )
-        client = self._storage_client()
-        settings = get_settings()
         try:
-            result = await asyncio.to_thread(
-                client.get_object,
-                Bucket=settings.s3_bucket,
-                Key=attachment.storage_path,
+            body, _, _ = await asyncio.to_thread(
+                get_s3_object, attachment.storage_path
             )
-            body = result["Body"]
             try:
                 data = await asyncio.to_thread(body.read)
             finally:
                 await asyncio.to_thread(body.close)
+        except StorageConfigurationError as exc:
+            raise TaskServiceError(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "Supabase S3 storage is not configured.",
+            ) from exc
         except Exception as exc:
             raise TaskServiceError(
                 500, "INTERNAL_SERVER_ERROR", "Failed to retrieve file from storage."
@@ -2269,6 +2239,7 @@ class TaskService:
     async def delete_attachment(
         self,
         project_id: str,
+        task_id: str,
         attachment_id: str,
         user_id: str,
     ) -> None:
@@ -2279,12 +2250,16 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        if not await self._can_access_attachment_task(task, user):
+        if str(attachment.task_id) != task_id:
+            raise TaskServiceError(
+                400, "BAD_REQUEST", "Attachment does not belong to the specified task"
+            )
+        if not await self._can_access_attachment_task(task, user, "view"):
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
             )
         allowed = attachment.uploaded_by == user_id or await self._has_permission(
-            task.project, user, "tasks", "modify"
+            task.project, user, "attachments", "delete"
         )
         if not allowed:
             raise TaskServiceError(
@@ -2294,9 +2269,14 @@ class TaskService:
             )
         filename = attachment.original_filename
         storage_path = attachment.storage_path
-        task_id = str(attachment.task_id)
-        client = self._storage_client()
-        settings = get_settings()
+        try:
+            validate_s3_configuration()
+        except StorageConfigurationError as exc:
+            raise TaskServiceError(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "Supabase S3 storage is not configured.",
+            ) from exc
         orphaned_file = OrphanedFile(
             storage_path=storage_path,
             available_at=datetime.now(timezone.utc),
@@ -2311,11 +2291,7 @@ class TaskService:
                 500, "INTERNAL_SERVER_ERROR", "Failed to delete attachment metadata"
             ) from exc
         try:
-            await asyncio.to_thread(
-                client.delete_object,
-                Bucket=settings.s3_bucket,
-                Key=storage_path,
-            )
+            await asyncio.to_thread(delete_s3_object, storage_path)
         except Exception:
             # Keep the orphan record so a cleanup process can retry the S3 deletion.
             pass
