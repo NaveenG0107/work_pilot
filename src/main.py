@@ -4,9 +4,9 @@ from fastapi import FastAPI  # type: ignore
 
 from src.config import get_logger
 from src.database import Base, engine
-
 API_PREFIX = "/api/v1"
 
+from src.sprint.api import router as sprint_router
 from src.audit.api import router as audit_router
 from src.auth.api import router as auth_router
 from src.comments.api import router as comments_router
@@ -63,6 +63,7 @@ register_exception_handlers(app)
 
 
 app.include_router(auth_router)
+app.include_router(sprint_router, prefix=API_PREFIX)
 app.include_router(public_router, prefix=API_PREFIX)
 app.include_router(audit_router, prefix=API_PREFIX)
 app.include_router(organization_router, prefix=API_PREFIX)
