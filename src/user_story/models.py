@@ -17,15 +17,19 @@ def format_serial_number(seq: int) -> str:
 
 def get_next_global_serial_number(connection) -> int:
     try:
+        nested = connection.begin_nested()
         result = connection.execute(
             text("SELECT nextval('global_work_item_serial_seq')")
         )
         next_value = result.scalar()
-
+        nested.commit()
         if next_value and next_value > 0:
             return next_value
     except Exception:
-        pass
+        try:
+            nested.rollback()
+        except Exception:
+            pass
 
     max_task = connection.execute(
         text("SELECT COALESCE(MAX(serial_number), 0) FROM tasks")
@@ -63,7 +67,7 @@ class UserStory(Base):
     status = relationship("UserStoryStatus", foreign_keys=[status_id])
     assignee = relationship("User", foreign_keys=[assignee_id])
     reporter = relationship("User", foreign_keys=[reporter_id])
-    attachments = relationship("UserStoryAttachment", foreign_keys="UserStoryAttachment.user_story_id")
+    attachments = relationship("UserStoryAttachment", back_populates="user_story", foreign_keys="UserStoryAttachment.user_story_id")
 
     @property
     def formatted_serial_number(self):
@@ -99,7 +103,7 @@ class UserStoryAttachment(Base):
     uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     uploaded_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
-    user_story = relationship("UserStory", foreign_keys=[user_story_id])
+    user_story = relationship("UserStory", back_populates="attachments", foreign_keys=[user_story_id])
     uploader = relationship("User", foreign_keys=[uploaded_by])
 
 

@@ -30,7 +30,7 @@ class TaskAttachment(Base):
     uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     uploaded_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
-    task = relationship("Task", foreign_keys=[task_id], back_populates="attachments")
+    task = relationship("Task", foreign_keys=[task_id])
     uploader = relationship("User", foreign_keys=[uploaded_by])
 
 
@@ -67,11 +67,7 @@ class Task(Base):
     assignee = relationship("User", foreign_keys=[assignee_id])
     reporter = relationship("User", foreign_keys=[reporter_id])
     labels = relationship("Label", secondary=task_labels)
-    attachments = relationship(
-        "TaskAttachment",
-        foreign_keys=[TaskAttachment.task_id],
-        back_populates="task",
-    )
+    attachments = relationship("TaskAttachment", foreign_keys=[TaskAttachment.task_id])
 
     __table_args__ = (
         UniqueConstraint("project_id", "key", name="idx_project_task_key"),
@@ -128,16 +124,20 @@ def format_serial_number(seq: int) -> str:
 
 def get_next_global_serial_number(connection) -> int:
     try:
+        nested = connection.begin_nested()
         result = connection.execute(
             text("SELECT nextval('global_work_item_serial_seq')")
         )
         next_value = result.scalar()
-
+        nested.commit()
         if next_value and next_value > 0:
             return next_value
 
     except Exception:
-        pass
+        try:
+            nested.rollback()
+        except Exception:
+            pass
 
     max_task = connection.execute(
         text("SELECT COALESCE(MAX(serial_number), 0) FROM tasks")
