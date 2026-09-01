@@ -8,13 +8,11 @@ from uuid6 import uuid7
 from src.database import Base
 
 
-class Favorite:
-    USER_STORY = "user_story"
-    TASK = "task"
-
-
 class Favorite(Base):
     __tablename__ = "favorites"
+
+    USER_STORY = "user_story"
+    TASK = "task"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
