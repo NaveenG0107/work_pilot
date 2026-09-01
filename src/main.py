@@ -4,17 +4,19 @@ from fastapi import FastAPI  # type: ignore
 
 from src.config import get_logger
 from src.database import Base, engine
+
 API_PREFIX = "/api/v1"
 
-from src.sprint.api import router as sprint_router
 from src.audit.api import router as audit_router
 from src.auth.api import router as auth_router
 from src.comments.api import router as comments_router
 from src.custom_status.api import router as custom_status_router
+from src.favorite.api import router as favorite_router
 from src.label.api import router as label_router
 from src.organization.api import router as organization_router
 from src.project.api import router as project_router
 from src.public.api import router as public_router
+from src.sprint.api import router as sprint_router
 from src.task.api import router as task_router
 
 logger = get_logger(__name__)
@@ -73,3 +75,4 @@ app.include_router(task_router, prefix=API_PREFIX)
 app.include_router(label_router, prefix=API_PREFIX)
 app.include_router(comments_router, prefix=API_PREFIX)
 app.include_router(custom_status_router, prefix=API_PREFIX)
+app.include_router(favorite_router, prefix=API_PREFIX)
