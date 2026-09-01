@@ -34,7 +34,7 @@ from src.auth.api import router as auth_router
 from src.public.api import router as public_router
 from src.project.api import router as project_router
 from src.audit.api import router as audit_router
-
+from src.label.api import router as label_router
 
 
 logger = get_logger(__name__)
@@ -74,11 +74,15 @@ async def lifespan(app: FastAPI):
     logger.info("WorkPilot API shutting down")
 
 
+from src.utils.exception_handlers import register_exception_handlers
+
 app = FastAPI(
     title="Work Pilot Backend",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+register_exception_handlers(app)
 
 # app.include_router(auth_router)
 app.include_router(organization_router, prefix=API_PREFIX)
@@ -95,5 +99,10 @@ app.include_router(
 
 app.include_router(
     audit_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    label_router,
     prefix="/api/v1",
 )
