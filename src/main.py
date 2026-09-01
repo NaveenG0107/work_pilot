@@ -35,6 +35,7 @@ from src.public.api import router as public_router
 from src.project.api import router as project_router
 from src.audit.api import router as audit_router
 from src.label.api import router as label_router
+from src.comments.api import router as comments_router
 
 
 logger = get_logger(__name__)
@@ -106,3 +107,9 @@ app.include_router(
     label_router,
     prefix="/api/v1",
 )
+
+app.include_router(
+    comments_router,
+    prefix="/api/v1",
+)
+
