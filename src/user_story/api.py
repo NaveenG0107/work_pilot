@@ -37,7 +37,7 @@ router = APIRouter(
 )
 
 
-@router.post("/{project_id}/user-stories", status_code=status.HTTP_201_CREATED, tags=["UserStory"])
+@router.post("/{project_id}/user-stories", status_code=status.HTTP_201_CREATED, tags=["User Stories"])
 @require_jwt
 async def create_user_story(
     project_id: str,
@@ -65,7 +65,7 @@ async def create_user_story(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories", tags=["UserStory"])
+@router.get("/{project_id}/user-stories", tags=["User Stories"])
 @require_jwt
 async def get_user_stories(
     project_id: str,
@@ -137,7 +137,7 @@ async def get_user_stories(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}", tags=["User Stories"])
 @require_jwt
 async def get_user_story(
     project_id: str,
@@ -164,7 +164,7 @@ async def get_user_story(
         return failure(exc)
 
 
-@router.patch("/{project_id}/user-stories/{user_story_id}", tags=["UserStory"])
+@router.patch("/{project_id}/user-stories/{user_story_id}", tags=["User Stories"])
 @require_jwt
 async def update_user_story(
     project_id: str,
@@ -192,7 +192,7 @@ async def update_user_story(
         return failure(exc)
 
 
-@router.patch("/{project_id}/user-stories/{user_story_id}/status", tags=["UserStory"])
+@router.patch("/{project_id}/user-stories/{user_story_id}/status", tags=["User Stories"])
 @require_jwt
 async def update_user_story_status(
     project_id: str,
@@ -220,7 +220,7 @@ async def update_user_story_status(
         return failure(exc)
 
 
-@router.patch("/{project_id}/user-stories/reorder", tags=["UserStory"])
+@router.patch("/{project_id}/user-stories/reorder", tags=["User Stories"])
 @require_jwt
 async def reorder_user_stories(
     project_id: str,
@@ -246,7 +246,7 @@ async def reorder_user_stories(
         return failure(exc)
 
 
-@router.delete("/{project_id}/user-stories/{user_story_id}", tags=["UserStory"])
+@router.delete("/{project_id}/user-stories/{user_story_id}", tags=["User Stories"])
 @require_jwt
 async def delete_user_story(
     project_id: str,
@@ -273,7 +273,7 @@ async def delete_user_story(
         return failure(exc)
 
 
-@router.post("/{project_id}/user-stories/{user_story_id}/favorite", status_code=status.HTTP_201_CREATED, tags=["UserStory"])
+@router.post("/{project_id}/user-stories/{user_story_id}/favorite", status_code=status.HTTP_201_CREATED, tags=["Favorites"])
 @require_jwt
 async def add_user_story_favorite(
     project_id: str,
@@ -299,7 +299,7 @@ async def add_user_story_favorite(
         return failure(exc)
 
 
-@router.delete("/{project_id}/user-stories/{user_story_id}/favorite", tags=["UserStory"])
+@router.delete("/{project_id}/user-stories/{user_story_id}/favorite", tags=["Favorites"])
 @require_jwt
 async def remove_user_story_favorite(
     project_id: str,
@@ -325,7 +325,7 @@ async def remove_user_story_favorite(
         return failure(exc)
 
 
-@router.post("/{project_id}/user-stories/{user_story_id}/attachments", status_code=status.HTTP_201_CREATED, tags=["UserStory"])
+@router.post("/{project_id}/user-stories/{user_story_id}/attachments", status_code=status.HTTP_201_CREATED, tags=["User Story Attachments"])
 @require_jwt
 async def upload_user_story_attachment(
     project_id: str,
@@ -353,7 +353,7 @@ async def upload_user_story_attachment(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}/attachments", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}/attachments", tags=["User Story Attachments"])
 @require_jwt
 async def get_user_story_attachments(
     project_id: str,
@@ -380,7 +380,7 @@ async def get_user_story_attachments(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}/attachments/{attachment_id}/download", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}/attachments/{attachment_id}/download", tags=["User Story Attachments"])
 @require_jwt
 async def download_user_story_attachment(
     project_id: str,
@@ -415,7 +415,7 @@ async def download_user_story_attachment(
         return failure(exc)
 
 
-@router.delete("/{project_id}/user-stories/{user_story_id}/attachments/{attachment_id}", tags=["UserStory"])
+@router.delete("/{project_id}/user-stories/{user_story_id}/attachments/{attachment_id}", tags=["User Story Attachments"])
 @require_jwt
 async def delete_user_story_attachment(
     project_id: str,
@@ -444,7 +444,7 @@ async def delete_user_story_attachment(
         return failure(exc)
 
 
-@router.post("/{project_id}/user-stories/{user_story_id}/comments", status_code=status.HTTP_201_CREATED, tags=["UserStory"])
+@router.post("/{project_id}/user-stories/{user_story_id}/comments", status_code=status.HTTP_201_CREATED, tags=["Comments"])
 @require_jwt
 async def create_user_story_comment(
     project_id: str,
@@ -472,7 +472,7 @@ async def create_user_story_comment(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}/comments", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}/comments", tags=["Comments"])
 @require_jwt
 async def get_user_story_comments(
     project_id: str,
@@ -501,7 +501,7 @@ async def get_user_story_comments(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["Comments"])
 @require_jwt
 async def get_user_story_comment(
     project_id: str,
@@ -530,7 +530,7 @@ async def get_user_story_comment(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-stories/{user_story_id}/comments/replies/{parent_comment_id}", tags=["UserStory"])
+@router.get("/{project_id}/user-stories/{user_story_id}/comments/replies/{parent_comment_id}", tags=["Comments"])
 @require_jwt
 async def get_user_story_comment_replies(
     project_id: str,
@@ -561,7 +561,7 @@ async def get_user_story_comment_replies(
         return failure(exc)
 
 
-@router.patch("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["UserStory"])
+@router.patch("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["Comments"])
 @require_jwt
 async def update_user_story_comment(
     project_id: str,
@@ -591,7 +591,7 @@ async def update_user_story_comment(
         return failure(exc)
 
 
-@router.delete("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["UserStory"])
+@router.delete("/{project_id}/user-stories/{user_story_id}/comments/{comment_id}", tags=["Comments"])
 @require_jwt
 async def delete_user_story_comment(
     project_id: str,
