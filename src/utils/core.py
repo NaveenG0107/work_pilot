@@ -389,28 +389,44 @@ def UserProfileFromModel(user_model: Any) -> UserProfile:
     Convert an ORM User model (SQLAlchemy) into a Pydantic UserProfile.
     Matches internal/handlers/dto/response/mapping.go's UserProfileFromModel.
     """
-    # Derive avatar URL helper
-    avatar_url = None
-    if hasattr(user_model, "avatar_url") and user_model.avatar_url:
-        avatar_url = user_model.avatar_url
+    avatar_url = getattr(user_model, "avatar_url", None) or None
+    if avatar_url and isinstance(avatar_url, str) and not (avatar_url.startswith("http://") or avatar_url.startswith("https://")):
+        try:
+            from src.utils.storage import get_public_url
+            avatar_url = get_public_url(avatar_url)
+        except Exception:
+            pass
+
+    org_id = None
+    if getattr(user_model, "organization_id", None):
+        org_id = str(user_model.organization_id)
+
+    org_name = getattr(user_model, "organization_name", None)
+    if not org_name:
+        org_obj = getattr(user_model, "organization", None)
+        if org_obj is not None:
+            org_name = getattr(org_obj, "name", None)
+
+    role_obj = getattr(user_model, "role", None)
+    role_name = getattr(role_obj, "name", None) if role_obj is not None else "member"
 
     return UserProfile(
         id=str(user_model.id),
-        organization_id=str(user_model.organization_id) if user_model.organization_id else None,
-        organization_name=getattr(user_model, "organization_name", None) or (user_model.organization.name if hasattr(user_model, "organization") else None),
-        name=user_model.full_name,
-        username=user_model.username,
-        email=user_model.email,
-        role=user_model.role.name if user_model.role else "member",
+        organization_id=org_id,
+        organization_name=org_name,
+        name=getattr(user_model, "full_name", ""),
+        username=getattr(user_model, "username", ""),
+        email=getattr(user_model, "email", ""),
+        role=role_name,
         avatar_url=avatar_url,
-        color=user_model.color or "#3498DB",
-        timezone=user_model.timezone or "UTC",
-        is_active=user_model.is_active,
-        is_verified=user_model.is_verified,
-        status=user_model.status,
-        created_at=user_model.created_at,
+        color=getattr(user_model, "color", None) or "#3498DB",
+        timezone=getattr(user_model, "timezone", None) or "UTC",
+        is_active=getattr(user_model, "is_active", True),
+        is_verified=getattr(user_model, "is_verified", False),
+        status=getattr(user_model, "status", "active"),
+        created_at=getattr(user_model, "created_at", None),
         joined_at=getattr(user_model, "joined_at", None),
-        require_password_change=user_model.require_password_change,
+        require_password_change=getattr(user_model, "require_password_change", False),
     )
 
 
