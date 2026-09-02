@@ -539,7 +539,7 @@ class AuthService:
                 get_settings().refresh_token_expiry or 604800
             )
 
-            expires_at = datetime.now(dt_timezone.utc) + timedelta(minutes=refresh_expiry)
+            expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
             refresh_token = RefreshToken(
                 id=str(uuid.uuid4()),
@@ -702,7 +702,7 @@ class AuthService:
                 get_settings().refresh_token_expiry or 604800
             )
 
-            new_expires_at = datetime.now(dt_timezone.utc) + timedelta(minutes=refresh_expiry)
+            new_expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
             # Update existing token with new hash and expiration
             old_token.token_hash = new_hash
@@ -1088,7 +1088,7 @@ class AuthService:
                 get_settings().refresh_token_expiry or 604800
             )
 
-            expires_at = datetime.now(dt_timezone.utc) + timedelta(minutes=refresh_expiry)
+            expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
             refresh_token = RefreshToken(
                 id=str(uuid.uuid4()),

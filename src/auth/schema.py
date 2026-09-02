@@ -33,6 +33,27 @@ class AuthTokensResponse(BaseModel):
     require_password_change: bool
 
 
+class AuthTokenSuccessResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+    data: AuthTokensResponse
+
+
+class AuthSuccessResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+
+
+class UserIDResponse(BaseModel):
+    userID: UUID
+
+
+class UpdateUserSuccessResponse(AuthSuccessResponse):
+    data: UserIDResponse
+
+
 # ============================================================
 # SIGN IN
 # ============================================================
@@ -41,14 +62,6 @@ class SignInRequest(BaseModel):
     email: EmailStr
     password: str
 
-    # These are populated internally, not from JSON.
-    # Go:
-    # Platform       Platform `json:"-"`
-    # OrganizationID string   `json:"-"`
-
-    platform: Platform | None = None
-    organization_id: str | None = None
-
 
 # ============================================================
 # REFRESH TOKEN
@@ -56,10 +69,6 @@ class SignInRequest(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
-
-    # Populated internally
-    platform: Platform | None = None
-    user_id: str | None = None
 
 
 # ============================================================
@@ -82,9 +91,6 @@ class SignUpRequest(BaseModel):
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
     otp: str
-
-    # Populated from X-Client-Platform header
-    platform: Platform | None = None
 
 
 # ============================================================
