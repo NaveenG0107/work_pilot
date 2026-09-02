@@ -1,3 +1,5 @@
+import json
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -33,7 +35,25 @@ class GoValidationRoute(APIRoute):
         async def handler(request: Request):
             auth_error = await authenticate_request(request)
             if auth_error is not None:
-                return auth_error
+                try:
+                    auth_detail = json.loads(auth_error.body)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    auth_detail = {}
+
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={
+                        "success": False,
+                        "error": {
+                            "code": auth_detail.get("code", "UNAUTHORIZED"),
+                            "status_code": status.HTTP_401_UNAUTHORIZED,
+                            "message": auth_detail.get(
+                                "message",
+                                "Authentication required",
+                            ),
+                        },
+                    },
+                )
             try:
                 return await original(request)
             except RequestValidationError as exc:
