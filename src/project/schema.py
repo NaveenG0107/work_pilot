@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timezone
 import uuid
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -9,6 +9,8 @@ omit_empty = lambda value: value is None or value == "" or value == []
 PROJECT_STATUSES = [
     "planning", "active", "on_hold", "completed", "cancelled", "archived"
 ]
+
+ResponseData = TypeVar("ResponseData")
 
 
 def validate_uuid(value: str | None) -> str | None:
@@ -75,6 +77,42 @@ class PaginationResponse(BaseModel):
     has_previous: bool
 
 
+class SuccessResponse(BaseModel, Generic[ResponseData]):
+    success: bool
+    status_code: int
+    message: str
+    data: ResponseData
+
+
+class SuccessWithoutDataResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+
+
+class PaginatedSuccessResponse(SuccessResponse[ResponseData], Generic[ResponseData]):
+    meta: PaginationResponse
+
+
+class ProjectIDResponse(BaseModel):
+    project_id: str
+
+
+class LegacyProjectIDResponse(BaseModel):
+    ProjectID: str
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    status_code: int
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: ErrorDetail
+
+
 class SprintResponse(BaseModel):
     id: str
     name: str
@@ -111,7 +149,7 @@ class ProjectSummary(BaseModel):
     sprint_count: int = 0
     total_tasks: int = 0
     total_members: int = 0
-    slug: str | None = None
+    slug: str | None = Field(default=None, exclude_if=omit_empty)
     sprints: list[SprintResponse] | None = Field(default=None, exclude_if=omit_empty)
 
     model_config = ConfigDict(from_attributes=True)
@@ -134,7 +172,7 @@ class ProjectMemberResponse(BaseModel):
     full_name: str
     role: str
     avatar_url: str | None
-    color: str
+    color: str = Field(default="", exclude_if=omit_empty)
     organization_name: str | None = Field(default=None, exclude_if=omit_empty)
     project_key: str | None = Field(default=None, exclude_if=omit_empty)
 
@@ -200,12 +238,21 @@ class UserProjectRoleResponse(BaseModel):
     role: str
 
 
+class ProjectActivityUser(BaseModel):
+    id: str
+    name: str
+    email: str
+    avatar_url: str | None
+    color: str
+    role: str | None = Field(default=None, exclude_if=omit_empty)
+
+
 class ProjectActivityResponse(BaseModel):
     id: str
     project_id: str | None = Field(default=None, exclude_if=omit_empty)
     project_name: str | None = Field(default=None, exclude_if=omit_empty)
     organization_id: str | None = Field(default=None, exclude_if=omit_empty)
-    user: dict[str, Any] | None = Field(default=None, exclude_if=omit_empty)
+    user: ProjectActivityUser | None = Field(default=None, exclude_if=omit_empty)
     action: str
     resource_type: str
     resource_id: str | None = Field(default=None, exclude_if=omit_empty)
