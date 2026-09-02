@@ -34,8 +34,8 @@ from src.utils.setting import get_settings
 
 
 router = APIRouter(
-    prefix="/api/v1/auth",
     tags=["Authentication"],
+    prefix="/auth",
 )
 
 
