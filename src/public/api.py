@@ -1,12 +1,13 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, status  # type: ignore
+from fastapi.responses import JSONResponse  # type: ignore
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.config import get_logger
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.public.schema import (
     CountriesResponse,
     FullHealthResponse,
@@ -26,7 +27,11 @@ def get_public_service(db: AsyncSession = Depends(get_db)) -> PublicService:
 
 
 @router.get("/health", response_model=HealthResponse | FullHealthResponse, tags=["Public"])
-async def health_check(full: bool = Query(default=False), db: AsyncSession = Depends(get_db)):
+async def health_check(
+    full: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     if not full:
@@ -36,49 +41,49 @@ async def health_check(full: bool = Query(default=False), db: AsyncSession = Dep
             timestamp=timestamp,
         )
 
-    try:
-        await db.execute(text("SELECT 1"))
+    database_result, redis_result = await asyncio.gather(
+        db.execute(text("SELECT 1")),
+        redis.ping(),
+        return_exceptions=True,
+    )
 
-        return FullHealthResponse(
-            status="healthy",
-            version="v1",
-            timestamp=timestamp,
-            dependencies=HealthDependencies(database="healthy"),
-        )
+    database_status = (
+        "unhealthy" if isinstance(database_result, BaseException) else "healthy"
+    )
+    redis_status = (
+        "unhealthy" if isinstance(redis_result, BaseException) else "healthy"
+    )
 
-    except SQLAlchemyError:
-        logger.exception("Database health check failed")
+    if database_status == "unhealthy":
+        logger.error("Database health check failed: %s", database_result)
+    if redis_status == "unhealthy":
+        logger.error("Redis health check failed: %s", redis_result)
 
-        response = FullHealthResponse(
-            status="unhealthy",
-            version="v1",
-            timestamp=timestamp,
-            dependencies=HealthDependencies(database="unhealthy"),
-        )
+    is_healthy = database_status == "healthy" and redis_status == "healthy"
+    response = FullHealthResponse(
+        status="healthy" if is_healthy else "unhealthy",
+        version="v1",
+        timestamp=timestamp,
+        dependencies=HealthDependencies(
+            database=database_status,
+            redis=redis_status,
+        ),
+    )
 
+    if not is_healthy:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=response.model_dump(),
         )
 
-    except Exception:
-        logger.exception("Unexpected health check error")
-
-        response = FullHealthResponse(
-            status="unhealthy",
-            version="v1",
-            timestamp=timestamp,
-            dependencies=HealthDependencies(database="unhealthy"),
-        )
-
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=response.model_dump(),
-        )
+    return response
 
 
 @router.get("/countries", response_model=CountriesResponse, tags=["Lookup"])
-async def get_all_countries(name: str | None = Query(default=None, description="Filter countries by name"), service: PublicService = Depends(get_public_service),):
+async def get_all_countries(
+    name: str | None = Query(default=None, description="Filter countries by name"),
+    service: PublicService = Depends(get_public_service),
+):
     try:
         countries = await service.get_countries(name=name)
 
