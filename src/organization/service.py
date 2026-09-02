@@ -282,10 +282,11 @@ class OrganizationService:
     # ---------------------------------------------------------------- create
 
     async def create_organization(self, name: str, domain: str, industry: str, team_size: str,
-                                  country: str, created_by: str, logo_url: Optional[str]) -> AuthTokensResponse:
+                                  country: str, created_by: str, logo_url: Optional[str],
+                                  organization_id: Optional[str] = None) -> AuthTokensResponse:
         slug = _slug_from_domain(domain)
         org = Organization(
-            id=str(uuid_lib.uuid4()), name=name, domain=domain, industry=industry,
+            id=organization_id or str(uuid_lib.uuid4()), name=name, domain=domain, industry=industry,
             team_size=team_size, country=country, logo_url=logo_url or None,
             slug=slug, created_by=created_by, is_active=True,
             created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
@@ -452,7 +453,8 @@ class OrganizationService:
     # --------------------------------------------------------------- update
 
     async def update_organization(self, org_id: UUID, user_id: UUID, name: Optional[str], domain: Optional[str],
-                                  team_size: Optional[str], country: Optional[str]) -> None:
+                                  team_size: Optional[str], country: Optional[str],
+                                  logo_url: Optional[str] = None) -> None:
         result = await self.db.execute(
             select(Organization).where(Organization.id == str(org_id))
         )
@@ -469,6 +471,8 @@ class OrganizationService:
             org.team_size = team_size
         if country is not None:
             org.country = country
+        if logo_url is not None:
+            org.logo_url = logo_url
         org.updated_at = datetime.now(timezone.utc)
         try:
             await self.db.commit()

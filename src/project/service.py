@@ -198,7 +198,7 @@ class ProjectService:
 
             # 2. Create default custom statuses for tasks
             for name, color, order, is_default, is_final in DEFAULT_TASK_STATUSES:
-                self.db.add(CustomStatus(000000000000000000
+                self.db.add(CustomStatus(
                     project_id=project.id,
                     name=name,
                     color=color,

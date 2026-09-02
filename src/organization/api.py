@@ -6,7 +6,7 @@ All routes require a valid access token; service-level checks enforce org-level 
 
 import os
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -77,23 +77,36 @@ async def update_organization(
     org_id = UUID(current_user["organization_id"])
     country_name = None
     uploaded_key = None
-
-    if logo is not None and logo.filename:
-        _url, uploaded_key = storage_service.upload_logo(
-            logo.file, logo.filename or "logo", logo.content_type or "image/*"
-        )
+    logo_url = None
 
     if country_id:
-        if uploaded_key:
-            storage_service.delete_object(uploaded_key)
         country = await _get_country(service.db, country_id)
         if country is None:
             return error("Invalid country id", 400, code="VALIDATION_ERROR")
         country_name = country.name
 
-    await service.update_organization(
-        org_id, UUID(current_user["user_id"]), name=name, domain=domain, team_size=team_size, country=country_name
-    )
+    if logo is not None and logo.filename:
+        logo_url, uploaded_key = storage_service.upload_logo(
+            logo.file,
+            logo.filename or "logo",
+            logo.content_type or "application/octet-stream",
+            organization_id=str(org_id),
+        )
+
+    try:
+        await service.update_organization(
+            org_id,
+            UUID(current_user["user_id"]),
+            name=name,
+            domain=domain,
+            team_size=team_size,
+            country=country_name,
+            logo_url=logo_url,
+        )
+    except Exception:
+        if uploaded_key:
+            storage_service.delete_object(uploaded_key)
+        raise
     return success("Updated Organization successfully", data={"organizationID": str(org_id)})
 
 
@@ -178,15 +191,20 @@ async def create_organization(
 
     logo_url = None
     uploaded_key = None
+    organization_id = str(uuid4())
     if logo is not None and logo.filename:
         logo_url, uploaded_key = storage_service.upload_logo(
-            logo.file, logo.filename or "logo", logo.content_type or "image/*"
+            logo.file,
+            logo.filename or "logo",
+            logo.content_type or "application/octet-stream",
+            organization_id=organization_id,
         )
 
     try:
         tokens = await service.create_organization(
             name=name, domain=domain, industry=industry, team_size=team_size,
             country=country.name, created_by=user_id, logo_url=logo_url,
+            organization_id=organization_id,
         )
     except Exception:
         if uploaded_key:

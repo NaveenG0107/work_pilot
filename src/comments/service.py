@@ -31,7 +31,12 @@ from src.project.models import Project, ProjectMember
 from src.task.models import Task
 from src.user_story.models import UserStory
 from src.utils.setting import get_settings
-from src.utils.storage import upload_comment_attachment_to_s3, get_s3_object, delete_s3_object
+from src.utils.storage import (
+    build_attachment_key,
+    delete_s3_object,
+    get_s3_object,
+    upload_comment_attachment_to_s3,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1325,8 +1330,8 @@ class CommentService:
 
             att_id = str(uuid7())
             sanitized_name = sanitize_filename(orig_filename)
-            stored_name = f"{att_id}-{sanitized_name}"
-            storage_path = f"comments/{comment_id}/attachments/{stored_name}"
+            storage_path = build_attachment_key("comments", comment_id, sanitized_name)
+            stored_name = storage_path.rsplit("/", 1)[-1]
             content_type = file.content_type or "application/octet-stream"
 
             # Upload directly to S3 storage 

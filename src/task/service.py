@@ -54,6 +54,7 @@ from src.user_story_status.models import UserStoryStatus
 from src.utils.setting import get_settings
 from src.utils.storage import (
     StorageConfigurationError,
+    build_attachment_key,
     delete_s3_object,
     get_s3_object,
     upload_s3_object,
@@ -2075,7 +2076,7 @@ class TaskService:
         attachments: list[TaskAttachment] = []
         try:
             for original, data, sanitized, mime_type in prepared:
-                key = f"tasks/{task_id}/attachments/{uuid.uuid4()}-{sanitized}"
+                key = build_attachment_key("tasks", task_id, sanitized)
                 url = await asyncio.to_thread(upload_s3_object, data, key, mime_type)
                 uploaded_keys.append(key)
                 attachment = TaskAttachment(
