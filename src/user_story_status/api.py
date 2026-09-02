@@ -1,156 +1,182 @@
-from uuid import UUID
-
-from fastapi import (
-    APIRouter,
-    Depends,
-    status,
-)
+from fastapi import APIRouter, Depends, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .schema import (
+from src.auth.deps import security as bearer_scheme
+from src.config import get_logger
+from src.database import get_db
+from src.user_story_status.schema import (
     CreateUserStoryStatusRequest,
     UpdateUserStoryStatusRequest,
-    SuccessResponse,
 )
-from .service import UserStoryStatusService
-from src.database import get_db
+from src.user_story_status.service import (
+    UserStoryStatusService,
+    UserStoryStatusServiceError,
+)
+from src.utils.core import require_jwt
+from src.utils.user_story_helper import GoValidationRoute, dumped, failure, success
 
+logger = get_logger(__name__)
 
 router = APIRouter(
-    prefix="/projects/{project_id}/user-story-statuses",
-    tags=["UserStoryStatus"],
+    prefix="/projects",
+    route_class=GoValidationRoute,
+    dependencies=[Depends(bearer_scheme)],
+    default_response_class=JSONResponse,
 )
 
-from uuid import UUID 
 
+def get_user_story_status_service(db: AsyncSession = Depends(get_db)) -> UserStoryStatusService:
+    return UserStoryStatusService(db)
 
-async def get_current_user():
-    return {
-        "user_id": UUID("6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc"),
-        "organization_id": UUID("6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd"),
-    }
 
 @router.post(
-    "",
+    "/{project_id}/user-story-statuses",
     status_code=status.HTTP_201_CREATED,
+    tags=["User Story Statuses"],
 )
+@require_jwt
 async def create_status(
-    project_id: UUID,
+    project_id: str,
     payload: CreateUserStoryStatusRequest,
-    current_user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    request: Request,
+    service: UserStoryStatusService = Depends(get_user_story_status_service),
 ):
+    try:
+        user_id = request.state.user_id
+        org_id = getattr(request.state, "organization_id", None)
 
-    user_id = current_user["user_id"]
-    organization_id = current_user["organization_id"]
+        logger.info("Handling POST create status for project_id=%s", project_id)
 
-    service = UserStoryStatusService(db)
+        res = await service.create_status(
+            request=payload,
+            project_id_or_slug=project_id,
+            user_id=user_id,
+            organization_id=org_id,
+        )
 
-    result = await service.create_status(
-        request=payload,
-        project_id=project_id,
-        user_id=user_id,
-        organization_id=organization_id,
-    )
+        logger.info("Successfully created status ID=%s", res.id)
 
-    return {
-        "success": True,
-        "status_code": status.HTTP_201_CREATED,
-        "message": "User Story status created successfully",
-        "data": result,
-    }
+        return success("User Story status created successfully", dumped(res), code=status.HTTP_201_CREATED)
+
+    except UserStoryStatusServiceError as exc:
+        logger.warning("User story status service error: %s", exc.message)
+        return failure(exc)
+
+    except Exception as exc:
+        logger.error("Unexpected error creating status: %s", exc, exc_info=True)
+        return failure(exc)
+
 
 @router.get(
-    "",
+    "/{project_id}/user-story-statuses",
     status_code=status.HTTP_200_OK,
+    tags=["User Story Statuses"],
 )
+@require_jwt
 async def get_statuses(
-    project_id: UUID,
-    current_user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    project_id: str,
+    request: Request,
+    service: UserStoryStatusService = Depends(get_user_story_status_service),
 ):
+    try:
+        user_id = request.state.user_id
+        org_id = getattr(request.state, "organization_id", None)
 
-    user_id = current_user["user_id"]
-    organization_id = current_user["organization_id"]
+        logger.info("Handling GET statuses for project_id=%s", project_id)
 
-    service = UserStoryStatusService(db)
+        res = await service.get_statuses(
+            project_id_or_slug=project_id,
+            user_id=user_id,
+            organization_id=org_id,
+        )
 
-    result = await service.get_statuses(
-        project_id=project_id,
-        user_id=user_id,
-        organization_id=organization_id,
-    )
+        logger.info("Successfully retrieved %d statuses", len(res))
 
-    return {
-        "success": True,
-        "status_code": status.HTTP_200_OK,
-        "message": (
-            "User Story statuses retrieved successfully"
-        ),
-        "data": result,
-    }
+        return success("User Story statuses retrieved successfully", dumped(res))
+
+    except UserStoryStatusServiceError as exc:
+        logger.warning("User story status service error: %s", exc.message)
+        return failure(exc)
+
+    except Exception as exc:
+        logger.error("Unexpected error getting statuses: %s", exc, exc_info=True)
+        return failure(exc)
+
 
 @router.patch(
-    "/{status_id}",
+    "/{project_id}/user-story-statuses/{status_id}",
     status_code=status.HTTP_200_OK,
+    tags=["User Story Statuses"],
 )
+@require_jwt
 async def update_status(
-    project_id: UUID,
-    status_id: UUID,
+    project_id: str,
+    status_id: str,
     payload: UpdateUserStoryStatusRequest,
-    current_user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    request: Request,
+    service: UserStoryStatusService = Depends(get_user_story_status_service),
 ):
+    try:
+        user_id = request.state.user_id
+        org_id = getattr(request.state, "organization_id", None)
 
-    user_id = current_user["user_id"]
-    organization_id = current_user["organization_id"]
+        logger.info("Handling PATCH status ID=%s for project_id=%s", status_id, project_id)
 
-    service = UserStoryStatusService(db)
+        res = await service.update_status(
+            request=payload,
+            project_id_or_slug=project_id,
+            status_id=status_id,
+            user_id=user_id,
+            organization_id=org_id,
+        )
 
-    result = await service.update_status(
-        request=payload,
-        project_id=project_id,
-        status_id=status_id,
-        user_id=user_id,
-        organization_id=organization_id,
-    )
+        logger.info("Successfully updated status ID=%s", status_id)
 
-    return {
-        "success": True,
-        "status_code": status.HTTP_200_OK,
-        "message": "User Story status updated successfully",
-        "data": result,
-    }
+        return success("User Story status updated successfully", dumped(res))
+
+    except UserStoryStatusServiceError as exc:
+        logger.warning("User story status service error: %s", exc.message)
+        return failure(exc)
+
+    except Exception as exc:
+        logger.error("Unexpected error updating status: %s", exc, exc_info=True)
+        return failure(exc)
 
 
 @router.delete(
-    "/{status_id}",
+    "/{project_id}/user-story-statuses/{status_id}",
     status_code=status.HTTP_200_OK,
+    tags=["User Story Statuses"],
 )
+@require_jwt
 async def delete_status(
-    project_id: UUID,
-    status_id: UUID,
-    current_user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    project_id: str,
+    status_id: str,
+    request: Request,
+    service: UserStoryStatusService = Depends(get_user_story_status_service),
 ):
+    try:
+        user_id = request.state.user_id
+        org_id = getattr(request.state, "organization_id", None)
 
-    user_id = current_user["user_id"]
-    organization_id = current_user["organization_id"]
+        logger.info("Handling DELETE status ID=%s for project_id=%s", status_id, project_id)
 
-    service = UserStoryStatusService(db)
+        res = await service.delete_status(
+            status_id=status_id,
+            project_id_or_slug=project_id,
+            user_id=user_id,
+            organization_id=org_id,
+        )
 
-    await service.delete_status(
-        status_id=status_id,
-        project_id=project_id,
-        user_id=user_id,
-        organization_id=organization_id,
-    )
+        logger.info("Successfully deleted status ID=%s", status_id)
 
-    return {
-        "success": True,
-        "status_code": status.HTTP_200_OK,
-        "message": "User Story status deleted successfully",
-        "data": {
-            "status_id": status_id,
-        },
-    }
+        return success("User Story status deleted successfully", res)
+
+    except UserStoryStatusServiceError as exc:
+        logger.warning("User story status service error: %s", exc.message)
+        return failure(exc)
+
+    except Exception as exc:
+        logger.error("Unexpected error deleting status: %s", exc, exc_info=True)
+        return failure(exc)

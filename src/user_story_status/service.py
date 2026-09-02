@@ -1,770 +1,385 @@
-from uuid import UUID
+import uuid
 from datetime import datetime, timezone
-
-from fastapi import HTTPException, status
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from uuid6 import uuid7
 
-from .models import UserStoryStatus
-from .schema import (
+from src.audit.models import AuditLog, AuditLogType
+from src.auth.models import User
+from src.config import get_logger
+from src.organization.models import Role
+from src.project.models import Project, ProjectMember
+from src.user_story.models import UserStory
+from src.user_story_status.models import UserStoryStatus
+from src.user_story_status.schema import (
     CreateUserStoryStatusRequest,
     UpdateUserStoryStatusRequest,
     UserStoryStatusResponse,
 )
 
+logger = get_logger(__name__)
 
-# =========================================================
-# Repository
-# =========================================================
 
-class UserStoryStatusRepository:
+class UserStoryStatusServiceError(Exception):
+    def __init__(self, status_code: int, code: str, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
 
-    # -----------------------------------------------------
-    # Create
-    # -----------------------------------------------------
-
-    async def create_status(
-        self,
-        status_model: UserStoryStatus,
-    ) -> UserStoryStatus:
-
-        self.db.add(status_model)
-        await self.db.flush()
-
-        return status_model
-
-    # -----------------------------------------------------
-    # Get all statuses for project
-    # -----------------------------------------------------
-
-    async def get_statuses_by_project_id(
-        self,
-        project_id: str,
-    ) -> list[UserStoryStatus]:
-
-        result = await self.db.execute(
-            select(UserStoryStatus)
-            .where(
-                UserStoryStatus.project_id == project_id,
-                UserStoryStatus.deleted_at.is_(None),
-            )
-            .order_by(UserStoryStatus.display_order)
-        )
-
-        return list(result.scalars().all())
-
-    # -----------------------------------------------------
-    # Get single status
-    # -----------------------------------------------------
-
-    async def get_status_by_id(
-        self,
-        status_id: str,
-        project_id: str,
-    ) -> UserStoryStatus | None:
-
-        result = await self.db.execute(
-            select(UserStoryStatus)
-            .where(
-                UserStoryStatus.id == status_id,
-                UserStoryStatus.project_id == project_id,
-                UserStoryStatus.deleted_at.is_(None),
-            )
-        )
-
-        return result.scalar_one_or_none()
-
-    # -----------------------------------------------------
-    # Check duplicate status name
-    # -----------------------------------------------------
-
-    async def is_status_name_exists(
-        self,
-        project_id: str,
-        name: str,
-    ) -> bool:
-
-        result = await self.db.execute(
-            select(UserStoryStatus.id)
-            .where(
-                UserStoryStatus.project_id == project_id,
-                func.lower(UserStoryStatus.name) == name.lower(),
-                UserStoryStatus.deleted_at.is_(None),
-            )
-            .limit(1)
-        )
-
-        return result.scalar_one_or_none() is not None
-
-    # -----------------------------------------------------
-    # Update
-    # -----------------------------------------------------
-
-    async def update_status(
-        self,
-        status_model: UserStoryStatus,
-    ) -> UserStoryStatus:
-
-        await self.db.flush()
-
-        return status_model
-
-    # -----------------------------------------------------
-    # Delete
-    # -----------------------------------------------------
-
-    async def delete_status(
-        self,
-        status_id: str,
-        project_id: str,
-    ) -> bool:
-
-        status_model = await self.get_status_by_id(
-            status_id,
-            project_id,
-        )
-
-        if status_model is None:
-            return False
-
-        # Soft delete
-        status_model.deleted_at = datetime.now(timezone.utc)
-
-        await self.db.flush()
-
+def _is_valid_uuid(val: str) -> bool:
+    try:
+        uuid.UUID(str(val).strip().strip('"').strip("'"))
         return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
-
-# =========================================================
-# Service
-# =========================================================
 
 class UserStoryStatusService:
-
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.repository = UserStoryStatusRepository(db)
 
-    # -----------------------------------------------------
-    # Authorization
-    # -----------------------------------------------------
+    async def _get_project(self, project_id_or_slug: str) -> Project:
+        if _is_valid_uuid(project_id_or_slug):
+            query = select(Project).where(
+                Project.id == str(project_id_or_slug),
+                Project.deleted_at.is_(None)
+            )
+        else:
+            query = select(Project).where(
+                Project.slug == str(project_id_or_slug),
+                Project.deleted_at.is_(None)
+            )
 
-    async def check_admin_or_pm(
+        project = (await self.db.execute(query)).scalar_one_or_none()
+
+        if not project:
+            logger.warning("Project not found for project_id_or_slug=%s", project_id_or_slug)
+            raise UserStoryStatusServiceError(404, "NOT_FOUND", "Project not found")
+
+        return project
+
+    async def _get_user(self, user_id: str) -> User:
+        user_query = select(User).where(
+            User.id == str(user_id),
+            User.deleted_at.is_(None)
+        ).options(
+            selectinload(User.role).selectinload(Role.permissions)
+        )
+
+        user = (await self.db.execute(user_query)).scalar_one_or_none()
+
+        if not user:
+            logger.warning("User not found for user_id=%s", user_id)
+            raise UserStoryStatusServiceError(404, "NOT_FOUND", "User not found")
+
+        return user
+
+    async def _check_authorization(self, project: Project, user_id: str) -> User:
+        user = await self._get_user(user_id)
+
+        role_name = getattr(user.role, "name", "") or ""
+        if role_name.lower() in ("superadmin", "super_admin"):
+            logger.warning("Super admin user_id=%s blocked from project activity", user_id)
+            raise UserStoryStatusServiceError(
+                403,
+                "FORBIDDEN",
+                "Super admins are not allowed to perform organization-level activities"
+            )
+
+        member = (await self.db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == str(project.id),
+                ProjectMember.user_id == str(user.id),
+                ProjectMember.deleted_at.is_(None)
+            )
+        )).scalars().first()
+
+        if member is not None or role_name.lower() == "org_admin":
+            return user
+
+        logger.warning("User user_id=%s forbidden from project_id=%s", user_id, project.id)
+        raise UserStoryStatusServiceError(403, "FORBIDDEN", "You do not have permission to view User Story statuses in this project")
+
+    async def _create_audit_log(
         self,
-        project_id: UUID,
-        user_id: UUID,
-    ) -> bool:
-
-        # Temporary testing
-        return True
-
-    async def check_project_member(
-        self,
-        project_id: UUID,
-        user_id: UUID,
-    ) -> bool:
-
-        # Temporary testing
-        return True
-
-    # -----------------------------------------------------
-    # Audit
-    # -----------------------------------------------------
-
-    async def create_audit_log(
-        self,
-        user_id: UUID,
-        organization_id: UUID,
-        project_id: UUID,
+        user_id: str,
+        organization_id: str,
+        project_id: str,
         action: str,
         resource_id: str | None = None,
         details: str | None = None,
     ):
-        # TODO: connect audit repository
-        pass
-
-    # =====================================================
-    # CREATE STATUS
-    # =====================================================
+        try:
+            audit_log = AuditLog(
+                user_id=str(user_id),
+                organization_id=str(organization_id) if organization_id else None,
+                project_id=str(project_id),
+                action=action,
+                resource_type="user_story_status",
+                resource_id=str(resource_id) if resource_id else None,
+                details=details,
+                type=AuditLogType.AUDIT if hasattr(AuditLogType, "AUDIT") else "audit",
+                created_at=datetime.now(timezone.utc),
+            )
+            self.db.add(audit_log)
+            await self.db.commit()
+        except Exception as exc:
+            logger.warning("Failed to create audit log: %s", exc)
 
     async def create_status(
         self,
         request: CreateUserStoryStatusRequest,
-        project_id: UUID,
-        user_id: UUID,
-        organization_id: UUID,
+        project_id_or_slug: str,
+        user_id: str,
+        organization_id: str | None = None,
     ) -> UserStoryStatusResponse:
+        logger.info("Creating User Story status for project=%s, name=%s", project_id_or_slug, request.name)
 
-        # -------------------------------------------------
-        # Authorization
-        # -------------------------------------------------
-
-        authorized = await self.check_admin_or_pm(
-            project_id,
-            user_id,
-        )
-
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have permission to manage "
-                    "User Story statuses in this project"
-                ),
-            )
-
-        # -------------------------------------------------
-        # Validate name
-        # -------------------------------------------------
+        project = await self._get_project(project_id_or_slug)
+        await self._check_authorization(project, user_id)
 
         name = request.name.strip()
-
         if not name or len(name) > 50:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Status name must be between 1 and 50 characters",
+            raise UserStoryStatusServiceError(422, "VALIDATION_ERROR", "Status name must be between 1 and 50 characters")
+
+        existing = (await self.db.execute(
+            select(UserStoryStatus).where(
+                UserStoryStatus.project_id == str(project.id),
+                func.lower(UserStoryStatus.name) == name.lower(),
+                UserStoryStatus.deleted_at.is_(None)
             )
+        )).scalar_one_or_none()
 
-        # -------------------------------------------------
-        # Check duplicate name
-        # -------------------------------------------------
-
-        exists = await self.repository.is_status_name_exists(
-            str(project_id),
-            name,
-        )
-
-        if exists:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Status name already exists in this project",
-            )
-
-        # -------------------------------------------------
-        # is_final and is_closed stay synchronized
-        # -------------------------------------------------
+        if existing is not None:
+            logger.warning("Duplicate status name=%s in project_id=%s", name, project.id)
+            raise UserStoryStatusServiceError(409, "CONFLICT", "Status name already exists in this project")
 
         is_closed = False
         is_final = False
 
         if request.is_final is not None:
-            is_final = request.is_final
+            is_final = bool(request.is_final)
             is_closed = is_final
-
         elif request.is_closed is not None:
-            is_closed = request.is_closed
+            is_closed = bool(request.is_closed)
             is_final = is_closed
 
-        # -------------------------------------------------
-        # Create model
-        # -------------------------------------------------
-
-        status_model = UserStoryStatus(
+        new_status = UserStoryStatus(
             id=str(uuid7()),
-            project_id=str(project_id),
+            project_id=str(project.id),
             name=name,
             color=request.color,
             display_order=request.display_order,
-            is_default=False,
             is_closed=is_closed,
             is_final=is_final,
+            is_default=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
 
-        # -------------------------------------------------
-        # Save
-        # -------------------------------------------------
+        self.db.add(new_status)
+        await self.db.commit()
 
-        try:
-
-            await self.repository.create_status(
-                status_model
-            )
-
-            await self.db.commit()
-
-            await self.db.refresh(
-                status_model
-            )
-
-        except Exception:
-
-            await self.db.rollback()
-
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create user story status",
-            )
-
-        # -------------------------------------------------
-        # Audit
-        # -------------------------------------------------
-
-        try:
-
-            await self.create_audit_log(
-                user_id=user_id,
-                organization_id=organization_id,
-                project_id=project_id,
-                action="created",
-                resource_id=status_model.id,
-                details=(
-                    f"User Story Status "
-                    f"'{status_model.name}' created"
-                ),
-            )
-
-        except Exception:
-            pass
-
-        # -------------------------------------------------
-        # Response
-        # -------------------------------------------------
-
-        return UserStoryStatusResponse.model_validate(
-            status_model
+        await self._create_audit_log(
+            user_id=user_id,
+            organization_id=organization_id or getattr(project, "organization_id", None),
+            project_id=str(project.id),
+            action="created",
+            resource_id=new_status.id,
+            details=f"User Story Status '{new_status.name}' created",
         )
 
-    # =====================================================
-    # GET STATUSES
-    # =====================================================
+        logger.info("Successfully created User Story status ID=%s", new_status.id)
+        return UserStoryStatusResponse.model_validate(new_status)
 
     async def get_statuses(
         self,
-        project_id: UUID,
-        user_id: UUID,
-        organization_id: UUID,
+        project_id_or_slug: str,
+        user_id: str,
+        organization_id: str | None = None,
     ) -> list[UserStoryStatusResponse]:
+        logger.info("Retrieving User Story statuses for project=%s", project_id_or_slug)
 
-        # -------------------------------------------------
-        # Authorization
-        # -------------------------------------------------
+        project = await self._get_project(project_id_or_slug)
+        await self._check_authorization(project, user_id)
 
-        authorized = await self.check_project_member(
-            project_id,
-            user_id,
-        )
+        statuses_query = select(UserStoryStatus).where(
+            UserStoryStatus.project_id == str(project.id),
+            UserStoryStatus.deleted_at.is_(None)
+        ).order_by(UserStoryStatus.display_order.asc())
 
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have permission to view "
-                    "User Story statuses in this project"
-                ),
-            )
+        statuses = list((await self.db.execute(statuses_query)).scalars())
 
-        # -------------------------------------------------
-        # Get statuses
-        # -------------------------------------------------
-
-        statuses = await self.repository.get_statuses_by_project_id(
-            str(project_id)
-        )
-
-        # -------------------------------------------------
-        # Convert to response
-        # -------------------------------------------------
-
-        responses = [
-            UserStoryStatusResponse.model_validate(item)
-            for item in statuses
+        response_list = [
+            UserStoryStatusResponse.model_validate(st)
+            for st in statuses
         ]
 
-        # -------------------------------------------------
-        # Sort
-        # -------------------------------------------------
+        for idx, res_item in enumerate(response_list):
+            res_item.display_order = idx
 
-        responses.sort(
-            key=lambda item: item.display_order
+        await self._create_audit_log(
+            user_id=user_id,
+            organization_id=organization_id or getattr(project, "organization_id", None),
+            project_id=str(project.id),
+            action="viewed",
+            details="User Story statuses viewed",
         )
 
-        # -------------------------------------------------
-        # Normalize display order
-        # -------------------------------------------------
-
-        for index, item in enumerate(responses):
-            item.display_order = index
-
-        # -------------------------------------------------
-        # Audit
-        # -------------------------------------------------
-
-        try:
-
-            await self.create_audit_log(
-                user_id=user_id,
-                organization_id=organization_id,
-                project_id=project_id,
-                action="viewed",
-            )
-
-        except Exception:
-            pass
-
-        return responses
-
-    # =====================================================
-    # UPDATE STATUS
-    # =====================================================
+        logger.info("Retrieved %d statuses for project_id=%s", len(response_list), project.id)
+        return response_list
 
     async def update_status(
         self,
         request: UpdateUserStoryStatusRequest,
-        project_id: UUID,
-        status_id: UUID,
-        user_id: UUID,
-        organization_id: UUID,
+        project_id_or_slug: str,
+        status_id: str,
+        user_id: str,
+        organization_id: str | None = None,
     ) -> UserStoryStatusResponse:
+        logger.info("Updating User Story status ID=%s for project=%s", status_id, project_id_or_slug)
 
-        # -------------------------------------------------
-        # Authorization
-        # -------------------------------------------------
+        project = await self._get_project(project_id_or_slug)
+        await self._check_authorization(project, user_id)
 
-        authorized = await self.check_admin_or_pm(
-            project_id,
-            user_id,
-        )
-
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have permission to manage "
-                    "User Story statuses in this project"
-                ),
+        status_model = (await self.db.execute(
+            select(UserStoryStatus).where(
+                UserStoryStatus.id == str(status_id),
+                UserStoryStatus.project_id == str(project.id),
+                UserStoryStatus.deleted_at.is_(None)
             )
+        )).scalar_one_or_none()
 
-        # -------------------------------------------------
-        # Get existing status
-        # -------------------------------------------------
-
-        existing = await self.repository.get_status_by_id(
-            str(status_id),
-            str(project_id),
-        )
-
-        if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Status not found",
-            )
+        if status_model is None:
+            logger.warning("Status ID=%s not found in project_id=%s", status_id, project.id)
+            raise UserStoryStatusServiceError(404, "NOT_FOUND", "User story status not found")
 
         updated = False
 
-        # -------------------------------------------------
-        # Name
-        # -------------------------------------------------
-
         if request.name is not None:
-
             trimmed_name = request.name.strip()
-
             if not trimmed_name or len(trimmed_name) > 50:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Status name must be between "
-                        "1 and 50 characters"
-                    ),
-                )
+                raise UserStoryStatusServiceError(422, "VALIDATION_ERROR", "Status name must be between 1 and 50 characters")
 
-            if trimmed_name.lower() != existing.name.lower():
-
-                exists = await self.repository.is_status_name_exists(
-                    str(project_id),
-                    trimmed_name,
-                )
-
-                if exists:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            "Status name already exists "
-                            "in this project"
-                        ),
+            if trimmed_name.lower() != status_model.name.lower():
+                existing = (await self.db.execute(
+                    select(UserStoryStatus).where(
+                        UserStoryStatus.project_id == str(project.id),
+                        func.lower(UserStoryStatus.name) == trimmed_name.lower(),
+                        UserStoryStatus.deleted_at.is_(None)
                     )
+                )).scalar_one_or_none()
 
-            if trimmed_name != existing.name:
+                if existing is not None:
+                    raise UserStoryStatusServiceError(409, "CONFLICT", "Status name already exists in this project")
 
-                existing.name = trimmed_name
+            if trimmed_name != status_model.name:
+                status_model.name = trimmed_name
                 updated = True
 
-        # -------------------------------------------------
-        # Color
-        # -------------------------------------------------
+        if request.color is not None and request.color != status_model.color:
+            status_model.color = request.color
+            updated = True
 
-        if request.color is not None:
+        if request.display_order is not None and request.display_order != status_model.display_order:
+            status_model.display_order = request.display_order
+            updated = True
 
-            if request.color != existing.color:
+        if request.is_closed is not None and request.is_closed != status_model.is_closed:
+            status_model.is_closed = bool(request.is_closed)
+            status_model.is_final = bool(request.is_closed)
+            updated = True
 
-                existing.color = request.color
-                updated = True
-
-        # -------------------------------------------------
-        # Display order
-        # -------------------------------------------------
-
-        if request.display_order is not None:
-
-            if request.display_order < 0:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Display order must be greater "
-                        "than or equal to 0"
-                    ),
-                )
-
-            if request.display_order != existing.display_order:
-
-                existing.display_order = request.display_order
-                updated = True
-
-        # -------------------------------------------------
-        # Is closed
-        # -------------------------------------------------
-
-        if request.is_closed is not None:
-
-            if request.is_closed != existing.is_closed:
-
-                existing.is_closed = request.is_closed
-                existing.is_final = request.is_closed
-
-                updated = True
-
-        # -------------------------------------------------
-        # Is final
-        # -------------------------------------------------
-
-        if request.is_final is not None:
-
-            if request.is_final != existing.is_final:
-
-                existing.is_final = request.is_final
-                existing.is_closed = request.is_final
-
-                updated = True
-
-        # -------------------------------------------------
-        # Save
-        # -------------------------------------------------
+        if request.is_final is not None and request.is_final != status_model.is_final:
+            status_model.is_final = bool(request.is_final)
+            status_model.is_closed = bool(request.is_final)
+            updated = True
 
         if updated:
+            status_model.updated_at = datetime.now(timezone.utc)
+            await self.db.commit()
 
-            try:
+            await self._create_audit_log(
+                user_id=user_id,
+                organization_id=organization_id or getattr(project, "organization_id", None),
+                project_id=str(project.id),
+                action="updated",
+                resource_id=status_model.id,
+                details=f"User Story Status '{status_model.name}' updated",
+            )
 
-                await self.repository.update_status(
-                    existing
-                )
-
-                await self.db.commit()
-
-                await self.db.refresh(
-                    existing
-                )
-
-            except Exception:
-
-                await self.db.rollback()
-
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update user story status",
-                )
-
-            # -------------------------------------------------
-            # Audit
-            # -------------------------------------------------
-
-            try:
-
-                await self.create_audit_log(
-                    user_id=user_id,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    action="updated",
-                    resource_id=existing.id,
-                    details=(
-                        f"User Story Status "
-                        f"'{existing.name}' updated"
-                    ),
-                )
-
-            except Exception:
-                pass
-
-        return UserStoryStatusResponse.model_validate(
-            existing
-        )
-
-    # =====================================================
-    # DELETE STATUS
-    # =====================================================
+        logger.info("Successfully updated User Story status ID=%s", status_model.id)
+        return UserStoryStatusResponse.model_validate(status_model)
 
     async def delete_status(
         self,
-        status_id: UUID,
-        project_id: UUID,
-        user_id: UUID,
-        organization_id: UUID,
-    ):
+        status_id: str,
+        project_id_or_slug: str,
+        user_id: str,
+        organization_id: str | None = None,
+    ) -> dict:
+        logger.info("Deleting User Story status ID=%s from project=%s", status_id, project_id_or_slug)
 
-        # -------------------------------------------------
-        # Authorization
-        # -------------------------------------------------
+        project = await self._get_project(project_id_or_slug)
+        await self._check_authorization(project, user_id)
 
-        authorized = await self.check_admin_or_pm(
-            project_id,
-            user_id,
-        )
-
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have permission to manage "
-                    "User Story statuses in this project"
-                ),
+        status_model = (await self.db.execute(
+            select(UserStoryStatus).where(
+                UserStoryStatus.id == str(status_id),
+                UserStoryStatus.project_id == str(project.id),
+                UserStoryStatus.deleted_at.is_(None)
             )
+        )).scalar_one_or_none()
 
-        # -------------------------------------------------
-        # Get status
-        # -------------------------------------------------
+        if status_model is None:
+            logger.warning("Status ID=%s not found for deletion in project_id=%s", status_id, project.id)
+            raise UserStoryStatusServiceError(404, "NOT_FOUND", "User story status not found")
 
-        existing = await self.repository.get_status_by_id(
-            str(status_id),
-            str(project_id),
-        )
+        if status_model.is_default:
+            logger.warning("Attempt to delete default status ID=%s", status_id)
+            raise UserStoryStatusServiceError(400, "BUSINESS_RULE_VIOLATION", "A default status cannot be deleted")
 
-        if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Status not found",
+        statuses = list((await self.db.execute(
+            select(UserStoryStatus).where(
+                UserStoryStatus.project_id == str(project.id),
+                UserStoryStatus.deleted_at.is_(None)
             )
-
-        # -------------------------------------------------
-        # Cannot delete default status
-        # -------------------------------------------------
-
-        if existing.is_default:
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="A default status cannot be deleted",
-            )
-
-        # -------------------------------------------------
-        # Get all statuses
-        # -------------------------------------------------
-
-        statuses = await self.repository.get_statuses_by_project_id(
-            str(project_id)
-        )
-
-        # -------------------------------------------------
-        # Cannot delete only status
-        # -------------------------------------------------
+        )).scalars())
 
         if len(statuses) <= 1:
+            logger.warning("Attempt to delete only status ID=%s in project_id=%s", status_id, project.id)
+            raise UserStoryStatusServiceError(400, "BUSINESS_RULE_VIOLATION", "The project's only status cannot be deleted")
 
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "The project's only status "
-                    "cannot be deleted"
-                ),
+        stories_count = (await self.db.execute(
+            select(func.count(UserStory.id)).where(
+                UserStory.project_id == str(project.id),
+                UserStory.status_id == str(status_id),
+                UserStory.deleted_at.is_(None)
+            )
+        )).scalar() or 0
+
+        if stories_count > 0:
+            logger.warning("Status ID=%s is assigned to %d active stories", status_id, stories_count)
+            raise UserStoryStatusServiceError(
+                400,
+                "BUSINESS_RULE_VIOLATION",
+                "A status cannot be deleted while it is assigned to existing User Stories"
             )
 
-        # -------------------------------------------------
-        # Check assigned stories
-        # -------------------------------------------------
+        status_model.deleted_at = datetime.now(timezone.utc)
+        await self.db.commit()
 
-        count = await self.count_stories_by_status_id(
-            project_id,
-            status_id,
+        await self._create_audit_log(
+            user_id=user_id,
+            organization_id=organization_id or getattr(project, "organization_id", None),
+            project_id=str(project.id),
+            action="deleted",
+            resource_id=status_model.id,
+            details=f"User Story Status '{status_model.name}' deleted",
         )
 
-        if count > 0:
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "A status cannot be deleted while "
-                    "it is assigned to existing User Stories"
-                ),
-            )
-
-        # -------------------------------------------------
-        # Delete
-        # -------------------------------------------------
-
-        try:
-
-            deleted = await self.repository.delete_status(
-                str(status_id),
-                str(project_id),
-            )
-
-            if not deleted:
-
-                await self.db.rollback()
-
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Status not found",
-                )
-
-            await self.db.commit()
-
-        except HTTPException:
-            raise
-
-        except Exception:
-
-            await self.db.rollback()
-
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete user story status",
-            )
-
-        # -------------------------------------------------
-        # Audit
-        # -------------------------------------------------
-
-        try:
-
-            await self.create_audit_log(
-                user_id=user_id,
-                organization_id=organization_id,
-                project_id=project_id,
-                action="deleted",
-                resource_id=str(status_id),
-                details=(
-                    f"User Story Status "
-                    f"'{existing.name}' deleted"
-                ),
-            )
-
-        except Exception:
-            pass
-
-    # =====================================================
-    # COUNT STORIES
-    # =====================================================
-
-    async def count_stories_by_status_id(
-        self,
-        project_id: UUID,
-        status_id: UUID,
-    ) -> int:
-
-        # TODO:
-        # Add UserStory query here.
-        return 0
-
+        logger.info("Successfully deleted User Story status ID=%s", status_id)
+        return {"status_id": str(status_id)}
