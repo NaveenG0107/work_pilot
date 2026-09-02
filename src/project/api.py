@@ -1,3 +1,4 @@
+import json
 import uuid
 from typing import Any
 
@@ -10,8 +11,19 @@ from src.project.schema import (
     PROJECT_STATUSES,
     CreateProjectMemberRequest,
     CreateProjectRequest,
+    LegacyProjectIDResponse,
+    PaginatedSuccessResponse,
+    ProjectActivityResponse,
+    ProjectDetail,
+    ProjectIDResponse,
+    ProjectMemberResponse,
+    ProjectSummary,
+    SuccessResponse,
+    SuccessWithoutDataResponse,
     UpdateProjectMemberRequest,
     UpdateProjectRequest,
+    UserProjectRoleResponse,
+    UserProjectsResponse,
 )
 from src.project.service import ProjectService, ProjectServiceError
 from src.utils.core import (
@@ -29,7 +41,23 @@ class GoValidationRoute(APIRoute):
         async def handler(request: Request):
             auth_error = await authenticate_request(request)
             if auth_error is not None:
-                return auth_error
+                try:
+                    auth_detail = json.loads(auth_error.body)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    auth_detail = {}
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={
+                        "success": False,
+                        "error": {
+                            "code": auth_detail.get("code", "UNAUTHORIZED"),
+                            "status_code": status.HTTP_401_UNAUTHORIZED,
+                            "message": auth_detail.get(
+                                "message", "Authentication required"
+                            ),
+                        },
+                    },
+                )
             try:
                 return await original(request)
             except RequestValidationError as exc:
@@ -124,20 +152,6 @@ def failure(exc: Exception) -> JSONResponse:
     )
 
 
-def authorization_failure() -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_403_FORBIDDEN,
-        content={
-            "success": False,
-            "error": {
-                "code": "FORBIDDEN",
-                "status_code": status.HTTP_403_FORBIDDEN,
-                "message": "You do not have permission to perform this action",
-            },
-        },
-    )
-
-
 def validated_uuid(value: str) -> str:
     try:
         return str(uuid.UUID(value))
@@ -178,7 +192,12 @@ def dumped(value: Any) -> Any:
     return value.model_dump(mode="json", by_alias=True)
 
 
-@router.post("/create", status_code=status.HTTP_201_CREATED, tags=["Projects"])
+@router.post(
+    "/create",
+    status_code=status.HTTP_201_CREATED,
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def create_project(
     body: CreateProjectRequest,
@@ -188,9 +207,6 @@ async def create_project(
     try:
         user_id = request.state.user_id #'6a3b86a9-e93f-4a60-8cc7-e432b59bd2dc' 
         org_id = request.state.organization_id #'6a3b86a9-e93f-4a60-8cc7-e432b59bd2dd' 
-        role = request.state.role #'org_admin' 
-        if role != "org_admin":
-            return authorization_failure()
         project_id = await service.create(body, user_id, org_id)
         return success(
             "Successfully Created Project", {"project_id": project_id}, code=201
@@ -199,7 +215,11 @@ async def create_project(
         return failure(exc)
 
 
-@router.patch("/update/{project_id}", tags=["Projects"])
+@router.patch(
+    "/update/{project_id}",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def update_project(
     project_id: str,
@@ -217,7 +237,11 @@ async def update_project(
         return failure(exc)
 
 
-@router.get("/get", tags=["Projects"])
+@router.get(
+    "/get",
+    response_model=PaginatedSuccessResponse[list[ProjectSummary]],
+    tags=["Projects"],
+)
 @require_jwt
 async def get_projects(
     request: Request,
@@ -266,7 +290,11 @@ async def get_projects(
         return failure(exc)
 
 
-@router.get("/all-projects", tags=["Projects"])
+@router.get(
+    "/all-projects",
+    response_model=PaginatedSuccessResponse[list[ProjectSummary]],
+    tags=["Projects"],
+)
 @require_jwt
 async def get_all_projects(
     request: Request,
@@ -285,9 +313,6 @@ async def get_all_projects(
     service: ProjectService = Depends(get_project_service),
 ):
     try:
-        role = request.state.role #'super_admin' 
-        if role != "super_admin":
-            return authorization_failure()
         page, page_size = max(1, page), page_size if page_size > 0 else 10
         status_filter = validate_status(status_filter)
         sort_by, sort_order = normalized_sort(sort_by, sort_order)
@@ -320,6 +345,7 @@ async def get_all_projects(
 @router.post(
     "/add-members",
     status_code=status.HTTP_201_CREATED,
+    response_model=SuccessWithoutDataResponse,
     tags=["Project Members"],
 )
 @require_jwt
@@ -330,9 +356,6 @@ async def add_members(
 ):
     try:
         user_id, org_id = request.state.user_id, request.state.organization_id
-        role = request.state.role
-        if role != "org_admin":
-            return authorization_failure()
         await service.add_members(body, user_id, org_id)
         return success("Successfully Added Project Member", code=201)
     except Exception as exc:
@@ -341,6 +364,7 @@ async def add_members(
 
 @router.get(
     "/members/{project_id}",
+    response_model=PaginatedSuccessResponse[list[ProjectMemberResponse]],
     tags=["Project Members"],
 )
 @require_jwt
@@ -368,6 +392,7 @@ async def get_members(
 
 @router.delete(
     "/{project_id}/member/{user_id}",
+    response_model=SuccessResponse[LegacyProjectIDResponse],
     tags=["Project Members"],
 )
 @require_jwt
@@ -388,7 +413,11 @@ async def remove_member(
         return failure(exc)
 
 
-@router.patch("/{project_id}/member/{user_id}", tags=["Projects"])
+@router.patch(
+    "/{project_id}/member/{user_id}",
+    response_model=SuccessResponse[LegacyProjectIDResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def update_member(
     project_id: str,
@@ -408,7 +437,11 @@ async def update_member(
         return failure(exc)
 
 
-@router.get("/{project_id}/activity/{type}", tags=["Projects"])
+@router.get(
+    "/{project_id}/activity/{type}",
+    response_model=PaginatedSuccessResponse[list[ProjectActivityResponse]],
+    tags=["Projects"],
+)
 @require_jwt
 async def project_activity(
     project_id: str,
@@ -459,7 +492,6 @@ async def project_activity(
                     sprint_id = parsed
         org_id = request.state.organization_id
         page, page_size = max(1, page), page_size if page_size > 0 else 10
-        page_size = min(page_size, 100)
         data, meta = await service.activities(
             project_id,
             org_id,
@@ -485,7 +517,11 @@ async def project_activity(
         return failure(exc)
 
 
-@router.get("/{project_id}/detail", tags=["Projects"])
+@router.get(
+    "/{project_id}/detail",
+    response_model=SuccessResponse[ProjectDetail],
+    tags=["Projects"],
+)
 @require_jwt
 async def project_detail(
     project_id: str,
@@ -503,7 +539,11 @@ async def project_detail(
         return failure(exc)
 
 
-@router.delete("/{project_id}", tags=["Projects"])
+@router.delete(
+    "/{project_id}",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def delete_project(
     project_id: str,
@@ -513,9 +553,6 @@ async def delete_project(
     try:
         user_id = request.state.user_id
         org_id = request.state.organization_id
-        role = request.state.role
-        if role != "org_admin":
-            return authorization_failure()
         project_id = validated_uuid(project_id)
         await service.delete(project_id, user_id, org_id)
         return success("Project deleted successfully", {"project_id": project_id})
@@ -523,7 +560,11 @@ async def delete_project(
         return failure(exc)
 
 
-@router.get("/user/{user_id}", tags=["Projects"])
+@router.get(
+    "/user/{user_id}",
+    response_model=SuccessResponse[UserProjectsResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def projects_by_user(
     user_id: str,
@@ -533,15 +574,28 @@ async def projects_by_user(
     try:
         user_id = validated_uuid(user_id)
         org_id = request.state.organization_id
+        caller_id = request.state.user_id
+        caller_role = request.state.role
         return success(
             "Project retrieved successfully.",
-            dumped(await service.user_projects(user_id, org_id)),
+            dumped(
+                await service.user_projects(
+                    user_id,
+                    org_id,
+                    caller_id=caller_id,
+                    caller_role=caller_role,
+                )
+            ),
         )
     except Exception as exc:
         return failure(exc)
 
 
-@router.get("/recent", tags=["Projects"])
+@router.get(
+    "/recent",
+    response_model=SuccessResponse[UserProjectsResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def recent_projects(
     request: Request, service: ProjectService = Depends(get_project_service)
@@ -557,7 +611,11 @@ async def recent_projects(
         return failure(exc)
 
 
-@router.get("/{project_id}/user-role", tags=["Projects"])
+@router.get(
+    "/{project_id}/user-role",
+    response_model=SuccessResponse[UserProjectRoleResponse],
+    tags=["Projects"],
+)
 @require_jwt
 async def project_role(
     project_id: str,

@@ -24,10 +24,11 @@ from src.project.schema import (
     CreateProjectRequest,
     PaginationResponse,
     ProjectActivityResponse,
+    ProjectActivityUser,
     ProjectDetail,
-    ProjectListResponse,
     ProjectMemberResponse,
     ProjectMetrics,
+    ProjectSummary,
     SprintResponse,
     UpdateProjectMemberRequest,
     UpdateProjectRequest,
@@ -281,7 +282,7 @@ class ProjectService:
         projects: list[Project],
         include_sprints: bool,
         user_id: str | None = None,
-    ) -> list[ProjectListResponse]:
+    ) -> list[ProjectSummary]:
         if not projects:
             return []
 
@@ -298,43 +299,101 @@ class ProjectService:
             ).all()
         )
 
-        role_by_project: dict[str, str] = {}
-        if user_id:
-            role_rows = (
+        task_counts = dict(
+            (
                 await self.db.execute(
-                    select(ProjectMember.project_id, Role.name)
-                    .join(Role, Role.id == ProjectMember.role_id)
+                    select(Task.project_id, func.count(Task.id))
                     .where(
-                        ProjectMember.user_id == user_id,
-                        ProjectMember.project_id.in_(project_ids),
-                        ProjectMember.deleted_at.is_(None),
-                        Role.deleted_at.is_(None),
+                        Task.project_id.in_(project_ids),
+                        Task.deleted_at.is_(None),
                     )
+                    .group_by(Task.project_id)
                 )
             ).all()
-            role_by_project = {str(pid): name for pid, name in role_rows}
+        )
+        member_counts = dict(
+            (
+                await self.db.execute(
+                    select(ProjectMember.project_id, func.count(ProjectMember.id))
+                    .where(
+                        ProjectMember.project_id.in_(project_ids),
+                        ProjectMember.deleted_at.is_(None),
+                    )
+                    .group_by(ProjectMember.project_id)
+                )
+            ).all()
+        )
+        sprint_rows = list(
+            (
+                await self.db.execute(
+                    select(Sprint).where(
+                        Sprint.project_id.in_(project_ids),
+                        Sprint.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
+        )
+        sprints_by_project: dict[str, list[SprintResponse]] = {
+            str(project_id): [] for project_id in project_ids
+        }
+        for sprint in sprint_rows:
+            sprints_by_project[str(sprint.project_id)].append(
+                SprintResponse(
+                    id=str(sprint.id),
+                    name=sprint.name,
+                    goal=sprint.goal,
+                    status=sprint.status,
+                    start_date=sprint.start_date,
+                    end_date=sprint.end_date,
+                )
+            )
 
-        summaries: list[ProjectListResponse] = []
+        summaries: list[ProjectSummary] = []
         for project in projects:
             project_id = str(project.id)
             key = self._project_key(project.name)
+            project_sprints = sprints_by_project[project_id]
             summaries.append(
-                ProjectListResponse(
-                    key=key,
+                ProjectSummary(
+                    id=project_id,
+                    organization_id=str(project.organization_id),
                     organization_name=organization_names.get(project.organization_id),
-                    project_id=project_id,
+                    name=project.name,
+                    key=key,
                     project_key=key,
-                    project_name=project.name,
-                    project_slug=project.slug,
-                    role=role_by_project.get(project_id),
+                    description=project.description,
                     status=project.status,
+                    created_by=str(project.created_by),
+                    created_at=project.created_at,
+                    sprint_count=len(project_sprints),
+                    total_tasks=task_counts.get(project.id, 0),
+                    total_members=member_counts.get(project.id, 0),
+                    slug=project.slug,
+                    sprints=project_sprints,
                 )
             )
         return summaries
 
     @staticmethod
     def _project_key(name: str) -> str:
-        return "".join(word[0] for word in name.split() if word).upper()[:5]
+        name = name.strip()
+        if not name:
+            return "TASK"
+
+        parts = [part for part in re.split(r"[ _-]", name) if part]
+        if len(parts) > 1:
+            prefix = "".join(part[0].upper() for part in parts)
+        else:
+            prefix = name.upper()[:3]
+
+        cleaned = "".join(
+            character
+            for character in prefix
+            if "A" <= character <= "Z" or "0" <= character <= "9"
+        )
+        if len(cleaned) < 2:
+            cleaned = "WP"
+        return cleaned[:10]
 
     async def members(self, project_id: str, organization_id: str, page: int,
                       page_size: int, name: str = ""):
@@ -449,6 +508,16 @@ class ProjectService:
                     existing_users.append(user.username)
                     continue
                 project_role = item.project_role or "developer"
+                if project_role not in {
+                    "org_admin",
+                    "project_manager",
+                    "developer",
+                    "tester",
+                    "qa",
+                    "viewer",
+                    "stakeholder",
+                }:
+                    project_role = "developer"
                 role_key = (item.role_id, project_role)
                 role = role_cache.get(role_key)
                 if role is None:
@@ -559,7 +628,15 @@ class ProjectService:
             total_sprints=len(sprints), active_sprints=active,
             completed_sprints=completed_sprints, total_members=len(members))
         sprint_responses = [
-            SprintResponse.model_validate(s, from_attributes=True) for s in sprints
+            SprintResponse(
+                id=str(sprint.id),
+                name=sprint.name,
+                goal=sprint.goal,
+                status=sprint.status,
+                start_date=sprint.start_date,
+                end_date=sprint.end_date,
+            )
+            for sprint in sprints
         ]
         active_sprint = next(
             (sr for sr in sprint_responses if sr.status == "active"), None
@@ -578,8 +655,14 @@ class ProjectService:
         project.deleted_at = datetime.now(timezone.utc)
         await self._commit()
 
-    async def user_projects(self, target_id: str, organization_id: str,
-                            recent: bool = False) -> UserProjectsResponse:
+    async def user_projects(
+        self,
+        target_id: str,
+        organization_id: str,
+        recent: bool = False,
+        caller_id: str | None = None,
+        caller_role: str = "",
+    ) -> UserProjectsResponse:
         user = (
             await self.db.execute(
                 select(User)
@@ -593,6 +676,12 @@ class ProjectService:
         ).scalar_one_or_none()
         if not user:
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "User not found")
+        if caller_id and caller_id != target_id and caller_role != "org_admin":
+            raise ProjectServiceError(
+                403,
+                "FORBIDDEN",
+                "You do not have permission to view this user's projects",
+            )
         stmt = select(ProjectMember, Project, Role).join(Project,
             Project.id == ProjectMember.project_id).join(Role,
             Role.id == ProjectMember.role_id).where(ProjectMember.user_id == target_id,
@@ -603,6 +692,22 @@ class ProjectService:
             # created. Requiring a task made valid assigned projects disappear.
             stmt = stmt.order_by(Project.updated_at.desc(), Project.created_at.desc())
         rows = (await self.db.execute(stmt)).all()
+        task_counts: dict[str, int] = {}
+        if recent and rows:
+            project_ids = [project.id for _, project, _ in rows]
+            task_counts = {
+                str(project_id): count
+                for project_id, count in (
+                    await self.db.execute(
+                        select(Task.project_id, func.count(Task.id))
+                        .where(
+                            Task.project_id.in_(project_ids),
+                            Task.deleted_at.is_(None),
+                        )
+                        .group_by(Task.project_id)
+                    )
+                ).all()
+            }
         projects = [
             UserProject(
                 project_id=str(project.id),
@@ -612,6 +717,7 @@ class ProjectService:
                 project_slug=project.slug if recent else None,
             )
             for _, project, role in rows
+            if not recent or task_counts.get(str(project.id), 0) > 0
         ]
         return UserProjectsResponse(user_id=str(user.id), user_name=user.username,
             full_name=user.full_name, email=user.email, avatar_url=user.avatar_url or None,
@@ -836,14 +942,18 @@ class ProjectService:
         return data, self.pagination(page, page_size, total)
 
     @staticmethod
-    def _activity_user(user) -> dict | None:
+    def _activity_user(user) -> ProjectActivityUser | None:
         if user is None:
             return None
 
-        payload = user.model_dump(mode="json", by_alias=True, exclude_none=True)
-        if not payload.get("role"):
-            payload.pop("role", None)
-        return payload
+        return ProjectActivityUser(
+            id=user.id,
+            name=user.full_name,
+            email=user.email,
+            avatar_url=user.avatar_url or None,
+            color=user.color or "",
+            role=user.role or None,
+        )
 
     def _audit(self, user_id: str, org_id: str, project_id: str, action: str,
                resource_type: str, resource_id: str, details: str):
