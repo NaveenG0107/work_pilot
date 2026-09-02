@@ -97,7 +97,9 @@ def success(
 
 
 def failure(exc: Exception) -> JSONResponse:
-    if isinstance(exc, UserStoryServiceError):
+    if hasattr(exc, "status_code") and hasattr(exc, "code") and hasattr(exc, "message"):
+        code, error_code, message = exc.status_code, exc.code, exc.message
+    elif isinstance(exc, UserStoryServiceError):
         code, error_code, message = exc.status_code, exc.code, exc.message
     else:
         code, error_code, message = (
