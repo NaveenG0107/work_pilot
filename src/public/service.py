@@ -1,10 +1,11 @@
+from asyncio import Lock
 from datetime import timedelta
-from threading import RLock
 from time import monotonic
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.config import get_logger
 from src.public.models import Country
 from src.public.schema import CountryResponse
@@ -16,11 +17,11 @@ class CountryCache:
     def __init__(self, ttl: timedelta = timedelta(hours=24)):
         self.ttl_seconds = ttl.total_seconds()
         self.countries: tuple[CountryResponse, ...] = ()
-        self.fetched_at = 0.0
-        self.lock = RLock()
+        self.fetched_at: float | None = None
+        self.lock = Lock()
 
     def is_fresh(self) -> bool:
-        return bool(self.countries) and (
+        return self.fetched_at is not None and (
             monotonic() - self.fetched_at < self.ttl_seconds
         )
 
@@ -35,7 +36,7 @@ class PublicService:
         name: str | None = None,
     ) -> list[CountryResponse]:
         try:
-            with self.country_cache.lock:
+            async with self.country_cache.lock:
                 if self.country_cache.is_fresh():
                     countries = list(self.country_cache.countries)
                 else:

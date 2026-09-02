@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator  # type: ignore
+
 
 class CountryResponse(BaseModel):
     id: str
@@ -27,8 +28,6 @@ class CountryResponse(BaseModel):
     def serialize_null_time_like_go(cls, value: datetime | None) -> datetime:
         return value or datetime.min.replace(tzinfo=timezone.utc)
 
-
-
 class CountriesResponse(BaseModel):
     success: bool
     status_code: int
@@ -44,7 +43,7 @@ class HealthResponse(BaseModel):
 
 class HealthDependencies(BaseModel):
     database: str
-    redis: str | None = None
+    redis: str
 
 
 class FullHealthResponse(BaseModel):
