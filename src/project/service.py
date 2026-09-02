@@ -7,7 +7,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from src.audit.models import AuditLog
+from src.audit.models import AuditLog, AuditLogType
 from src.audit.service import AuditService
 from src.auth.models import User
 
@@ -15,6 +15,7 @@ from src.auth.models import User
 # statement. The model files themselves remain unchanged.
 from src.comments import models as comments_models  # noqa: F401
 from src.custom_status import models as custom_status_models  # noqa: F401
+from src.custom_status.models import CustomStatus
 from src.favorite import models as favorite_models  # noqa: F401
 from src.label import models as label_models  # noqa: F401
 from src.organization.models import Organization, Role
@@ -41,6 +42,26 @@ from src.sprint.models import Sprint
 from src.task.models import Task
 from src.user_story import models as user_story_models  # noqa: F401
 from src.user_story_status import models as user_story_status_models  # noqa: F401
+from src.user_story_status.models import UserStoryStatus
+
+
+DEFAULT_TASK_STATUSES = [
+    ("Todo", "#808080", 0, True, False),
+    ("In Progress", "#1E90FF", 1, True, False),
+    ("In Review", "#FF8C00", 2, True, False),
+    ("Testing", "#8A2BE2", 3, True, False),
+    ("Completed", "#228B22", 4, True, True),
+    ("Blocked", "#DC143C", 5, True, False),
+]
+
+DEFAULT_USER_STORY_STATUSES = [
+    ("Todo", "#808080", 0, True, False, False),
+    ("In Progress", "#1E90FF", 1, True, False, False),
+    ("In Review", "#FF8C00", 2, True, False, False),
+    ("Testing", "#8A2BE2", 3, True, False, False),
+    ("Completed", "#228B22", 4, True, True, True),
+    ("Blocked", "#DC143C", 5, True, False, False),
+]
 
 
 class ProjectServiceError(Exception):
@@ -170,8 +191,54 @@ class ProjectService:
         try:
             self.db.add(project)
             await self.db.flush()
+
+            # 1. Add project creator as member
             self.db.add(ProjectMember(project_id=project.id, user_id=user_id,
                 role_id=role.id, added_by_id=user_id, joined_at=datetime.now(timezone.utc)))
+
+            # 2. Create default custom statuses for tasks
+            for name, color, order, is_default, is_final in DEFAULT_TASK_STATUSES:
+                self.db.add(CustomStatus(000000000000000000
+                    project_id=project.id,
+                    name=name,
+                    color=color,
+                    display_order=order,
+                    is_default=is_default,
+                    is_final=is_final,
+                ))
+
+            # 3. Create default statuses for user stories
+            for name, color, order, is_default, is_closed, is_final in DEFAULT_USER_STORY_STATUSES:
+                self.db.add(UserStoryStatus(
+                    project_id=project.id,
+                    name=name,
+                    color=color,
+                    display_order=order,
+                    is_default=is_default,
+                    is_closed=is_closed,
+                    is_final=is_final,
+                ))
+
+            # 4. Log project creation audit event
+            user = (
+                await self.db.execute(
+                    select(User).where(User.id == user_id, User.deleted_at.is_(None))
+                )
+            ).scalar_one_or_none()
+            creator_name = getattr(user, "username", "user") if user else "user"
+
+            self.db.add(AuditLog(
+                user_id=user_id,
+                organization_id=organization_id,
+                project_id=project.id,
+                action="created",
+                resource_type="project",
+                resource_id=str(project.id),
+                details=f"The project '{body.name}' was created by {creator_name}",
+                type=AuditLogType.ACTIVITY,
+                created_at=datetime.now(timezone.utc),
+            ))
+
             await self.db.commit()
             return str(project.id)
         except IntegrityError as exc:
