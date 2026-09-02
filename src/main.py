@@ -22,6 +22,7 @@ from src.utils.exception_handlers import register_exception_handlers
 from src.public.api import router as public_router
 from src.sprint.api import router as sprint_router
 from src.task.api import router as task_router
+from src.work_item.api import router as work_item_router
 
 logger = get_logger(__name__)
 
@@ -88,6 +89,7 @@ app.include_router(comments_router, prefix=API_PREFIX)
 app.include_router(favorite_router, prefix=API_PREFIX)
 app.include_router(custom_status_router, prefix=API_PREFIX)
 app.include_router(task_router, prefix=API_PREFIX)
+app.include_router(work_item_router)
 
 
 @app.get("/health_check")
