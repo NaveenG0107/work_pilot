@@ -15,13 +15,13 @@ from src.favorite.api import router as favorite_router
 from src.label.api import router as label_router
 from src.organization.api import router as organization_router
 from src.project.api import router as project_router
-from src.user_story.api import router as user_story_router
-from src.user_story_status.api import router as user_story_status_router
-
-from src.utils.exception_handlers import register_exception_handlers
 from src.public.api import router as public_router
+from src.search.api import router as search_router
 from src.sprint.api import router as sprint_router
 from src.task.api import router as task_router
+from src.user_story.api import router as user_story_router
+from src.user_story_status.api import router as user_story_status_router
+from src.utils.exception_handlers import register_exception_handlers
 from src.work_item.api import router as work_item_router
 
 logger = get_logger(__name__)
@@ -29,6 +29,8 @@ logger = get_logger(__name__)
 # Import every model *module* so they are registered on Base.metadata
 # before we create tables. (The packages have no __init__.py, so importing
 # the package alone does not load models.py.)
+from sqlalchemy import text
+
 from src.audit import models as _audit_models  # noqa: E402,F401
 from src.auth import models as _auth_models  # noqa: E402,F401
 from src.comments import models as _comments_models  # noqa: E402,F401
@@ -43,9 +45,6 @@ from src.sprint import models as _sprint_models  # noqa: E402,F401
 from src.task import models as _task_models  # noqa: E402,F401
 from src.user_story import models as _user_story_models  # noqa: E402,F401
 from src.user_story_status import models as _user_story_status_models  # noqa: E402,F401
-
-
-from sqlalchemy import text
 
 
 async def _create_tables() -> None:
@@ -82,7 +81,7 @@ app.include_router(public_router, prefix=API_PREFIX)
 app.include_router(audit_router, prefix=API_PREFIX)
 app.include_router(organization_router, prefix=API_PREFIX)
 app.include_router(user_story_router)
-app.include_router(project_router)
+app.include_router(project_router, prefix=API_PREFIX)
 app.include_router(label_router)
 app.include_router(user_story_status_router)
 app.include_router(comments_router, prefix=API_PREFIX)
@@ -90,6 +89,7 @@ app.include_router(favorite_router, prefix=API_PREFIX)
 app.include_router(custom_status_router, prefix=API_PREFIX)
 app.include_router(task_router, prefix=API_PREFIX)
 app.include_router(work_item_router)
+app.include_router(search_router, prefix=API_PREFIX)
 
 
 @app.get("/health_check")
