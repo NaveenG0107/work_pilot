@@ -583,9 +583,12 @@ async def authenticate_request(request: Request) -> Optional[JSONResponse]:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={
-                "code": "UNAUTHORIZED",
-                "status_code": status.HTTP_401_UNAUTHORIZED,
-                "message": exc.detail,
+                "success": False,
+                "error": {
+                    "code": "UNAUTHORIZED",
+                    "status_code": status.HTTP_401_UNAUTHORIZED,
+                    "message": exc.detail,
+                },
             },
         )
 

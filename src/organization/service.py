@@ -21,7 +21,6 @@ from sqlalchemy.orm import selectinload
 
 from src.audit.models import AuditLog
 from src.auth.models import RefreshToken, User
-from src.config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, JWT_REFRESH_TOKEN_EXPIRE_DAYS
 from src.utils import email as email_service
 from src.organization.models import (
     InvitationStatus,
@@ -45,8 +44,9 @@ from src.organization.schemas import (
     UserProfile,
 )
 from src.project.models import Project, ProjectMember
-from src.utils.jwt_handler import create_access_token
+from src.utils.core import bcrypt_hash, create_jwt, generate_refresh_secret_64hex
 from src.utils.password_helper import hash_password
+from src.utils.setting import get_settings
 
 INDUSTRY_VALUES = {
     "Information_Technology",
@@ -341,22 +341,26 @@ class OrganizationService:
     ) -> AuthTokensResponse:
 
         user_id = user.id
-        user_email = user.email
         require_password_change = user.require_password_change
 
-        access_token = create_access_token(
-            user_id=user_id,
-            email=user_email,
+        access_token, token_error = create_jwt(
             role=role_name,
+            user_id=user_id,
             organization_id=org_id,
             platform=platform,
         )
+        if token_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed generating the token",
+            )
 
-        refresh_value = secrets.token_urlsafe(48)
-        hashed = hash_password(refresh_value)
+        refresh_value = generate_refresh_secret_64hex()
+        hashed, _ = bcrypt_hash(refresh_value)
 
-        expires_in = JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60
-        refresh_expires_in = JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
+        settings = get_settings()
+        expires_in = int(settings.jwt_expiry or 900)
+        refresh_expires_in = int(settings.refresh_token_expiry or 604800)
 
         now = datetime.now(timezone.utc)
 

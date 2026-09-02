@@ -1,10 +1,26 @@
+import asyncio
 from datetime import datetime, timezone
 import uuid
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from pydantic import ValidationError
 
 from src.auth.schema import (
     AuthTokensResponse,
+    AuthTokenSuccessResponse,
+    AuthSuccessResponse,
     ChangePasswordRequest,
     PasswordResetRequest,
     RefreshTokenRequest,
@@ -14,6 +30,7 @@ from src.auth.schema import (
     SignUpRequest,
     UserProfile,
     UserTaskInsightsResponse,
+    UpdateUserSuccessResponse,
     UpdateUserRequest,
     VerifyEmailRequest,
 )
@@ -24,6 +41,7 @@ from src.utils.core import (
     clear_cookies,
     error_response,
     ErrorCode,
+    GoJSONResponse,
     set_access_token_cookie,
     set_refresh_token_cookie,
     string_to_bool,
@@ -31,11 +49,64 @@ from src.utils.core import (
     UserProfileFromModel,
 )
 from src.utils.setting import get_settings
+from src.utils.storage import (
+    StorageConfigurationError,
+    delete_s3_object,
+    upload_s3_object,
+)
+
+
+def auth_failure(code: ErrorCode | str, message: str, status_code: int):
+    return GoJSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "error": {
+                "code": code.value if isinstance(code, ErrorCode) else code,
+                "status_code": status_code,
+                "message": message,
+            },
+        },
+    )
+
+
+# Keep every Auth error compatible with Go without changing the shared helper.
+error_response = auth_failure
+
+
+class AuthRoute(APIRoute):
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                return await original(request)
+            except RequestValidationError as exc:
+                first_error = exc.errors()[0]
+                field = str(first_error.get("loc", ("field",))[-1]).replace(
+                    "_", " "
+                ).title()
+                message = (
+                    f"{field} is required."
+                    if first_error.get("type") == "missing"
+                    else "Invalid request payload."
+                )
+                return auth_failure(ErrorCode.ErrValidation, message, 400)
+            except HTTPException as exc:
+                code = (
+                    ErrorCode.ErrUnauthorized
+                    if exc.status_code == 401
+                    else ErrorCode.ErrForbidden
+                )
+                return auth_failure(code, str(exc.detail), exc.status_code)
+
+        return handler
 
 
 router = APIRouter(
     tags=["Authentication"],
     prefix="/auth",
+    route_class=AuthRoute,
 )
 
 
@@ -47,34 +118,136 @@ def get_auth_service(db=Depends(get_db), redis=Depends(get_redis)) -> AuthServic
     return AuthService(db=db, redis=redis)
 
 
+class AvatarUploadError(Exception):
+    def __init__(self, status_code: int, code: ErrorCode | str, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+
+
+async def upload_avatar(avatar: UploadFile) -> tuple[str, str]:
+    max_size_mb = int(get_settings().s3_max_file_size_mb or 5)
+    file_bytes = await avatar.read(max_size_mb * 1024 * 1024 + 1)
+    if len(file_bytes) > max_size_mb * 1024 * 1024:
+        raise AvatarUploadError(
+            400,
+            ErrorCode.ErrValidation,
+            f"File exceeds the maximum allowed size of {max_size_mb} MB.",
+        )
+
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime_type, extension = "image/png", "png"
+    elif file_bytes.startswith(b"\xff\xd8\xff"):
+        mime_type, extension = "image/jpeg", "jpg"
+    elif (
+        len(file_bytes) >= 12
+        and file_bytes.startswith(b"RIFF")
+        and file_bytes[8:12] == b"WEBP"
+    ):
+        mime_type, extension = "image/webp", "webp"
+    else:
+        raise AvatarUploadError(
+            400,
+            ErrorCode.ErrValidation,
+            "Invalid file type. Only PNG, JPG/JPEG, and WEBP images are accepted.",
+        )
+
+    storage_key = f"users/avatars/{uuid.uuid4()}.{extension}"
+    try:
+        avatar_url = await asyncio.to_thread(
+            upload_s3_object,
+            file_bytes,
+            storage_key,
+            mime_type,
+        )
+    except StorageConfigurationError as exc:
+        raise AvatarUploadError(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Supabase S3 storage is not configured.",
+        ) from exc
+    except Exception as exc:
+        raise AvatarUploadError(
+            500,
+            ErrorCode.ErrInternalServerError,
+            "Failed to upload file. Please try again later.",
+        ) from exc
+
+    return avatar_url, storage_key
+
+
 # ============================================================
 # Signup
 # ============================================================
 
-@router.post("/signup", status_code=201)
-async def signup(req: SignUpRequest, service: AuthService = Depends(get_auth_service)):
+@router.post(
+    "/signup",
+    status_code=201,
+    response_model=AuthSuccessResponse,
+)
+async def signup(
+    email: str = Form(...),
+    password: str = Form(...),
+    full_name: str = Form(...),
+    username: str = Form(...),
+    timezone: str | None = Form(default=None),
+    avatar: UploadFile | None = File(default=None),
+    service: AuthService = Depends(get_auth_service),
+):
     """Register a new user."""
 
+    uploaded_key: str | None = None
     try:
+        try:
+            req = SignUpRequest(
+                email=email,
+                password=password,
+                full_name=full_name,
+                username=username,
+                timezone=timezone,
+            )
+        except ValidationError as exc:
+            error = exc.errors()[0]
+            field = str(error.get("loc", ("field",))[-1]).replace("_", " ").title()
+            return auth_failure(
+                ErrorCode.ErrValidation,
+                f"{field} is invalid.",
+                status_code=400,
+            )
+
+        avatar_url = None
+        if avatar is not None:
+            avatar_url, uploaded_key = await upload_avatar(avatar)
+
         result, err = await service.signup(
             email=req.email,
             password=req.password,
             full_name=req.full_name,
             username=req.username,
             timezone=req.timezone,
-            avatar_url=req.avatar_url,
+            avatar_url=avatar_url,
         )
 
         if err:
-            return error_response(
+            if uploaded_key:
+                await asyncio.to_thread(delete_s3_object, uploaded_key)
+            return auth_failure(
                 err.code,
                 err.message,
                 status_code=err.status_code,
             )
 
         return result
+    except AvatarUploadError as exc:
+        return auth_failure(exc.code, exc.message, exc.status_code)
     except Exception as e:
-        return error_response(
+        if uploaded_key:
+            try:
+                await asyncio.to_thread(delete_s3_object, uploaded_key)
+            except Exception:
+                pass
+        return auth_failure(
             ErrorCode.ErrInternalServerError,
             str(e) or "An unexpected error occurred during signup",
             status_code=500,
@@ -85,19 +258,32 @@ async def signup(req: SignUpRequest, service: AuthService = Depends(get_auth_ser
 # Signin
 # ============================================================
 
-@router.post("/signin", response_model=AuthTokensResponse)
-async def signin(req: SignInRequest, response: Response, service: AuthService = Depends(get_auth_service)):
+@router.post("/signin", response_model=AuthTokenSuccessResponse)
+async def signin(
+    req: SignInRequest,
+    response: Response,
+    platform: str | None = Header(default=None, alias="X-Client-Platform"),
+    service: AuthService = Depends(get_auth_service),
+):
     """Authenticate user and return tokens."""
 
     try:
+        platform = platform or "web"
+        if platform not in {"web", "mobile"}:
+            return auth_failure(
+                ErrorCode.ErrValidation,
+                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                status_code=400,
+            )
+
         result, err = await service.signin(
             email=req.email,
             password=req.password,
-            platform="web",
+            platform=platform,
         )
 
         if err:
-            return error_response(
+            return auth_failure(
                 err.code,
                 err.message,
                 status_code=err.status_code,
@@ -123,9 +309,14 @@ async def signin(req: SignInRequest, response: Response, service: AuthService = 
             secure,
         )
 
-        return result
+        return {
+            "success": True,
+            "status_code": 200,
+            "message": "Successfully Logged in",
+            "data": result.model_dump(mode="json"),
+        }
     except Exception as e:
-        return error_response(
+        return auth_failure(
             ErrorCode.ErrInternalServerError,
             str(e) or "An unexpected error occurred during signin",
             status_code=500,
@@ -136,16 +327,25 @@ async def signin(req: SignInRequest, response: Response, service: AuthService = 
 # Refresh Token
 # ============================================================
 
-@router.post("/refresh", response_model=AuthTokensResponse)
+@router.post("/refresh", response_model=AuthTokenSuccessResponse)
 async def refresh_token(
     req: RefreshTokenRequest,
     response: Response,
+    platform: str | None = Header(default=None, alias="X-Client-Platform"),
     service: AuthService = Depends(get_auth_service),
 ):
     """Generate a new access token using refresh token."""
 
     try:
-        result, err = await service.refresh_token(req.refresh_token)
+        platform = platform or "web"
+        if platform not in {"web", "mobile"}:
+            return error_response(
+                ErrorCode.ErrValidation,
+                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                status_code=400,
+            )
+
+        result, err = await service.refresh_token(req.refresh_token, platform=platform)
 
         if err:
             return error_response(
@@ -174,7 +374,12 @@ async def refresh_token(
             secure,
         )
 
-        return result
+        return {
+            "success": True,
+            "status_code": 200,
+            "message": "Token refreshed successfully",
+            "data": result.model_dump(mode="json"),
+        }
     except Exception as e:
         return error_response(
             ErrorCode.ErrInternalServerError,
@@ -343,12 +548,29 @@ async def reset_password(req: ResetPasswordRequest, service: AuthService = Depen
 # Verify Email
 # ============================================================
 
-@router.post("/verify-email")
-async def verify_email(req: VerifyEmailRequest, response: Response, service: AuthService = Depends(get_auth_service)):
+@router.post("/verify-email", response_model=AuthSuccessResponse)
+async def verify_email(
+    req: VerifyEmailRequest,
+    response: Response,
+    platform: str | None = Header(default=None, alias="X-Client-Platform"),
+    service: AuthService = Depends(get_auth_service),
+):
     """Verify user's email using OTP."""
 
     try:
-        result, err = await service.verify_email(email=req.email, otp=req.otp)
+        platform = platform or "web"
+        if platform not in {"web", "mobile"}:
+            return error_response(
+                ErrorCode.ErrValidation,
+                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                status_code=400,
+            )
+
+        result, err = await service.verify_email(
+            email=req.email,
+            otp=req.otp,
+            platform=platform,
+        )
 
         if err:
             return error_response(
@@ -377,7 +599,11 @@ async def verify_email(req: VerifyEmailRequest, response: Response, service: Aut
             secure,
         )
 
-        return result
+        return {
+            "success": True,
+            "status_code": 200,
+            "message": "Email verified successfully",
+        }
     except Exception as e:
         return error_response(
             ErrorCode.ErrInternalServerError,
@@ -418,7 +644,7 @@ async def resend_verification_otp(req: ResendVerificationOTPRequest, service: Au
 # ============================================================
 
 @router.get("/validate")
-async def validate(type: str = "email", value: str = "", service: AuthService = Depends(get_auth_service)):
+async def validate(type: str = "", value: str = "", service: AuthService = Depends(get_auth_service)):
     """Check whether an email or username is available."""
 
     try:
@@ -466,16 +692,19 @@ async def validate(type: str = "email", value: str = "", service: AuthService = 
             else f"{validation_type} is already taken."
         )
 
-        return {
-            "success": available,
-            "status_code": status_code,
-            "message": message,
-            "data": {
-                "type": validation_type,
-                "value": value,
-                "available": available,
+        return GoJSONResponse(
+            status_code=status_code,
+            content={
+                "success": available,
+                "status_code": status_code,
+                "message": message,
+                "data": {
+                    "type": validation_type,
+                    "value": value,
+                    "available": available,
+                },
             },
-        }
+        )
     except Exception as e:
         return error_response(
             ErrorCode.ErrInternalServerError,
@@ -538,10 +767,18 @@ async def get_user_insights(current_user: dict = Depends(get_current_user), serv
 # Update User
 # ============================================================
 
-@router.put("/me")
-async def update_user(req: UpdateUserRequest, current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service)):
+@router.patch("/update", response_model=UpdateUserSuccessResponse)
+async def update_user(
+    full_name: str | None = Form(default=None),
+    username: str | None = Form(default=None),
+    timezone: str | None = Form(default=None),
+    avatar: UploadFile | None = File(default=None),
+    current_user: dict = Depends(get_current_user),
+    service: AuthService = Depends(get_auth_service),
+):
     """Update authenticated user's profile."""
 
+    uploaded_key: str | None = None
     try:
         user_id = current_user.get("user_id")
 
@@ -561,24 +798,42 @@ async def update_user(req: UpdateUserRequest, current_user: dict = Depends(get_c
                 status_code=401,
             )
 
-        result, err = await service.update_user(
+        avatar_url = None
+        if avatar is not None:
+            avatar_url, uploaded_key = await upload_avatar(avatar)
+
+        _, err = await service.update_user(
             user_id=user_uuid,
-            full_name=getattr(req, "full_name", None),
-            username=getattr(req, "username", None),
-            avatar_url=getattr(req, "avatar_url", None),
-            timezone=getattr(req, "timezone", None),
+            full_name=full_name,
+            username=username,
+            avatar_url=avatar_url,
+            timezone=timezone,
         )
 
         if err:
-            return error_response(
+            if uploaded_key:
+                await asyncio.to_thread(delete_s3_object, uploaded_key)
+            return auth_failure(
                 err.code,
                 err.message,
                 status_code=err.status_code,
             )
 
-        return result
+        return {
+            "success": True,
+            "status_code": 200,
+            "message": "Updated profile successfully",
+            "data": {"userID": str(user_uuid)},
+        }
+    except AvatarUploadError as exc:
+        return auth_failure(exc.code, exc.message, exc.status_code)
     except Exception as e:
-        return error_response(
+        if uploaded_key:
+            try:
+                await asyncio.to_thread(delete_s3_object, uploaded_key)
+            except Exception:
+                pass
+        return auth_failure(
             ErrorCode.ErrInternalServerError,
             str(e) or "An unexpected error occurred while updating user profile",
             status_code=500,
