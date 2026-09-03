@@ -1,6 +1,6 @@
+import asyncio
 import html.parser
 import math
-import os
 import re
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -27,6 +27,14 @@ from src.task.models import (
     normalize_task_status,
 )
 from src.config import get_logger
+from src.utils.setting import get_settings
+from src.utils.storage import (
+    StorageConfigurationError,
+    build_attachment_key,
+    delete_s3_object,
+    get_s3_object,
+    upload_s3_object,
+)
 from src.user_story.models import UserStory, UserStoryAttachment
 from src.user_story_status.models import UserStoryStatus
 from src.user_story.schema import (
@@ -1410,55 +1418,169 @@ class UserStoryService:
         logger.info("Service: Uploading %d attachment(s) for user_story_id=%s", len(files), user_story_id)
 
         story = await self._story(user_story_id, project_id)
+        max_files = get_settings().attachment_max_files_count
 
-        if len(files) > 10:
+        if len(files) > max_files:
             raise UserStoryServiceError(
-                400, ErrorCode.ErrBadRequest.value, "Maximum of 10 files can be uploaded per request."
+                400,
+                ErrorCode.ErrBadRequest.value,
+                f"Maximum of {max_files} files can be uploaded per request.",
             )
 
-        responses = []
-
-        for file in files:
-            content = await file.read()
-            filename = file.filename or "file"
-            sanitized_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
-            storage_path = f"attachments/user_stories/{user_story_id}/{sanitized_name}"
-            
-            disk_dir = os.path.join("uploads", "attachments", "user_stories", str(user_story_id))
-            os.makedirs(disk_dir, exist_ok=True)
-            disk_path = os.path.join(disk_dir, sanitized_name)
-            with open(disk_path, "wb") as f_out:
-                f_out.write(content)
-
-            attachment = UserStoryAttachment(
-                user_story_id=user_story_id,
-                original_filename=filename,
-                stored_filename=sanitized_name,
-                mime_type=file.content_type or "application/octet-stream",
-                file_size=len(content),
-                storage_path=storage_path,
-                url=f"/static/{storage_path}",
-                uploaded_by=user_id,
-                uploaded_at=datetime.now(timezone.utc),
-            )
-            self.db.add(attachment)
-            await self._flush()
-
-            responses.append(
-                UserStoryAttachmentResponse(
-                    id=str(attachment.id),
-                    user_story_id=str(attachment.user_story_id),
-                    original_filename=attachment.original_filename,
-                    stored_filename=attachment.stored_filename,
-                    mime_type=attachment.mime_type,
-                    file_size=attachment.file_size,
-                    url=attachment.url,
-                    uploaded_by=str(attachment.uploaded_by),
-                    uploaded_at=attachment.uploaded_at,
+        existing_count = int(
+            (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(UserStoryAttachment)
+                    .where(UserStoryAttachment.user_story_id == user_story_id)
                 )
+            ).scalar_one()
+        )
+        if existing_count + len(files) > max_files:
+            raise UserStoryServiceError(
+                400,
+                ErrorCode.ErrBadRequest.value,
+                f"Maximum of {max_files} attachments are allowed per user story.",
             )
 
-        await self._commit()
+        max_size_mb = get_settings().attachment_max_file_size_mb
+        max_size_bytes = max_size_mb * 1024 * 1024
+        allowed_extensions = {".png", ".jpg", ".jpeg", ".pdf", ".docx", ".xlsx", ".zip", ".txt"}
+        uploaded_keys: list[str] = []
+        attachments: list[UserStoryAttachment] = []
+
+        try:
+            for file in files:
+                filename = (file.filename or "file").replace("\\", "/").split("/")[-1]
+                extension = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
+                declared_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+                extension_by_mime = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "application/pdf": ".pdf",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                    "application/zip": ".zip",
+                    "text/plain": ".txt",
+                }
+                if not extension and declared_type in extension_by_mime:
+                    extension = extension_by_mime[declared_type]
+                    filename = f"{filename}{extension}"
+                if extension not in allowed_extensions:
+                    await file.close()
+                    logger.warning(
+                        "Rejected User Story attachment filename=%r content_type=%r extension=%r",
+                        filename,
+                        declared_type,
+                        extension,
+                    )
+                    raise UserStoryServiceError(
+                        415,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        "Unsupported file type. Only PNG, JPG/JPEG, PDF, DOCX, XLSX, ZIP, and TXT files are accepted.",
+                    )
+
+                content = await file.read(max_size_bytes + 1)
+                await file.close()
+                if len(content) > max_size_bytes:
+                    raise UserStoryServiceError(
+                        413,
+                        "PAYLOAD_TOO_LARGE",
+                        f"File {filename} exceeds the maximum allowed size of {max_size_mb} MB.",
+                    )
+
+                valid_content = {
+                    ".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+                    ".jpg": content.startswith(b"\xff\xd8\xff"),
+                    ".jpeg": content.startswith(b"\xff\xd8\xff"),
+                    ".pdf": content.startswith(b"%PDF-"),
+                    ".docx": content.startswith(b"PK"),
+                    ".xlsx": content.startswith(b"PK"),
+                    ".zip": content.startswith(b"PK"),
+                    ".txt": b"\x00" not in content[:512],
+                }[extension]
+                if not valid_content:
+                    raise UserStoryServiceError(
+                        415,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        f"Unsupported file content type for extension '{extension}'.",
+                    )
+
+                mime_type = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".pdf": "application/pdf",
+                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ".zip": "application/zip",
+                    ".txt": "text/plain",
+                }[extension]
+                storage_path = build_attachment_key("user_stories", user_story_id, filename)
+                stored_name = storage_path.rsplit("/", 1)[-1]
+                url = await asyncio.to_thread(
+                    upload_s3_object,
+                    content,
+                    storage_path,
+                    mime_type,
+                )
+                uploaded_keys.append(storage_path)
+
+                attachment = UserStoryAttachment(
+                    user_story_id=user_story_id,
+                    original_filename=filename,
+                    stored_filename=stored_name,
+                    mime_type=mime_type,
+                    file_size=len(content),
+                    storage_path=storage_path,
+                    url=url,
+                    uploaded_by=user_id,
+                    uploaded_at=datetime.now(timezone.utc),
+                )
+                self.db.add(attachment)
+                attachments.append(attachment)
+
+            await self._commit()
+            for attachment in attachments:
+                await self.db.refresh(attachment)
+        except UserStoryServiceError:
+            await self.db.rollback()
+            for key in uploaded_keys:
+                try:
+                    await asyncio.to_thread(delete_s3_object, key)
+                except Exception:
+                    logger.exception("Failed to clean up User Story attachment key=%s", key)
+            raise
+        except StorageConfigurationError as exc:
+            await self.db.rollback()
+            raise UserStoryServiceError(
+                503, "SERVICE_UNAVAILABLE", "Supabase S3 storage is not configured."
+            ) from exc
+        except Exception as exc:
+            await self.db.rollback()
+            for key in uploaded_keys:
+                try:
+                    await asyncio.to_thread(delete_s3_object, key)
+                except Exception:
+                    logger.exception("Failed to clean up User Story attachment key=%s", key)
+            raise UserStoryServiceError(
+                500, "INTERNAL_SERVER_ERROR", "Failed to upload attachment. Please try again later."
+            ) from exc
+
+        responses = [
+            UserStoryAttachmentResponse(
+                id=str(attachment.id),
+                user_story_id=str(attachment.user_story_id),
+                original_filename=attachment.original_filename,
+                stored_filename=attachment.stored_filename,
+                mime_type=attachment.mime_type,
+                file_size=attachment.file_size,
+                url=attachment.url,
+                uploaded_by=str(attachment.uploaded_by),
+                uploaded_at=attachment.uploaded_at,
+            )
+            for attachment in attachments
+        ]
 
         await self._audit(
             user_id=user_id,
@@ -1530,16 +1652,12 @@ class UserStoryService:
                 404, ErrorCode.ErrNotFound.value, "Attachment not found"
             )
 
-        disk_path = os.path.join("uploads", "attachments", "user_stories", str(user_story_id), attachment.stored_filename)
-        if os.path.exists(disk_path):
-            with open(disk_path, "rb") as f_in:
-                content = f_in.read()
-        else:
-            content = b"attachment content"
+        stream, _, stored_mime = await asyncio.to_thread(get_s3_object, attachment.storage_path)
+        content = await asyncio.to_thread(stream.read)
 
         logger.info("Service: Successfully read attachment_id=%s ('%s')", attachment_id, attachment.original_filename)
 
-        return content, attachment.original_filename, attachment.mime_type
+        return content, attachment.original_filename, attachment.mime_type or stored_mime
 
     async def delete_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str, organization_id: str
@@ -1563,15 +1681,15 @@ class UserStoryService:
                 404, ErrorCode.ErrNotFound.value, "Attachment not found"
             )
 
-        disk_path = os.path.join("uploads", "attachments", "user_stories", str(user_story_id), attachment.stored_filename)
-        if os.path.exists(disk_path):
-            try:
-                os.remove(disk_path)
-            except Exception as exc:
-                logger.warning("Failed to remove attachment file from disk: %s", exc)
+        storage_path = attachment.storage_path
 
         await self.db.delete(attachment)
         await self._commit()
+
+        try:
+            await asyncio.to_thread(delete_s3_object, storage_path)
+        except Exception:
+            logger.exception("Failed to delete User Story attachment key=%s", storage_path)
 
         await self._audit(
             user_id=user_id,

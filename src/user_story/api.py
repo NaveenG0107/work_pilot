@@ -1,6 +1,7 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, File, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, Request, Response, status
+from starlette.datastructures import UploadFile
 
 from src.config import get_logger
 from src.user_story.schema import (
@@ -12,7 +13,7 @@ from src.user_story.schema import (
     UpdateUserStoryStatusAssignmentRequest,
     UserStoryFilter,
 )
-from src.user_story.service import UserStoryService
+from src.user_story.service import UserStoryService, UserStoryServiceError
 from src.utils.core import (
     GoJSONResponse as JSONResponse,
     bearer_scheme,
@@ -28,6 +29,27 @@ from src.utils.user_story_helper import (
 )
 
 logger = get_logger(__name__)
+
+_ATTACHMENT_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                            "maxItems": 5,
+                        }
+                    },
+                }
+            }
+        },
+    }
+}
 
 router = APIRouter(
     prefix="/projects",
@@ -325,13 +347,17 @@ async def remove_user_story_favorite(
         return failure(exc)
 
 
-@router.post("/{project_id}/user-stories/{user_story_id}/attachments", status_code=status.HTTP_201_CREATED, tags=["User Story Attachments"])
+@router.post(
+    "/{project_id}/user-stories/{user_story_id}/attachments",
+    status_code=status.HTTP_201_CREATED,
+    tags=["User Story Attachments"],
+    openapi_extra=_ATTACHMENT_UPLOAD_OPENAPI,
+)
 @require_jwt
 async def upload_user_story_attachment(
     project_id: str,
     user_story_id: str,
     request: Request,
-    files: List[UploadFile] = File(...),
     service: UserStoryService = Depends(get_user_story_service),
 ):
     try:
@@ -339,6 +365,21 @@ async def upload_user_story_attachment(
         user_story_id = validated_uuid(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
+
+        form = await request.form()
+        files = [
+            value
+            for key, value in form.multi_items()
+            if key in {"file", "files"}
+            and isinstance(value, UploadFile)
+            and value.filename
+        ]
+        if not files:
+            raise UserStoryServiceError(
+                400,
+                "BAD_REQUEST",
+                "Missing file(s) in request payload (use form-data keys 'file' or 'files')",
+            )
 
         logger.info("Uploading %d attachment(s) for user_story_id=%s, project_id=%s, user_id=%s", len(files), user_story_id, project_id, user_id)
 

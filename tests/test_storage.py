@@ -19,9 +19,11 @@ def test_attachment_keys_use_expected_prefix_and_sanitize_filename():
 
 def test_comment_and_logo_keys_use_expected_prefixes():
     comment_key = storage.build_attachment_key("comments", "comment-1", "file.pdf")
+    story_key = storage.build_attachment_key("user_stories", "story-1", "spec.docx")
     logo_key = storage.build_logo_key("organization-1", "logo.png")
 
     assert comment_key.startswith("attachments/comments/comment-1/")
+    assert story_key.startswith("attachments/user_stories/story-1/")
     assert logo_key.startswith("organizations/logos/organization-1/")
 
 

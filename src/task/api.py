@@ -655,7 +655,13 @@ _UPLOAD_OPENAPI = {
                 "schema": {
                     "type": "object",
                     "required": ["file"],
-                    "properties": {"file": {"type": "string", "format": "binary"}},
+                    "properties": {
+                        "file": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                            "maxItems": 5,
+                        }
+                    },
                 }
             }
         },
