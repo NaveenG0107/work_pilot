@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # Frontend / Backend URLs
     # -----------------------------------------------------------------
     frontend_dashboard_url: str = Field(default="http://localhost:3000", env="FRONTEND_DASHBOARD_URL")
-    backend_api_url: str = Field(default="http://localhost:6369", env="BACKEND_API_URL")
+    backend_api_url: str = Field(default="http://localhost:8000", env="BACKEND_API_URL")
 
     # -----------------------------------------------------------------
     # Cookie

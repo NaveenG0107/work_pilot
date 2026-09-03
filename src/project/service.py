@@ -147,9 +147,11 @@ class ProjectService:
             name = aliases.get(project_role or "", project_role)
             role = (
                 await self.db.execute(
-                    select(Role).where(Role.name == name,
-                        or_(Role.organization_id == organization_id,
-                            Role.organization_id.is_(None)), Role.deleted_at.is_(None))
+                    select(Role).where(
+                        Role.name == name,
+                        Role.organization_id == organization_id,
+                        Role.deleted_at.is_(None),
+                    )
                 )
             ).scalar_one_or_none()
         if not role:

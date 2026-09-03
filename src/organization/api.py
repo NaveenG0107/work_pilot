@@ -5,6 +5,8 @@ All routes require a valid access token; service-level checks enforce org-level 
 """
 
 import os
+from html import escape
+from pathlib import Path
 from typing import Optional
 from uuid import UUID, uuid4
 
@@ -18,7 +20,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +44,16 @@ from src.public.models import Country
 from src.response import error, success
 
 router = APIRouter(tags=["Organizations"])
+
+_INVITATION_TEMPLATES = Path(__file__).resolve().parents[1] / "utils" / "templates"
+
+
+def _invitation_page(template_name: str, **values: str) -> HTMLResponse:
+    """Render the same embedded invitation pages used by the Go backend."""
+    content = (_INVITATION_TEMPLATES / template_name).read_text(encoding="utf-8")
+    for key, value in values.items():
+        content = content.replace(f"{{{{.{key}}}}}", escape(value, quote=True))
+    return HTMLResponse(content=content, status_code=200)
 
 
 async def _service(db: AsyncSession = Depends(get_db)) -> OrganizationService:
@@ -333,28 +345,40 @@ async def invite_member(
 
 @router.get("/organization/invitations/accept", response_class=HTMLResponse)
 async def accept_invitation_page(
-    token: str = Query(...),
+    request: Request,
+    token: Optional[str] = Query(None),
     service: OrganizationService = Depends(_service),
 ):
+    if not token:
+        return error(
+            "Invitation token is required",
+            status_code=400,
+            code="VALIDATION_ERROR",
+        )
     base_url = os.getenv("FRONTEND_DASHBOARD_URL", "http://localhost:3000").rstrip("/")
     dashboard_url = f"{base_url}/dashboard"
     login_url = f"{base_url}/signin"
 
     invitation = await service.get_invitation_by_token(token)
     if invitation is None:
-        return _html(f"<h2>Invitation not found</h2><a href='{dashboard_url}'>Go to dashboard</a>")
+        return _invitation_page(
+            "invitation_not_found.html", DashboardURL=dashboard_url
+        )
     if invitation.status == "accepted":
-        return _html(f"<h2>Invitation has already been accepted</h2><a href='{dashboard_url}'>Go to dashboard</a>")
+        return _invitation_page(
+            "invitation_already_accepted.html", DashboardURL=dashboard_url
+        )
     if invitation.status == "expired" or invitation.expires_at < _now():
-        return _html(f"<h2>Invitation has expired</h2><a href='{dashboard_url}'>Go to dashboard</a>")
+        return _invitation_page(
+            "invitation_expired.html", DashboardURL=dashboard_url
+        )
 
-    return _html(
-        f"<h2>Accept invitation</h2>"
-        f"<form method='post' action='/api/v1/organization/invitations/accept'>"
-        f"<input type='hidden' name='token' value='{token}'>"
-        f"<button type='submit'>Accept invitation</button></form>"
-        f"<p>Not signed in? <a href='{login_url}'>Sign in</a></p>"
-    )
+    if not request.cookies.get("access_token"):
+        return _invitation_page(
+            "invitation_login_required.html", LoginURL=login_url
+        )
+
+    return _invitation_page("accept_invitation.html", Token=token)
 
 
 # ---------------------------------------------------------- accept invite
@@ -363,22 +387,35 @@ async def accept_invitation_page(
 @router.post("/organization/invitations/accept")
 async def accept_invitation(
     request: Request,
-    token: str = Form(None),
     service: OrganizationService = Depends(_service),
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["user_id"]
+    base_url = os.getenv("FRONTEND_DASHBOARD_URL", "http://localhost:3000").rstrip("/")
+    dashboard_url = f"{base_url}/dashboard"
     content_type = request.headers.get("content-type", "")
     is_form = "application/x-www-form-urlencoded" in content_type
     try:
+        if is_form or "multipart/form-data" in content_type:
+            payload = await request.form()
+            token = payload.get("token")
+        else:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            token = payload.get("token") if isinstance(payload, dict) else None
         await service.accept_invitation(UUID(user_id), token)
     except HTTPException as exc:
         if is_form:
-            return _html(f"<h2>{exc.detail}</h2>")
+            return _invitation_page(
+                "invitation_error.html",
+                Message=str(exc.detail),
+                DashboardURL=dashboard_url,
+            )
         raise
-    base_url = os.getenv("FRONTEND_DASHBOARD_URL", "http://localhost:3000").rstrip("/")
     if is_form:
-        return HTMLResponse(f"<script>window.location.href='{base_url}/teams'</script>", status_code=200)
+        return RedirectResponse(f"{base_url}/teams", status_code=302)
     return success("Invitation accepted successfully")
 
 
