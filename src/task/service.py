@@ -2071,7 +2071,8 @@ class TaskService:
                 f"Maximum of {max_files} files can be uploaded per request.",
             )
         user = await self._user(user_id)
-        task = await self._task(task_id)
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         if task.project_id != project_id:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Task does not belong to the specified project"
@@ -2169,7 +2170,8 @@ class TaskService:
         user_id: str,
     ) -> list[AttachmentResponse]:
         user = await self._user(user_id)
-        task = await self._task(task_id)
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         if task.project_id != project_id:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Task does not belong to the specified project"
@@ -2223,7 +2225,8 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        if str(attachment.task_id) != task_id:
+        requested_task = await self._task(task_id, project_id)
+        if str(attachment.task_id) != str(requested_task.id):
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified task"
             )
@@ -2278,7 +2281,8 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        if str(attachment.task_id) != task_id:
+        requested_task = await self._task(task_id, project_id)
+        if str(attachment.task_id) != str(requested_task.id):
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified task"
             )

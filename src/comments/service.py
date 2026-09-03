@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from uuid6 import uuid7
@@ -41,7 +41,7 @@ from src.utils.storage import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".pdf", ".txt", ".docx", ".xlsx", ".zip", ".doc", ".xls", ".csv", ".gif", ".webp", ".svg"
+    ".png", ".jpg", ".jpeg", ".pdf", ".txt", ".docx", ".xlsx", ".zip"
 }
 
 
@@ -71,9 +71,70 @@ def sanitize_html(content: str) -> str:
     return cleaned.strip()
 
 
+def content_with_attachment_images(
+    content: str, attachments: list[CommentAttachment]
+) -> str:
+    """Render linked image attachments in comment HTML, matching the Go response."""
+    rendered = content or ""
+    image_tags: list[str] = []
+    for attachment in attachments:
+        if not (attachment.mime_type or "").lower().startswith("image/"):
+            continue
+        url = attachment.url or ""
+        if not url or url in rendered:
+            continue
+        separator = "&" if "?" in url else "?"
+        source = f"{url}{separator}attachment_id={attachment.id}"
+        image_tags.append(
+            f'<p><img src="{html.escape(source, quote=True)}" '
+            f'alt="{html.escape(attachment.original_filename, quote=True)}"></p>'
+        )
+    return rendered + "".join(image_tags)
+
+
 class CommentService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def resolve_task_id(
+        self,
+        task_id_or_key: str,
+        organization_id: str | None,
+    ) -> str:
+        """Resolve a Task UUID or key within the authenticated organization."""
+        identifier = str(task_id_or_key).strip()
+        if not identifier:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Task ID or Task Key is required",
+            )
+        if not organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Organization context required",
+            )
+
+        task_id = (
+            await self.db.execute(
+                select(Task.id)
+                .join(Project, Project.id == Task.project_id)
+                .where(
+                    Task.deleted_at.is_(None),
+                    Project.deleted_at.is_(None),
+                    Project.organization_id == str(organization_id),
+                    or_(
+                        Task.id == identifier,
+                        func.upper(Task.key) == identifier.upper(),
+                    ),
+                )
+            )
+        ).scalars().first()
+        if task_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found",
+            )
+        return str(task_id)
 
     async def _check_permission(
         self, user: User, project_id: str, resource: str, action: str
@@ -278,10 +339,32 @@ class CommentService:
         # 6. Sanitize and validate content
         sanitized_content = sanitize_html(payload.content)
         if not sanitized_content:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Content cannot be empty",
+            requested_attachment_ids = [
+                str(value) for value in payload.attachment_ids
+            ]
+            attachment_only_query = select(func.count()).select_from(
+                CommentAttachment
+            ).where(
+                CommentAttachment.comment_id.is_(None),
+                CommentAttachment.uploaded_by == user_id,
             )
+            attachment_only_query = attachment_only_query.where(
+                CommentAttachment.task_id == task_id
+                if task_id
+                else CommentAttachment.user_story_id == user_story_id
+            )
+            if requested_attachment_ids:
+                attachment_only_query = attachment_only_query.where(
+                    CommentAttachment.id.in_(requested_attachment_ids)
+                )
+            draft_count = int(
+                (await self.db.execute(attachment_only_query)).scalar_one()
+            )
+            if draft_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Content cannot be empty",
+                )
 
         # 7. Create Comment
         now = datetime.now(timezone.utc)
@@ -300,6 +383,41 @@ class CommentService:
             updated_at=now,
         )
         self.db.add(comment)
+
+        attachment_ids = [str(value) for value in payload.attachment_ids]
+        draft_query = select(CommentAttachment).where(
+            CommentAttachment.comment_id.is_(None),
+            CommentAttachment.uploaded_by == user_id,
+        )
+        draft_query = draft_query.where(
+            CommentAttachment.task_id == task_id
+            if task_id
+            else CommentAttachment.user_story_id == user_story_id
+        )
+        if attachment_ids:
+            draft_query = draft_query.where(
+                CommentAttachment.id.in_(attachment_ids)
+            )
+        else:
+            # Some clients upload drafts and omit their IDs from the comment
+            # payload. Claim that user's pending drafts for this task so the
+            # successfully uploaded files are not invisible in the comment.
+            draft_query = draft_query.order_by(
+                CommentAttachment.uploaded_at.asc()
+            ).limit(get_settings().attachment_max_files_count)
+
+        draft_attachments = list(
+            (await self.db.execute(draft_query)).scalars()
+        )
+        if attachment_ids:
+            if len(draft_attachments) != len(set(attachment_ids)):
+                await self.db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="One or more attachments are invalid or do not belong to this task",
+                )
+        for attachment in draft_attachments:
+            attachment.comment_id = comment_id
 
         # 8. Create Audit Log
         user_display = user.username or user.full_name or user.email or user_id
@@ -342,11 +460,24 @@ class CommentService:
             full_name=user.full_name,
             avatar_url=user.avatar_url or None,
             color=user.color or "#3498DB",
+            attachments=[
+                CommentAttachmentResponse(
+                    id=UUID(a.id),
+                    comment_id=UUID(comment.id),
+                    original_filename=a.original_filename,
+                    mime_type=a.mime_type,
+                    file_size=a.file_size,
+                    url=a.url or "",
+                    uploaded_by=UUID(a.uploaded_by),
+                    uploaded_at=a.uploaded_at,
+                )
+                for a in draft_attachments
+            ],
         )
 
     async def get_comment_by_id(
         self,
-        comment_id: str,
+        comment_id: str | None,
         user_id: str,
         organization_id: str,
         task_id: Optional[str] = None,
@@ -378,7 +509,7 @@ class CommentService:
         # 2. Fetch comment with User, ParentComment, ParentComment.User, Attachments
         stmt = (
             select(Comments)
-            .where(Comments.id == comment_id)
+            .where(Comments.id == comment_id, Comments.deleted_at.is_(None))
             .options(
                 selectinload(Comments.user),
                 selectinload(Comments.parent_comment).selectinload(Comments.user),
@@ -395,12 +526,15 @@ class CommentService:
 
         # Determine and validate project context
         project_id = str(comment.project_id)
-        if task_id and comment.task_id and str(comment.task_id) != str(task_id):
+        if task_id and (not comment.task_id or str(comment.task_id) != str(task_id)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified task",
             )
-        if user_story_id and comment.user_story_id and str(comment.user_story_id) != str(user_story_id):
+        if user_story_id and (
+            not comment.user_story_id
+            or str(comment.user_story_id) != str(user_story_id)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified user story",
@@ -494,13 +628,15 @@ class CommentService:
             email=author.email if author else "",
             avatar_url=author.avatar_url if (author and author.avatar_url) else None,
             color=author.color if (author and author.color) else "#3498DB",
-            content=comment.content,
+            content=content_with_attachment_images(
+                comment.content, list(comment.attachments or [])
+            ) if comment.task_id else comment.content,
             parent_comment_id=UUID(comment.parent_comment_id) if comment.parent_comment_id else None,
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
             parent_comment=parent_resp,
-            attachments=attachments_resp,
+            attachments=[] if comment.task_id else attachments_resp,
             replies_count=replies_count,
         )
 
@@ -597,6 +733,7 @@ class CommentService:
         count_stmt = select(func.count(Comments.id)).where(
             Comments.organization_id == organization_id,
             Comments.parent_comment_id == parent_comment_id,
+            Comments.deleted_at.is_(None),
         )
         if user_story_id:
             count_stmt = count_stmt.where(Comments.user_story_id == user_story_id)
@@ -612,6 +749,7 @@ class CommentService:
             .where(
                 Comments.organization_id == organization_id,
                 Comments.parent_comment_id == parent_comment_id,
+                Comments.deleted_at.is_(None),
             )
             .options(
                 selectinload(Comments.user),
@@ -702,13 +840,15 @@ class CommentService:
                     email=author.email if author else "",
                     avatar_url=author.avatar_url if (author and author.avatar_url) else None,
                     color=author.color if (author and author.color) else "#3498DB",
-                    content=c.content,
+                    content=content_with_attachment_images(
+                        c.content, list(c.attachments or [])
+                    ) if c.task_id else c.content,
                     parent_comment_id=UUID(c.parent_comment_id) if c.parent_comment_id else None,
                     created_at=c.created_at,
                     updated_at=c.updated_at,
                     is_deleted=c.is_deleted,
                     parent_comment=p_resp,
-                    attachments=attachments_resp,
+                    attachments=[] if c.task_id else attachments_resp,
                     replies_count=0,
                 )
             )
@@ -789,6 +929,7 @@ class CommentService:
             Comments.organization_id == organization_id,
             Comments.task_id == task_id,
             Comments.parent_comment_id.is_(None),
+            Comments.deleted_at.is_(None),
         )
         count_res = await self.db.execute(count_stmt)
         total_items = count_res.scalar() or 0
@@ -800,6 +941,7 @@ class CommentService:
                 Comments.organization_id == organization_id,
                 Comments.task_id == task_id,
                 Comments.parent_comment_id.is_(None),
+                Comments.deleted_at.is_(None),
             )
             .options(
                 selectinload(Comments.user),
@@ -881,13 +1023,15 @@ class CommentService:
                     email=author.email if author else "",
                     avatar_url=author.avatar_url if (author and author.avatar_url) else None,
                     color=author.color if (author and author.color) else "#3498DB",
-                    content=c.content,
+                    content=content_with_attachment_images(
+                        c.content, list(c.attachments or [])
+                    ),
                     parent_comment_id=UUID(c.parent_comment_id) if c.parent_comment_id else None,
                     created_at=c.created_at,
                     updated_at=c.updated_at,
                     is_deleted=c.is_deleted,
                     parent_comment=None,
-                    attachments=attachments_resp,
+                    attachments=[],
                     replies_count=replies_count_map.get(c.id, 0),
                 )
             )
@@ -937,7 +1081,11 @@ class CommentService:
             )
 
         # 2. Fetch comment
-        stmt = select(Comments).where(Comments.id == comment_id, Comments.is_deleted.is_(False))
+        stmt = (
+            select(Comments)
+            .where(Comments.id == comment_id, Comments.is_deleted.is_(False))
+            .options(selectinload(Comments.attachments))
+        )
         res = await self.db.execute(stmt)
         comment = res.scalar_one_or_none()
         if not comment:
@@ -947,12 +1095,15 @@ class CommentService:
             )
 
         project_id = str(comment.project_id)
-        if task_id and comment.task_id and str(comment.task_id) != str(task_id):
+        if task_id and (not comment.task_id or str(comment.task_id) != str(task_id)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified task",
             )
-        if user_story_id and comment.user_story_id and str(comment.user_story_id) != str(user_story_id):
+        if user_story_id and (
+            not comment.user_story_id
+            or str(comment.user_story_id) != str(user_story_id)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified user story",
@@ -1059,6 +1210,19 @@ class CommentService:
             full_name=user.full_name,
             avatar_url=user.avatar_url or None,
             color=user.color or "#3498DB",
+            attachments=[
+                CommentAttachmentResponse(
+                    id=UUID(a.id),
+                    comment_id=UUID(a.comment_id) if a.comment_id else None,
+                    original_filename=a.original_filename,
+                    mime_type=a.mime_type,
+                    file_size=a.file_size,
+                    url=a.url or "",
+                    uploaded_by=UUID(a.uploaded_by),
+                    uploaded_at=a.uploaded_at,
+                )
+                for a in comment.attachments
+            ],
         )
 
     async def delete_comment(
@@ -1094,7 +1258,10 @@ class CommentService:
             )
 
         # 2. Fetch comment
-        stmt = select(Comments).where(Comments.id == comment_id)
+        stmt = select(Comments).where(
+            Comments.id == comment_id,
+            Comments.deleted_at.is_(None),
+        )
         res = await self.db.execute(stmt)
         comment = res.scalar_one_or_none()
         if not comment:
@@ -1110,12 +1277,15 @@ class CommentService:
             )
 
         project_id = str(comment.project_id)
-        if task_id and comment.task_id and str(comment.task_id) != str(task_id):
+        if task_id and (not comment.task_id or str(comment.task_id) != str(task_id)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified task",
             )
-        if user_story_id and comment.user_story_id and str(comment.user_story_id) != str(user_story_id):
+        if user_story_id and (
+            not comment.user_story_id
+            or str(comment.user_story_id) != str(user_story_id)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Comment does not belong to the specified user story",
@@ -1164,10 +1334,21 @@ class CommentService:
                 resource_title = story.title
             target_name = f"userstory: {resource_title or comment.user_story_id}"
 
-        # 6. Mark comment as soft-deleted (matching Go backend DeleteComment)
+        # 6. Preserve deleted parents that still have replies; otherwise hide
+        # the row from normal queries, matching Go's Mark/Delete split.
         now = datetime.now(timezone.utc)
+        active_replies = int(
+            (
+                await self.db.execute(
+                    select(func.count(Comments.id)).where(
+                        Comments.parent_comment_id == comment_id,
+                        Comments.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+        )
         comment.is_deleted = True
-        comment.deleted_at = now
+        comment.deleted_at = None if active_replies else now
         comment.updated_at = now
 
         # 7. Audit Log
@@ -1205,11 +1386,12 @@ class CommentService:
 
     async def upload_comment_attachments(
         self,
-        comment_id: str,
-        task_id: str,
+        comment_id: Optional[str],
+        task_id: Optional[str],
         user_id: str,
         organization_id: str,
         files: list[UploadFile],
+        user_story_id: Optional[str] = None,
     ) -> list[CommentAttachmentResponse]:
         """
         Uploads one or more attachments to a task comment.
@@ -1265,37 +1447,68 @@ class CommentService:
                 detail="Super admins are not allowed to perform organization-level activities",
             )
 
-        # 3. Fetch comment
-        stmt = select(Comments).where(Comments.id == comment_id, Comments.is_deleted.is_(False))
-        res = await self.db.execute(stmt)
-        comment = res.scalar_one_or_none()
-        if not comment:
-            logger.error("Comment %s not found or is deleted", comment_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Comment not found",
+        # 3. Existing-comment uploads validate ownership; draft uploads have
+        # no comment yet and are scoped directly to the task.
+        if comment_id is not None:
+            stmt = select(Comments).where(
+                Comments.id == comment_id,
+                Comments.is_deleted.is_(False),
             )
+            res = await self.db.execute(stmt)
+            comment = res.scalar_one_or_none()
+            if not comment:
+                logger.error("Comment %s not found or is deleted", comment_id)
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comment not found",
+                )
 
-        if not comment.task_id or str(comment.task_id) != str(task_id):
-            logger.error("Comment %s does not belong to task %s", comment_id, task_id)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Comment does not belong to the specified task",
+            wrong_target = (
+                task_id
+                and (not comment.task_id or str(comment.task_id) != str(task_id))
+            ) or (
+                user_story_id
+                and (
+                    not comment.user_story_id
+                    or str(comment.user_story_id) != str(user_story_id)
+                )
             )
+            if wrong_target:
+                logger.error("Comment %s does not belong to task %s", comment_id, task_id)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Comment does not belong to the specified work item",
+                )
 
-        # 4. Fetch task and check permissions
-        task_stmt = select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
-        task_res = await self.db.execute(task_stmt)
-        task = task_res.scalar_one_or_none()
-        if not task:
-            logger.error("Task %s not found", task_id)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Task does not belong to the specified project",
-            )
+        # 4. Resolve the task or user-story project context.
+        if task_id:
+            target = (
+                await self.db.execute(
+                    select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
+                )
+            ).scalar_one_or_none()
+            target_error = "Task does not belong to the specified project"
+        elif user_story_id:
+            target = (
+                await self.db.execute(
+                    select(UserStory).where(
+                        UserStory.id == user_story_id,
+                        UserStory.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            target_error = "User story does not belong to the specified project"
+        else:
+            target = None
+            target_error = "Either Task ID or User Story ID must be provided"
+        if not target:
+            raise HTTPException(status_code=400, detail=target_error)
 
-        project_id = str(task.project_id)
-        can_access = await self._check_permission(user, project_id, "comments", "view")
+        project_id = str(target.project_id)
+        permission_action = "view" if comment_id is not None else "add"
+        can_access = await self._check_permission(
+            user, project_id, "comments", permission_action
+        )
         if not can_access:
             logger.error("User %s does not have permission to view comments in project %s", user_id, project_id)
             raise HTTPException(
@@ -1308,7 +1521,19 @@ class CommentService:
                 await self.db.execute(
                     select(func.count())
                     .select_from(CommentAttachment)
-                    .where(CommentAttachment.comment_id == comment_id)
+                    .where(
+                        CommentAttachment.comment_id == comment_id
+                        if comment_id is not None
+                        else (
+                            CommentAttachment.comment_id.is_(None)
+                            & (
+                                (CommentAttachment.task_id == task_id)
+                                if task_id
+                                else (CommentAttachment.user_story_id == user_story_id)
+                            )
+                            & (CommentAttachment.uploaded_by == user_id)
+                        )
+                    )
                 )
             ).scalar_one()
         )
@@ -1325,34 +1550,36 @@ class CommentService:
                 detail=f"Maximum of {max_files} attachments are allowed per comment.",
             )
 
-        # 5. Process and validate files
-        now = datetime.now(timezone.utc)
-        created_attachments: list[CommentAttachment] = []
-
+        # 5. Read and validate the whole batch before writing anything to S3.
+        validated_files: list[tuple[UploadFile, str, bytes]] = []
         for file in files:
             orig_filename = file.filename or "file"
             ext = pathlib.Path(orig_filename).suffix.lower()
-
             if ext not in ALLOWED_EXTENSIONS:
-                logger.error("Unsupported file extension: %s for file %s", ext, orig_filename)
                 raise HTTPException(
                     status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                     detail=f"Unsupported file content type for extension '{ext}'.",
                 )
-
             file_content = await file.read()
-            file_size = len(file_content)
-
-            if file_size > max_size_bytes:
-                logger.error("File %s exceeds maximum size of %d MB (size: %d bytes)", orig_filename, max_size_mb, file_size)
+            if len(file_content) > max_size_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"File {orig_filename} exceeds the maximum allowed size of {max_size_mb} MB.",
                 )
+            validated_files.append((file, orig_filename, file_content))
+
+        # 6. Upload and stage metadata.
+        now = datetime.now(timezone.utc)
+        created_attachments: list[CommentAttachment] = []
+        uploaded_paths: list[str] = []
+
+        for file, orig_filename, file_content in validated_files:
+            file_size = len(file_content)
 
             att_id = str(uuid7())
             sanitized_name = sanitize_filename(orig_filename)
-            storage_path = build_attachment_key("comments", comment_id, sanitized_name)
+            folder_id = comment_id or task_id or user_story_id
+            storage_path = build_attachment_key("comments", folder_id, sanitized_name)
             stored_name = storage_path.rsplit("/", 1)[-1]
             content_type = file.content_type or "application/octet-stream"
 
@@ -1363,7 +1590,14 @@ class CommentService:
                     key=storage_path,
                     content_type=content_type,
                 )
+                uploaded_paths.append(storage_path)
             except Exception as s3_err:
+                for uploaded_path in uploaded_paths:
+                    try:
+                        delete_s3_object(uploaded_path)
+                    except Exception:
+                        logger.warning("Failed to roll back S3 object %s", uploaded_path)
+                await self.db.rollback()
                 logger.exception("Failed to upload attachment %s to S3: %s", orig_filename, s3_err)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1373,8 +1607,10 @@ class CommentService:
             attachment = CommentAttachment(
                 id=att_id,
                 comment_id=comment_id,
+                task_id=task_id,
+                user_story_id=user_story_id,
                 original_filename=orig_filename,
-                stored_filename=sanitized_name,
+                stored_filename=stored_name,
                 mime_type=content_type,
                 file_size=file_size,
                 storage_path=storage_path,
@@ -1391,16 +1627,21 @@ class CommentService:
                 organization_id=organization_id,
                 project_id=project_id,
                 task_id=task_id,
+                user_story_id=user_story_id,
                 action="uploaded",
                 resource_type="comment_attachment",
                 resource_id=att_id,
-                details=f"Attachment {orig_filename} uploaded to comment {comment_id}",
+                details=(
+                    f"Attachment {orig_filename} uploaded to comment {comment_id}"
+                    if comment_id is not None
+                    else f"Attachment {orig_filename} uploaded for draft task comment {task_id}"
+                ),
                 type="audit",
                 created_at=now,
             )
             self.db.add(audit_log)
 
-        # 6. Commit transaction
+        # 7. Commit transaction
         try:
             await self.db.commit()
             for att in created_attachments:
@@ -1408,6 +1649,11 @@ class CommentService:
             logger.info("Successfully uploaded %d attachment(s) for comment %s", len(created_attachments), comment_id)
         except Exception as exc:
             await self.db.rollback()
+            for uploaded_path in uploaded_paths:
+                try:
+                    delete_s3_object(uploaded_path)
+                except Exception:
+                    logger.warning("Failed to roll back S3 object %s", uploaded_path)
             logger.exception("Failed to persist comment attachments to database: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1417,7 +1663,7 @@ class CommentService:
         return [
             CommentAttachmentResponse(
                 id=UUID(a.id),
-                comment_id=UUID(a.comment_id),
+                comment_id=UUID(a.comment_id) if a.comment_id else None,
                 original_filename=a.original_filename,
                 mime_type=a.mime_type,
                 file_size=a.file_size,
@@ -1558,6 +1804,8 @@ class CommentService:
         task_id: str,
         user_id: str,
         organization_id: str,
+        comment_id: Optional[str] = None,
+        draft_only: bool = False,
     ) -> Tuple[any, str, str, int]:
         """
         Validates access and returns attachment stream, original_filename, mime_type, and size.
@@ -1602,18 +1850,36 @@ class CommentService:
                 detail="Attachment not found",
             )
 
-        # 3. Fetch comment
-        comment_stmt = select(Comments).where(Comments.id == attachment.comment_id, Comments.is_deleted.is_(False))
-        comment_res = await self.db.execute(comment_stmt)
-        comment = comment_res.scalar_one_or_none()
-        if not comment:
-            logger.error("Comment %s for attachment %s not found or is deleted", attachment.comment_id, attachment_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Comment not found",
+        if draft_only:
+            if (
+                attachment.comment_id is not None
+                or str(attachment.task_id) != str(task_id)
+                or str(attachment.uploaded_by) != str(user_id)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found",
+                )
+            comment = None
+        else:
+            comment_stmt = select(Comments).where(
+                Comments.id == attachment.comment_id,
+                Comments.is_deleted.is_(False),
             )
+            comment_res = await self.db.execute(comment_stmt)
+            comment = comment_res.scalar_one_or_none()
+            if not comment:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comment not found",
+                )
+            if comment_id and str(comment.id) != str(comment_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found",
+                )
 
-        if not comment.task_id or str(comment.task_id) != str(task_id):
+        if comment is not None and (not comment.task_id or str(comment.task_id) != str(task_id)):
             logger.error("Attachment %s does not belong to task %s", attachment_id, task_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1655,7 +1921,11 @@ class CommentService:
             action="download",
             resource_type="comment_attachment",
             resource_id=task_id,
-            details=f"User {user.email} downloaded attachment {attachment.original_filename} from comment {task_key}",
+            details=(
+                f"User {user.email} downloaded attachment {attachment.original_filename}"
+                if draft_only
+                else f"User {user.email} downloaded attachment {attachment.original_filename} from comment {task_key}"
+            ),
             type="audit",
             created_at=now,
         )
@@ -1677,6 +1947,8 @@ class CommentService:
         task_id: str,
         user_id: str,
         organization_id: str,
+        comment_id: Optional[str] = None,
+        draft_only: bool = False,
     ) -> None:
         """
         Deletes a comment attachment if authorized.
@@ -1721,18 +1993,36 @@ class CommentService:
                 detail="Attachment not found",
             )
 
-        # 3. Fetch comment
-        comment_stmt = select(Comments).where(Comments.id == attachment.comment_id, Comments.is_deleted.is_(False))
-        comment_res = await self.db.execute(comment_stmt)
-        comment = comment_res.scalar_one_or_none()
-        if not comment:
-            logger.error("Comment %s for attachment %s not found or is deleted", attachment.comment_id, attachment_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Comment not found",
+        if draft_only:
+            if (
+                attachment.comment_id is not None
+                or str(attachment.task_id) != str(task_id)
+                or str(attachment.uploaded_by) != str(user_id)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found",
+                )
+            comment = None
+        else:
+            comment_stmt = select(Comments).where(
+                Comments.id == attachment.comment_id,
+                Comments.is_deleted.is_(False),
             )
+            comment_res = await self.db.execute(comment_stmt)
+            comment = comment_res.scalar_one_or_none()
+            if not comment:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comment not found",
+                )
+            if comment_id and str(comment.id) != str(comment_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found",
+                )
 
-        if not comment.task_id or str(comment.task_id) != str(task_id):
+        if comment is not None and (not comment.task_id or str(comment.task_id) != str(task_id)):
             logger.error("Attachment %s does not belong to task %s", attachment_id, task_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1761,7 +2051,7 @@ class CommentService:
 
         # 5. Check delete authorization: uploader OR comment author OR comments:modify (e.g. Org Admin / Project Manager)
         is_uploader = str(attachment.uploaded_by) == str(user_id)
-        is_comment_author = str(comment.user_id) == str(user_id)
+        is_comment_author = comment is not None and str(comment.user_id) == str(user_id)
         has_modify = await self._check_permission(user, project_id, "comments", "modify")
 
         if not (is_uploader or is_comment_author or has_modify):
@@ -1796,7 +2086,11 @@ class CommentService:
             action="deleted",
             resource_type="comment_attachment",
             resource_id=attachment_id,
-            details=f"Attachment {orig_filename} deleted from comment {comment.id}",
+                details=(
+                    f"Attachment {orig_filename} deleted"
+                    if draft_only
+                    else f"Attachment {orig_filename} deleted from comment {comment.id}"
+                ),
             type="audit",
             created_at=now,
         )

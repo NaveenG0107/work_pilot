@@ -38,7 +38,9 @@ class CommentAttachment(Base):
     __tablename__ = "comment_attachments"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
-    comment_id = Column(String(36), ForeignKey("comments.id"), nullable=False, index=True)
+    comment_id = Column(String(36), ForeignKey("comments.id"), nullable=True, index=True)
+    task_id = Column(String(36), ForeignKey("tasks.id"), nullable=True, index=True)
+    user_story_id = Column(String(36), ForeignKey("user_stories.id"), nullable=True, index=True)
     original_filename = Column(String(255), nullable=False)
     stored_filename = Column(String(255), nullable=False)
     mime_type = Column(String(100), nullable=False)

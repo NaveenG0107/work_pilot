@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.user_story.models import format_serial_number
 
@@ -243,11 +243,33 @@ class UserStoryAttachmentResponse(BaseModel):
 class CreateCommentRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=5000)
     parent_comment_id: Optional[str] = None
+    attachment_ids: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_attachment_collection(cls, value):
+        if not isinstance(value, dict) or value.get("attachment_ids"):
+            return value
+        attachments = value.get("attachments")
+        if not isinstance(attachments, list):
+            return value
+        data = dict(value)
+        data["attachment_ids"] = [
+            item.get("id") if isinstance(item, dict) else item
+            for item in attachments
+            if (item.get("id") if isinstance(item, dict) else item)
+        ]
+        return data
 
     @field_validator("parent_comment_id")
     @classmethod
     def validate_parent_id(cls, value: str | None) -> str | None:
         return validate_uuid(value)
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def validate_attachment_ids(cls, values: List[str]) -> List[str]:
+        return [validate_uuid(value) for value in values]
 
 
 class UpdateCommentRequest(BaseModel):
@@ -268,4 +290,6 @@ class CommentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_deleted: bool = False
+    attachments: list[dict] = Field(default_factory=list)
+    replies_count: int = 0
 

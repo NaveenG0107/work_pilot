@@ -10,11 +10,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 
 from src.audit.models import AuditLog, AuditLogType
 from src.auth.models import User
-from src.comments.models import Comments
+from src.comments.models import Comments, CommentAttachment
 from src.custom_status.models import CustomStatus
 from src.favorite.models import Favorite
 from src.organization.models import Role
@@ -1758,6 +1758,28 @@ class UserStoryService:
 
         self.db.add(comment)
         await self._flush()
+
+        if req.attachment_ids:
+            drafts = list(
+                (
+                    await self.db.execute(
+                        select(CommentAttachment).where(
+                            CommentAttachment.id.in_(req.attachment_ids),
+                            CommentAttachment.comment_id.is_(None),
+                            CommentAttachment.user_story_id == user_story_id,
+                            CommentAttachment.uploaded_by == user_id,
+                        )
+                    )
+                ).scalars()
+            )
+            if len(drafts) != len(set(req.attachment_ids)):
+                await self.db.rollback()
+                raise UserStoryServiceError(
+                    400, ErrorCode.ErrBadRequest.value,
+                    "One or more attachments are invalid or do not belong to this user story",
+                )
+            for attachment in drafts:
+                attachment.comment_id = str(comment.id)
         await self._commit()
         await self.db.refresh(comment)
 
@@ -1792,6 +1814,116 @@ class UserStoryService:
             is_deleted=comment.is_deleted,
         )
 
+    async def upload_comment_attachments(
+        self, files: List[UploadFile], user_story_id: str, project_id: str,
+        user_id: str, organization_id: str, comment_id: str | None = None,
+    ):
+        """Use the shared comments attachment implementation for user stories."""
+        await self._story(user_story_id, project_id)
+        if comment_id:
+            comment = (
+                await self.db.execute(
+                    select(Comments).where(
+                        Comments.id == comment_id,
+                        Comments.user_story_id == user_story_id,
+                        Comments.project_id == project_id,
+                        Comments.is_deleted.is_(False),
+                    )
+                )
+            ).scalar_one_or_none()
+            if not comment:
+                raise UserStoryServiceError(404, ErrorCode.ErrNotFound.value, "Comment not found")
+
+        from src.comments.service import CommentService
+        try:
+            return await CommentService(self.db).upload_comment_attachments(
+                comment_id=comment_id,
+                task_id=None,
+                user_story_id=user_story_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                files=files,
+            )
+        except HTTPException as exc:
+            raise UserStoryServiceError(
+                exc.status_code,
+                "BAD_REQUEST" if exc.status_code < 500 else "INTERNAL_SERVER_ERROR",
+                str(exc.detail),
+            ) from exc
+
+    async def get_comment_attachments(
+        self, comment_id: str, user_story_id: str, project_id: str, user_id: str,
+    ) -> List[dict]:
+        await self._story(user_story_id, project_id)
+        if not await self.check_permission(user_id, project_id, "comments", "view"):
+            raise UserStoryServiceError(403, ErrorCode.ErrForbidden.value, "You do not have permission to view comments in this project")
+        comment = (
+            await self.db.execute(
+                select(Comments)
+                .options(selectinload(Comments.attachments))
+                .where(
+                    Comments.id == comment_id,
+                    Comments.user_story_id == user_story_id,
+                    Comments.project_id == project_id,
+                    Comments.is_deleted.is_(False),
+                )
+            )
+        ).scalar_one_or_none()
+        if not comment:
+            raise UserStoryServiceError(404, ErrorCode.ErrNotFound.value, "Comment not found")
+        return [
+            {
+                "id": str(a.id), "comment_id": str(a.comment_id),
+                "original_filename": a.original_filename, "mime_type": a.mime_type,
+                "file_size": a.file_size, "url": a.url,
+                "uploaded_by": str(a.uploaded_by), "uploaded_at": a.uploaded_at,
+            }
+            for a in comment.attachments
+        ]
+
+    async def download_draft_comment_attachment(
+        self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
+    ):
+        await self._story(user_story_id, project_id)
+        attachment = (
+            await self.db.execute(
+                select(CommentAttachment).where(
+                    CommentAttachment.id == attachment_id,
+                    CommentAttachment.comment_id.is_(None),
+                    CommentAttachment.user_story_id == user_story_id,
+                    CommentAttachment.uploaded_by == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not attachment:
+            raise UserStoryServiceError(404, ErrorCode.ErrNotFound.value, "Attachment not found")
+        stream, size, stored_mime = await asyncio.to_thread(get_s3_object, attachment.storage_path)
+        return stream, attachment.original_filename, attachment.mime_type or stored_mime, attachment.file_size or size
+
+    async def delete_draft_comment_attachment(
+        self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
+    ) -> None:
+        await self._story(user_story_id, project_id)
+        attachment = (
+            await self.db.execute(
+                select(CommentAttachment).where(
+                    CommentAttachment.id == attachment_id,
+                    CommentAttachment.comment_id.is_(None),
+                    CommentAttachment.user_story_id == user_story_id,
+                    CommentAttachment.uploaded_by == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not attachment:
+            raise UserStoryServiceError(404, ErrorCode.ErrNotFound.value, "Attachment not found")
+        storage_path = attachment.storage_path
+        await self.db.delete(attachment)
+        await self._commit()
+        try:
+            await asyncio.to_thread(delete_s3_object, storage_path)
+        except Exception:
+            logger.exception("Failed to delete draft comment attachment key=%s", storage_path)
+
     async def get_comments(
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str,
         page: int = 1, page_size: int = 10
@@ -1814,6 +1946,7 @@ class UserStoryService:
                 select(func.count(Comments.id)).where(
                     Comments.user_story_id == user_story_id,
                     Comments.project_id == project_id,
+                    Comments.parent_comment_id.is_(None),
                     Comments.deleted_at.is_(None),
                 )
             )
@@ -1822,17 +1955,32 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments))
                 .where(
                     Comments.user_story_id == user_story_id,
                     Comments.project_id == project_id,
+                    Comments.parent_comment_id.is_(None),
                     Comments.deleted_at.is_(None),
                 )
-                .order_by(Comments.created_at.asc())
+                .order_by(Comments.created_at.desc())
                 .offset(offset)
                 .limit(page_size)
             )
         ).scalars().all()
+
+        reply_counts: dict[str, int] = {}
+        if comments:
+            rows = (
+                await self.db.execute(
+                    select(Comments.parent_comment_id, func.count(Comments.id))
+                    .where(
+                        Comments.parent_comment_id.in_([c.id for c in comments]),
+                        Comments.is_deleted.is_(False),
+                    )
+                    .group_by(Comments.parent_comment_id)
+                )
+            ).all()
+            reply_counts = {str(parent_id): count for parent_id, count in rows}
 
         responses = [
             CommentResponse(
@@ -1848,6 +1996,20 @@ class UserStoryService:
                 created_at=c.created_at,
                 updated_at=c.updated_at,
                 is_deleted=c.is_deleted,
+                replies_count=reply_counts.get(str(c.id), 0),
+                attachments=[
+                    {
+                        "id": str(a.id),
+                        "comment_id": str(a.comment_id) if a.comment_id else None,
+                        "original_filename": a.original_filename,
+                        "mime_type": a.mime_type,
+                        "file_size": a.file_size,
+                        "url": a.url,
+                        "uploaded_by": str(a.uploaded_by),
+                        "uploaded_at": a.uploaded_at,
+                    }
+                    for a in c.attachments
+                ],
             )
             for c in comments
         ]
@@ -1866,7 +2028,7 @@ class UserStoryService:
         comment = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments))
                 .where(
                     Comments.id == comment_id,
                     Comments.user_story_id == user_story_id,
@@ -1897,6 +2059,19 @@ class UserStoryService:
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
+            attachments=[
+                {
+                    "id": str(a.id),
+                    "comment_id": str(a.comment_id) if a.comment_id else None,
+                    "original_filename": a.original_filename,
+                    "mime_type": a.mime_type,
+                    "file_size": a.file_size,
+                    "url": a.url,
+                    "uploaded_by": str(a.uploaded_by),
+                    "uploaded_at": a.uploaded_at,
+                }
+                for a in comment.attachments
+            ],
         )
 
     async def get_comment_replies(
@@ -1922,7 +2097,7 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments))
                 .where(
                     Comments.parent_comment_id == parent_comment_id,
                     Comments.user_story_id == user_story_id,
@@ -1949,6 +2124,19 @@ class UserStoryService:
                 created_at=c.created_at,
                 updated_at=c.updated_at,
                 is_deleted=c.is_deleted,
+                attachments=[
+                    {
+                        "id": str(a.id),
+                        "comment_id": str(a.comment_id) if a.comment_id else None,
+                        "original_filename": a.original_filename,
+                        "mime_type": a.mime_type,
+                        "file_size": a.file_size,
+                        "url": a.url,
+                        "uploaded_by": str(a.uploaded_by),
+                        "uploaded_at": a.uploaded_at,
+                    }
+                    for a in c.attachments
+                ],
             )
             for c in comments
         ]
