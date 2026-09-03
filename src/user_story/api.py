@@ -1,6 +1,9 @@
 from typing import List
 
+import urllib.parse
+
 from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 
 from src.config import get_logger
@@ -510,6 +513,142 @@ async def create_user_story_comment(
 
     except Exception as exc:
         logger.warning("Error creating user story comment: %s", exc)
+        return failure(exc)
+
+
+async def _comment_attachment_files(request: Request) -> list[UploadFile]:
+    form = await request.form()
+    return [
+        value
+        for key, value in form.multi_items()
+        if key in {"file", "files"}
+        and isinstance(value, UploadFile)
+        and value.filename
+    ]
+
+
+@router.post(
+    "/{project_id}/user-stories/{user_story_id}/comments/attachments",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Comment Attachments"],
+    openapi_extra=_ATTACHMENT_UPLOAD_OPENAPI,
+)
+@require_jwt
+async def upload_user_story_draft_comment_attachments(
+    project_id: str, user_story_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_story_id = validated_uuid(user_story_id)
+        files = await _comment_attachment_files(request)
+        if not files:
+            raise UserStoryServiceError(400, "BAD_REQUEST", "Missing file(s) in request payload (use form-data keys 'file' or 'files')")
+        attachments = await service.upload_comment_attachments(
+            files, user_story_id, project_id,
+            request.state.user_id, request.state.organization_id,
+        )
+        return success("Attachments uploaded successfully", dumped(attachments), code=201)
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.get(
+    "/{project_id}/user-stories/{user_story_id}/comments/attachments/{attachment_id}/download",
+    tags=["Comment Attachments"],
+)
+@require_jwt
+async def download_user_story_draft_comment_attachment(
+    project_id: str, user_story_id: str, attachment_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_story_id = validated_uuid(user_story_id)
+        attachment_id = validated_uuid(attachment_id)
+        stream, filename, mime_type, size = await service.download_draft_comment_attachment(
+            attachment_id, user_story_id, project_id, request.state.user_id,
+        )
+        clean_name = filename.replace("\r", "").replace("\n", "").replace('"', "")
+        encoded_name = urllib.parse.quote(clean_name)
+        return StreamingResponse(
+            stream.iter_chunks(chunk_size=65536),
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_name}"; filename*=UTF-8\'\'{encoded_name}',
+                "Content-Length": str(size),
+            },
+        )
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.delete(
+    "/{project_id}/user-stories/{user_story_id}/comments/attachments/{attachment_id}",
+    tags=["Comment Attachments"],
+)
+@require_jwt
+async def delete_user_story_draft_comment_attachment(
+    project_id: str, user_story_id: str, attachment_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_story_id = validated_uuid(user_story_id)
+        attachment_id = validated_uuid(attachment_id)
+        await service.delete_draft_comment_attachment(
+            attachment_id, user_story_id, project_id, request.state.user_id,
+        )
+        return success("Attachment deleted successfully")
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.post(
+    "/{project_id}/user-stories/{user_story_id}/comments/{comment_id}/attachments",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Comment Attachments"],
+    openapi_extra=_ATTACHMENT_UPLOAD_OPENAPI,
+)
+@require_jwt
+async def upload_user_story_comment_attachments(
+    project_id: str, user_story_id: str, comment_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_story_id = validated_uuid(user_story_id)
+        comment_id = validated_uuid(comment_id)
+        files = await _comment_attachment_files(request)
+        if not files:
+            raise UserStoryServiceError(400, "BAD_REQUEST", "Missing file(s) in request payload (use form-data keys 'file' or 'files')")
+        attachments = await service.upload_comment_attachments(
+            files, user_story_id, project_id,
+            request.state.user_id, request.state.organization_id, comment_id,
+        )
+        return success("Attachments uploaded successfully", dumped(attachments), code=201)
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.get(
+    "/{project_id}/user-stories/{user_story_id}/comments/{comment_id}/attachments",
+    tags=["Comment Attachments"],
+)
+@require_jwt
+async def get_user_story_comment_attachments(
+    project_id: str, user_story_id: str, comment_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_story_id = validated_uuid(user_story_id)
+        comment_id = validated_uuid(comment_id)
+        attachments = await service.get_comment_attachments(
+            comment_id, user_story_id, project_id, request.state.user_id,
+        )
+        return success("Attachments retrieved successfully", attachments)
+    except Exception as exc:
         return failure(exc)
 
 

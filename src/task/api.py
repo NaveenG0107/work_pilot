@@ -695,7 +695,6 @@ async def upload_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
         try:
             form = await request.form()
         except Exception as exc:
@@ -767,7 +766,6 @@ async def get_attachments(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
         attachments = await service.get_attachments(project_id, task_id, user_id)
         return success_response(
             "Attachments retrieved successfully", dump(attachments)
@@ -791,7 +789,6 @@ async def download_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
         attachment_id = parse_uuid(attachment_id)
         content, filename, mime_type, size = await service.download_attachment(
             project_id, task_id, attachment_id, user_id
@@ -830,7 +827,6 @@ async def delete_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
         attachment_id = parse_uuid(attachment_id)
         await service.delete_attachment(project_id, task_id, attachment_id, user_id)
         return success_response("Attachment deleted successfully")

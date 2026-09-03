@@ -46,7 +46,9 @@ async def create_task_comment(
     Creates a new comment for the specified task.
     To create a reply, provide the parent_comment_id of an existing comment.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
 
@@ -94,7 +96,9 @@ async def get_task_comments(
     """
     Get paginated top-level comments for a task along with their replies count.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
 
@@ -143,7 +147,9 @@ async def get_task_comment_by_id(
     """
     Get a task comment by ID along with its parent, attachments, and replies count.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -193,7 +199,9 @@ async def get_task_comment_replies(
     """
     Get all replies for a parent comment in a task.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_parent_id = validate_uuid(parent_comment_id, "parent_comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -245,7 +253,9 @@ async def update_task_comment(
     """
     Update an existing task comment.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -294,7 +304,9 @@ async def delete_task_comment(
     """
     Delete a task comment.
     """
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -332,6 +344,136 @@ async def delete_task_comment(
         )
 
 
+@router.post(
+    "/task/{task_id}/comments/attachments",
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_draft_comment_attachments(
+    task_id: str = Path(..., description="Task ID or Task Key"),
+    file: Optional[list[UploadFile]] = File(None),
+    files: Optional[list[UploadFile]] = File(None),
+    current_user: dict = Depends(get_current_user),
+    service: CommentService = Depends(get_comment_service),
+):
+    """Upload attachments before creating a task comment."""
+    user_id = current_user.get("user_id")
+    organization_id = current_user.get("organization_id")
+    if not user_id:
+        return error(
+            "Authentication required",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="UNAUTHORIZED",
+        )
+    if not organization_id:
+        return error(
+            "Organization context required",
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="FORBIDDEN",
+        )
+
+    try:
+        valid_task_id = await service.resolve_task_id(task_id, organization_id)
+        all_uploaded = [
+            upload
+            for group in (file or [], files or [])
+            for upload in group
+            if upload.filename
+        ]
+        if not all_uploaded:
+            return error(
+                "Missing file(s) in request payload (use form-data keys 'file' or 'files')",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="BAD_REQUEST",
+            )
+        result = await service.upload_comment_attachments(
+            comment_id=None,
+            task_id=valid_task_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            files=all_uploaded,
+        )
+        return success(
+            message="Attachments uploaded successfully",
+            data=result,
+            status_code=status.HTTP_201_CREATED,
+        )
+    except HTTPException as exc:
+        return error(
+            message=exc.detail,
+            status_code=exc.status_code,
+            code=getattr(exc, "code", None),
+        )
+    except Exception as exc:
+        logger.exception("Unexpected draft comment attachment upload error: %s", exc)
+        return error(
+            "Something went wrong. Please try again later.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@router.get("/task/{task_id}/comments/attachments/{attachment_id}/download")
+async def download_draft_comment_attachment(
+    task_id: str = Path(..., description="Task ID or Task Key"),
+    attachment_id: str = Path(..., description="Attachment ID"),
+    current_user: dict = Depends(get_current_user),
+    service: CommentService = Depends(get_comment_service),
+):
+    """Download an authenticated user's unlinked task-comment attachment."""
+    user_id = current_user.get("user_id")
+    organization_id = current_user.get("organization_id")
+    try:
+        valid_task_id = await service.resolve_task_id(task_id, organization_id)
+        stream, filename, mime_type, size = await service.download_comment_attachment(
+            attachment_id=validate_uuid(attachment_id, "attachment_id"),
+            task_id=valid_task_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            draft_only=True,
+        )
+        clean_filename = filename.replace("\n", "").replace("\r", "").replace('"', "")
+        encoded_filename = urllib.parse.quote(clean_filename)
+        return StreamingResponse(
+            stream.iter_chunks(chunk_size=65536),
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_filename}"; filename*=UTF-8\'\'{encoded_filename}',
+                "Content-Length": str(size),
+            },
+        )
+    except HTTPException as exc:
+        return error(exc.detail, status_code=exc.status_code, code=getattr(exc, "code", None))
+    except Exception as exc:
+        logger.exception("Unexpected draft attachment download error: %s", exc)
+        return error("Something went wrong. Please try again later.", status_code=500)
+
+
+@router.delete("/task/{task_id}/comments/attachments/{attachment_id}")
+async def delete_draft_comment_attachment(
+    task_id: str = Path(..., description="Task ID or Task Key"),
+    attachment_id: str = Path(..., description="Attachment ID"),
+    current_user: dict = Depends(get_current_user),
+    service: CommentService = Depends(get_comment_service),
+):
+    """Delete an authenticated user's unlinked task-comment attachment."""
+    user_id = current_user.get("user_id")
+    organization_id = current_user.get("organization_id")
+    try:
+        valid_task_id = await service.resolve_task_id(task_id, organization_id)
+        await service.delete_comment_attachment(
+            attachment_id=validate_uuid(attachment_id, "attachment_id"),
+            task_id=valid_task_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            draft_only=True,
+        )
+        return success(message="Attachment deleted successfully", status_code=200)
+    except HTTPException as exc:
+        return error(exc.detail, status_code=exc.status_code, code=getattr(exc, "code", None))
+    except Exception as exc:
+        logger.exception("Unexpected draft attachment delete error: %s", exc)
+        return error("Something went wrong. Please try again later.", status_code=500)
+
+
 @router.post("/task/{task_id}/comments/{comment_id}/attachments", status_code=status.HTTP_201_CREATED)
 async def upload_comment_attachments(
     task_id: str = Path(..., description="Task ID"),
@@ -345,7 +487,9 @@ async def upload_comment_attachments(
     Upload one or more attachments associated with a comment.
     """
     logger.info("Received request to upload attachment(s) for comment %s on task %s", comment_id, task_id)
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -412,7 +556,9 @@ async def get_comment_attachments(
     Retrieve all attachments associated with a comment.
     """
     logger.info("Received request to get attachments for comment %s on task %s", comment_id, task_id)
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -465,7 +611,9 @@ async def download_comment_attachment(
     Download a comment attachment file stream.
     """
     logger.info("Received request to download attachment %s on comment %s (task: %s)", attachment_id, comment_id, task_id)
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     valid_attachment_id = validate_uuid(attachment_id, "attachment_id")
     user_id = current_user.get("user_id")
@@ -485,6 +633,7 @@ async def download_comment_attachment(
             task_id=valid_task_id,
             user_id=user_id,
             organization_id=organization_id,
+            comment_id=valid_comment_id,
         )
 
         clean_filename = filename.replace("\n", "").replace("\r", "").replace('"', "")
@@ -539,7 +688,9 @@ async def delete_comment_attachment(
     Delete comment attachment if authorized.
     """
     logger.info("Received request to delete attachment %s on comment %s (task: %s)", attachment_id, comment_id, task_id)
-    valid_task_id = validate_uuid(task_id, "task_id")
+    valid_task_id = await service.resolve_task_id(
+        task_id, current_user.get("organization_id")
+    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     valid_attachment_id = validate_uuid(attachment_id, "attachment_id")
     user_id = current_user.get("user_id")
@@ -559,6 +710,7 @@ async def delete_comment_attachment(
             task_id=valid_task_id,
             user_id=user_id,
             organization_id=organization_id,
+            comment_id=valid_comment_id,
         )
         return success(
             message="Attachment deleted successfully",
