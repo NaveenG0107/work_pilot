@@ -12,6 +12,7 @@ import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
+from uuid6 import uuid7
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, or_, select, update
@@ -45,7 +46,6 @@ from src.organization.schemas import (
 )
 from src.project.models import Project, ProjectMember
 from src.utils.core import bcrypt_hash, create_jwt, generate_refresh_secret_64hex
-from src.utils.password_helper import hash_password
 from src.utils.setting import get_settings
 
 INDUSTRY_VALUES = {
@@ -785,7 +785,9 @@ class OrganizationService:
             existing_pending = existing_pending_result.scalars().first()
 
             expires_at = datetime.now(timezone.utc) + timedelta(days=1)
-            token = str(uuid_lib.uuid4())
+            # Go generates invitation tokens with UUIDv7. Keep the public link
+            # format identical across both backends.
+            token = str(uuid7())
             if existing_pending is not None:
                 invitation = existing_pending
                 invitation.token = token
@@ -803,14 +805,28 @@ class OrganizationService:
                 self.db.add(invitation)
             await self.db.commit()
 
-            invite_link = f"{os.getenv('BACKEND_API_URL', 'http://localhost:6369')}/api/v1/organization/invitations/accept?token={token}"
+            backend_url = get_settings().backend_api_url.rstrip("/")
+            invite_link = f"{backend_url}/api/v1/organization/invitations/accept?token={token}"
             temp_password = ""
             if not user_existed:
                 temp_password = await self._create_temp_user(invite_email, str(org_id), developer_role.id)
 
-            email_service.send_organization_invitation(
-                invite_email, org.name, developer_role.name, invite_link, temp_password,
-            )
+            try:
+                email_service.send_organization_invitation(
+                    invite_email,
+                    org.name,
+                    developer_role.name,
+                    invite_link,
+                    temp_password,
+                )
+            except Exception as exc:
+                # Match the Go service: the invitation remains valid even when
+                # the external mail provider temporarily rejects delivery.
+                logger.warning(
+                    "Failed to send organization invitation email to %s: %s",
+                    invite_email,
+                    exc,
+                )
 
             await _fill_audit(
                 self.db, user_id=str(inviter_id), organization_id=str(org_id),
@@ -820,7 +836,7 @@ class OrganizationService:
 
     async def _create_temp_user(self, email: str, org_id: str, role_id: str) -> str:
         temp_password = self._generate_temp_password(12)
-        password_hash = hash_password(temp_password)
+        password_hash, _ = bcrypt_hash(temp_password)
         username = await self._generate_unique_username(email)
         user = User(
             id=str(uuid_lib.uuid4()), email=email,

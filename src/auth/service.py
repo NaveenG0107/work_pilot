@@ -34,6 +34,7 @@ from src.utils.core import (
     validate_password,
 )
 from src.utils.setting import get_settings
+from src.utils.password_helper import verify_password as verify_legacy_password
 
 
 class AuthService:
@@ -433,15 +434,45 @@ class AuthService:
                     status_code=400,
                 )
 
+            # Go validates credentials before changing invitation/account
+            # state. This also prevents an invalid password attempt from
+            # activating the invited member.
+            # Passwords created by this API cannot contain whitespace. Accept
+            # harmless surrounding whitespace introduced by copy/paste or the
+            # temporary-password flow, while preserving the exact value first.
+            normalized_password = password.strip()
+            password_valid = bcrypt_verify(password, user.password_hash)
+            if not password_valid and normalized_password != password:
+                password_valid = bcrypt_verify(
+                    normalized_password, user.password_hash
+                )
+            legacy_password_hash = False
+            if not password_valid:
+                try:
+                    password_valid = verify_legacy_password(
+                        normalized_password, user.password_hash
+                    )
+                    legacy_password_hash = password_valid
+                except Exception:
+                    password_valid = False
+            if not password_valid:
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "Invalid email or password",
+                    status_code=400,
+                )
+            if legacy_password_hash:
+                user.password_hash, _ = bcrypt_hash(normalized_password)
+
             # Handle inactive user / invitation
             if not user.is_active:
                 inv_result = await self.db.execute(
                     select(OrganizationInvitation).where(
                         OrganizationInvitation.email == clean_email,
                         OrganizationInvitation.status == "pending",
-                    )
+                    ).order_by(OrganizationInvitation.created_at.desc()).limit(1)
                 )
-                invitation = inv_result.scalar_one_or_none()
+                invitation = inv_result.scalars().first()
 
                 if (
                     invitation
@@ -495,17 +526,6 @@ class AuthService:
                     ErrorCode.ErrForbidden,
                     "Email address must be verified before login",
                     status_code=403,
-                )
-
-            # Password validation
-            if not bcrypt_verify(
-                password,
-                user.password_hash,
-            ):
-                return None, error_response(
-                    ErrorCode.ErrBadRequest,
-                    "Invalid email or password",
-                    status_code=400,
                 )
 
             role_name = self._normalize_role(user)
@@ -783,10 +803,12 @@ class AuthService:
                     status_code=404,
                 )
 
-            if not bcrypt_verify(
-                old_password,
-                user.password_hash,
-            ):
+            old_password_valid = bcrypt_verify(old_password, user.password_hash)
+            if not old_password_valid and old_password.strip() != old_password:
+                old_password_valid = bcrypt_verify(
+                    old_password.strip(), user.password_hash
+                )
+            if not old_password_valid:
                 return None, error_response(
                     ErrorCode.ErrBadRequest,
                     "Current password is incorrect",
