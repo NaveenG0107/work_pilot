@@ -1303,6 +1303,28 @@ class CommentService:
                 detail="You do not have permission to access this project",
             )
 
+        existing_count = int(
+            (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(CommentAttachment)
+                    .where(CommentAttachment.comment_id == comment_id)
+                )
+            ).scalar_one()
+        )
+        if existing_count + len(files) > max_files:
+            logger.warning(
+                "Comment %s attachment limit exceeded: existing=%d incoming=%d max=%d",
+                comment_id,
+                existing_count,
+                len(files),
+                max_files,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Maximum of {max_files} attachments are allowed per comment.",
+            )
+
         # 5. Process and validate files
         now = datetime.now(timezone.utc)
         created_attachments: list[CommentAttachment] = []

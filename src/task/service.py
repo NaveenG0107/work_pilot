@@ -1881,7 +1881,10 @@ class TaskService:
     @staticmethod
     def attachment_limits() -> tuple[int, int]:
         settings = get_settings()
-        return settings.s3_max_file_size_mb, settings.attachment_max_files_count
+        return (
+            settings.attachment_max_file_size_mb,
+            settings.attachment_max_files_count,
+        )
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -2067,6 +2070,21 @@ class TaskService:
         if not await self._can_access_attachment_task(task, user, "add"):
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
+            )
+        existing_count = int(
+            (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(TaskAttachment)
+                    .where(TaskAttachment.task_id == task_id)
+                )
+            ).scalar_one()
+        )
+        if existing_count + len(files) > max_files:
+            raise TaskServiceError(
+                400,
+                "BAD_REQUEST",
+                f"Maximum of {max_files} attachments are allowed per task.",
             )
         prepared = [
             (filename, data, *self._validate_attachment(filename, data, max_size_mb))

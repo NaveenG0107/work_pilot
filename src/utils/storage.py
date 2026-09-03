@@ -63,8 +63,8 @@ def sanitize_filename(filename: str) -> str:
 def build_attachment_key(resource_type: str, resource_id: str, filename: str) -> str:
     """Build attachments/<type>/<id>/<unique_filename> without a bucket prefix."""
     normalized_type = resource_type.strip().lower()
-    if normalized_type not in {"tasks", "comments"}:
-        raise ValueError("resource_type must be 'tasks' or 'comments'")
+    if normalized_type not in {"tasks", "comments", "user_stories"}:
+        raise ValueError("resource_type must be 'tasks', 'comments', or 'user_stories'")
     safe_resource_id = re.sub(r"[^A-Za-z0-9_-]", "", str(resource_id))
     if not safe_resource_id:
         raise ValueError("resource_id is required")
