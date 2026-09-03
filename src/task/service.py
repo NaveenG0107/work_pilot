@@ -345,7 +345,13 @@ class TaskService:
         *,
         include_deleted: bool = False,
     ) -> Task:
-        conditions = [Task.id == task_id]
+        try:
+            uuid.UUID(str(task_id))
+            identifier_condition = Task.id == task_id
+        except (ValueError, TypeError, AttributeError):
+            identifier_condition = func.upper(Task.key) == str(task_id).strip().upper()
+
+        conditions = [identifier_condition]
         if project_id is not None:
             conditions.append(Task.project_id == project_id)
         if not include_deleted:
@@ -1051,14 +1057,17 @@ class TaskService:
         task = await self._task(task_id, project_id)
         statuses = await self._statuses(project_id)
         colors, finals = self._status_maps(statuses)
-        favorite = bool(await self._favorite_task_ids(user_id, [task_id]))
+        canonical_task_id = str(task.id)
+        favorite = bool(
+            await self._favorite_task_ids(user_id, [canonical_task_id])
+        )
         response = self._build_response(task, colors, finals, is_favourite=favorite)
         await self._audit(
             user_id=user_id,
             organization_id=organization_id,
             project_id=project_id,
-            task_id=task_id,
-            resource_id=task_id,
+            task_id=canonical_task_id,
+            resource_id=canonical_task_id,
             action="viewed",
             details=f"The task '{task.title}' was viewed by {actor.username}",
             audit_type=AuditLogType.VIEW,

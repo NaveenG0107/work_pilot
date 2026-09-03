@@ -418,7 +418,11 @@ async def get_task_by_id(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = task_id.strip()
+        if not task_id:
+            raise TaskServiceError(
+                400, "BAD_REQUEST", "Task ID or Task Key is required"
+            )
         task = await service.get(
             project_id, task_id, user_id, organization_id, role
         )
