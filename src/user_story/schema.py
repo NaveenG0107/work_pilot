@@ -163,6 +163,8 @@ class UserStoryResponse(BaseModel):
     sprint_id: str | None = Field(default=None, exclude_if=omit_empty)
     sprint_name: str | None = Field(default=None, exclude_if=omit_empty)
     serial_number: int
+    key: str | None = Field(default=None, exclude_if=omit_empty)
+    sequence_number: int | None = Field(default=None, exclude_if=omit_empty)
     formatted_serial_number: str = Field(default="", exclude_if=omit_empty)
     key: str | None = None
     sequence_number: int | None = None
