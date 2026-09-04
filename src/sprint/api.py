@@ -235,6 +235,74 @@ async def start_sprint(
     }
 
 
+@router.post(
+    "/complete",
+    status_code=200,
+)
+async def complete_sprint(
+    project_id: str,
+    sprint_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+    service: SprintService = Depends(get_sprint_service),
+):
+    user_id = current_user.get("user_id")
+    if not user_id:
+        return error_response(
+            ErrorCode.ErrUnauthorized,
+            "Authentication required",
+            status_code=401,
+        )
+
+    try:
+        project_uuid = uuid.UUID(project_id)
+    except (ValueError, TypeError):
+        return error_response(
+            ErrorCode.ErrBadRequest,
+            "Invalid ID format",
+            status_code=400,
+        )
+
+    if not sprint_id:
+        return error_response(
+            ErrorCode.ErrBadRequest,
+            "sprint_id query parameter is required",
+            status_code=400,
+        )
+
+    try:
+        sprint_uuid = uuid.UUID(sprint_id)
+    except (ValueError, TypeError):
+        return error_response(
+            ErrorCode.ErrBadRequest,
+            "Invalid ID format",
+            status_code=400,
+        )
+
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, TypeError):
+        return error_response(
+            ErrorCode.ErrUnauthorized,
+            "Authentication required",
+            status_code=401,
+        )
+
+    sprint, error = await service.complete_sprint(
+        project_id=str(project_uuid),
+        sprint_id=str(sprint_uuid),
+        user_id=str(user_uuid),
+    )
+    if error:
+        return error
+
+    return {
+        "success": True,
+        "status_code": 200,
+        "message": "Sprint completed successfully.",
+        "data": sprint,
+    }
+
+
 @router.get(
     "",
     status_code=200,

@@ -184,6 +184,22 @@ class UserProfile(BaseModel):
     created_at: datetime
     joined_at: Optional[datetime] = None
     require_password_change: bool
+    total_assigned: Optional[int] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    in_progress: Optional[int] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    completed: Optional[int] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    completion_percentage: Optional[float] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class AuthTokensResponse(BaseModel):

@@ -14,6 +14,8 @@ from src.auth.models import User
 from src.organization.models import Role
 from src.project.models import Project, ProjectMember
 from src.sprint.models import Sprint, SprintSnapshot
+from src.task.models import Task
+from src.custom_status.models import CustomStatus
 from src.sprint.schema import (
     CreateSprintRequest, StartSprintRequest, UpdateSprintRequest)
 from src.utils.core import ErrorCode, error_response
@@ -878,6 +880,141 @@ class SprintService:
             return None, error_response(
                 ErrorCode.ErrInternalServerError,
                 "Failed to start sprint",
+                status_code=500,
+            )
+
+    async def complete_sprint(
+        self,
+        project_id: str,
+        sprint_id: str,
+        user_id: str,
+    ):
+        try:
+            user = await self._get_user_by_id(user_id)
+            if user is None:
+                return None, error_response(
+                    ErrorCode.ErrNotFound,
+                    "User not found",
+                    status_code=404,
+                )
+
+            if user.organization_id is None:
+                return None, error_response(
+                    ErrorCode.ErrForbidden,
+                    "You do not have permission to complete this sprint",
+                    status_code=403,
+                )
+
+            sprint = await self._get_sprint_by_id(
+                sprint_id=sprint_id,
+                project_id=project_id,
+            )
+            if sprint is None:
+                return None, error_response(
+                    ErrorCode.ErrNotFound,
+                    "Sprint not found",
+                    status_code=404,
+                )
+
+            authorized, permission_error = await self._check_permission(
+                user,
+                str(sprint.project_id),
+                "sprints",
+                "modify",
+            )
+            if permission_error:
+                return None, permission_error
+            if not authorized:
+                return None, error_response(
+                    ErrorCode.ErrForbidden,
+                    "You do not have permission to complete this sprint",
+                    status_code=403,
+                )
+
+            if sprint.status != "active":
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "Only active sprints can be completed",
+                    status_code=400,
+                )
+
+            final_status_ids = select(CustomStatus.id).where(
+                CustomStatus.is_final.is_(True),
+                CustomStatus.deleted_at.is_(None),
+            )
+            unfinished_status_ids = select(CustomStatus.id).where(
+                CustomStatus.is_final.is_(False),
+                CustomStatus.deleted_at.is_(None),
+            )
+
+            velocity_result = await self.db.execute(
+                select(func.coalesce(func.sum(Task.story_points), 0)).where(
+                    Task.sprint_id == sprint_id,
+                    Task.deleted_at.is_(None),
+                    Task.status_id.in_(final_status_ids),
+                )
+            )
+            velocity = int(velocity_result.scalar_one() or 0)
+
+            await self.db.execute(
+                update(Task)
+                .where(
+                    Task.sprint_id == sprint_id,
+                    Task.deleted_at.is_(None),
+                    Task.status_id.in_(unfinished_status_ids),
+                )
+                .values(sprint_id=None)
+            )
+
+            actual_end_date = datetime.now(timezone.utc)
+            result = await self.db.execute(
+                update(Sprint)
+                .where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.status == "active",
+                    Sprint.deleted_at.is_(None),
+                )
+                .values(
+                    status="completed",
+                    actual_end_date=actual_end_date,
+                    velocity=velocity,
+                    updated_at=actual_end_date,
+                )
+            )
+            if result.rowcount == 0:
+                await self.db.rollback()
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "Only active sprints can be completed",
+                    status_code=400,
+                )
+
+            await self.db.commit()
+
+            return {
+                "id": str(sprint.id),
+                "name": sprint.name,
+                "goal": sprint.goal or "",
+                "status": "completed",
+                "start_date": (
+                    sprint.start_date.isoformat() + "T00:00:00Z"
+                    if sprint.start_date else None
+                ),
+                "end_date": (
+                    sprint.end_date.isoformat() + "T00:00:00Z"
+                    if sprint.end_date else None
+                ),
+                "actual_end_date": actual_end_date.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            }, None
+
+        except SQLAlchemyError:
+            await self.db.rollback()
+            return None, error_response(
+                ErrorCode.ErrInternalServerError,
+                "Failed to complete sprint",
                 status_code=500,
             )
 
