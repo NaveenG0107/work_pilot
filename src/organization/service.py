@@ -15,7 +15,7 @@ from uuid import UUID
 from uuid6 import uuid7
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -45,6 +45,8 @@ from src.organization.schemas import (
     UserProfile,
 )
 from src.project.models import Project, ProjectMember
+from src.custom_status.models import CustomStatus
+from src.task.models import Task
 from src.utils.core import bcrypt_hash, create_jwt, generate_refresh_secret_64hex
 from src.utils.setting import get_settings
 
@@ -649,12 +651,68 @@ class OrganizationService:
         )
         users = result.scalars().all()
 
+        user_ids = [str(user.id) for user in users]
+        stats_by_user: Dict[str, Tuple[int, int, int]] = {}
+        if user_ids:
+            stats_result = await self.db.execute(
+                select(
+                    Task.assignee_id,
+                    func.count(Task.id),
+                    func.sum(
+                        case((CustomStatus.is_final.is_not(True), 1), else_=0)
+                    ),
+                    func.sum(
+                        case((CustomStatus.is_final.is_(True), 1), else_=0)
+                    ),
+                )
+                .join(Project, Project.id == Task.project_id)
+                .join(CustomStatus, CustomStatus.id == Task.status_id)
+                .where(
+                    Project.organization_id == str(org_id),
+                    Task.assignee_id.in_(user_ids),
+                    Task.deleted_at.is_(None),
+                    Project.deleted_at.is_(None),
+                    CustomStatus.deleted_at.is_(None),
+                )
+                .group_by(Task.assignee_id)
+            )
+            stats_by_user = {
+                str(user_id): (
+                    int(total_assigned or 0),
+                    int(in_progress or 0),
+                    int(completed or 0),
+                )
+                for user_id, total_assigned, in_progress, completed
+                in stats_result.all()
+            }
+
         await _fill_audit(
             self.db, organization_id=str(org_id), action="viewed",
             resource_type="users_in_organization", resource_id=str(org_id),
             details="view users in organization",
         )
-        return [self._to_profile(u) for u in users], _page_meta(page, page_size, total_items)
+        profiles = []
+        for user in users:
+            total_assigned, in_progress, completed = stats_by_user.get(
+                str(user.id),
+                (0, 0, 0),
+            )
+            completion_percentage = (
+                round((completed / total_assigned) * 100, 2)
+                if total_assigned > 0
+                else 0
+            )
+            profiles.append(
+                self._to_profile(
+                    user,
+                    total_assigned=total_assigned,
+                    in_progress=in_progress,
+                    completed=completed,
+                    completion_percentage=completion_percentage,
+                )
+            )
+
+        return profiles, _page_meta(page, page_size, total_items)
 
     async def get_all_members(self, filter_: GlobalMemberListFilter) -> Tuple[List[UserProfile], Pagination]:
         page, page_size = _normalize_page(filter_.page, filter_.page_size)
@@ -717,17 +775,32 @@ class OrganizationService:
         )
         return [self._to_profile(u) for u in users], _page_meta(page, page_size, total_items)
 
-    def _to_profile(self, user: User) -> UserProfile:
+    def _to_profile(
+        self,
+        user: User,
+        total_assigned: Optional[int] = None,
+        in_progress: Optional[int] = None,
+        completed: Optional[int] = None,
+        completion_percentage: Optional[float] = None,
+    ) -> UserProfile:
+        role_name = user.role.name if user.role else None
+        if role_name not in ("org_admin", "super_admin", None):
+            role_name = "member"
+
         return UserProfile(
             id=user.id, organization_id=user.organization_id,
             organization_name=(user.organization.name if user.organization else None),
             name=user.full_name, username=user.username, email=user.email,
-            role=(user.role.name if user.role else None),
+            role=role_name,
             avatar_url=user.avatar_url or None, color=user.color,
             timezone=user.timezone or None, is_active=user.is_active,
             is_verified=user.is_verified, status=user.status,
             created_at=user.created_at, joined_at=user.joined_at,
             require_password_change=user.require_password_change,
+            total_assigned=total_assigned,
+            in_progress=in_progress,
+            completed=completed,
+            completion_percentage=completion_percentage,
         )
 
     # ------------------------------------------------------------ invitations
