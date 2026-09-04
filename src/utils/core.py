@@ -397,7 +397,7 @@ def UserProfileFromModel(user_model: Any) -> UserProfile:
     return UserProfile(
         id=str(user_model.id),
         organization_id=str(user_model.organization_id) if user_model.organization_id else None,
-        organization_name=getattr(user_model, "organization_name", None) or (user_model.organization.name if hasattr(user_model, "organization") else None),
+        organization_name=getattr(user_model, "organization_name", None) or (user_model.organization.name if getattr(user_model, "organization", None) else None),
         name=user_model.full_name,
         username=user_model.username,
         email=user_model.email,
