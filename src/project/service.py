@@ -2,6 +2,7 @@ import math
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -302,19 +303,31 @@ class ProjectService:
         sort_order = sort_order.strip().upper()
         if sort_order not in {"ASC", "DESC"}:
             sort_order = "DESC"
-        conditions = [Project.deleted_at.is_(None)]
+        conditions: list[Any] = [Project.deleted_at.is_(None)]
         if organization_id:
             conditions.append(Project.organization_id == organization_id)
         if user_id and user_role not in {"org_admin", "super_admin"}:
             conditions.append(Project.id.in_(select(ProjectMember.project_id).where(
                 ProjectMember.user_id == user_id, ProjectMember.deleted_at.is_(None))))
         if name:
-            conditions.append(Project.name.ilike(f"%{name.strip()}%"))
+            name_term = f"%{name.strip()}%"
+            conditions.append(
+                or_(
+                    Project.name.ilike(name_term),
+                    Project.slug.ilike(name_term),
+                )
+            )
         if status:
             conditions.append(func.lower(Project.status) == status.lower().strip())
         if search:
-            conditions.append(or_(Project.name.ilike(f"%{search.strip()}%"),
-                                  Project.description.ilike(f"%{search.strip()}%")))
+            search_term = f"%{search.strip()}%"
+            conditions.append(
+                or_(
+                    Project.name.ilike(search_term),
+                    Project.description.ilike(search_term),
+                    Project.slug.ilike(search_term),
+                )
+            )
         if created_by:
             conditions.append(Project.created_by == created_by)
         total = (
@@ -852,7 +865,7 @@ class ProjectService:
                          user_story_id: str = "", sprint_id: str = "",
                          start_date: str = "", end_date: str = ""):
         await self._project(project_id, organization_id)
-        conditions = [AuditLog.project_id == project_id]
+        conditions: list[Any] = [AuditLog.project_id == project_id]
         normalized_type = activity_type.strip().lower()
         if normalized_type == "view":
             conditions.append(
