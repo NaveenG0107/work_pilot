@@ -631,11 +631,7 @@ class UserStoryService:
             sprint_id=str(story.sprint_id) if story.sprint_id else None,
             sprint_name=sprint_name or None,
             serial_number=story.serial_number,
-            key=getattr(story, "key", None) or (
-                f"US-{story.sequence_number}"
-                if getattr(story, "sequence_number", None)
-                else None
-            ),
+            key=getattr(story, "key", None) or (f"US-{story.sequence_number}" if getattr(story, "sequence_number", None) else None),
             sequence_number=getattr(story, "sequence_number", None),
             formatted_serial_number=story.formatted_serial_number,
             title=story.title,
