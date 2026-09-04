@@ -581,10 +581,15 @@ class UserStoryService:
         return list(
             (
                 await self.db.execute(
-                    select(Task).where(
+                    select(Task)
+                    .options(
+                        selectinload(Task.assignee).selectinload(User.role),
+                    )
+                    .where(
                         Task.user_story_id == user_story_id,
                         Task.deleted_at.is_(None),
-                    ).order_by(Task.created_at.asc())
+                    )
+                    .order_by(Task.created_at.asc())
                 )
             ).scalars()
         )
@@ -659,11 +664,15 @@ class UserStoryService:
                     id=str(t.id),
                     title=t.title,
                     key=t.key,
+                    type=t.type,
                     status=t.status,
                     status_color=color_map.get(norm, "#808080"),
                     status_is_final=is_final_map.get(norm, False),
                     priority=t.priority,
                     is_favourite=fav_task_map.get(str(t.id), False),
+                    assignee_id=str(t.assignee_id) if t.assignee_id else None,
+                    assignee_name=(t.assignee.full_name if t.assignee else None),
+                    assignee=user_summary_from_user(t.assignee),
                 )
             )
 

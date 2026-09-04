@@ -287,9 +287,16 @@ async def get_tasks(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
+        assignees = multi_query(request, "assignee_id")
         stories = multi_query(request, "user_story_id")
         if not stories:
             stories = multi_query(request, "story_id")
+        # In the storyless view, ``null`` explicitly means tasks that are not
+        # linked to a user story. The general assignee filter also sends that
+        # value as an empty UI placeholder, where it must not suppress tasks
+        # that do belong to stories.
+        if assignees:
+            stories = [value for value in stories if value.lower() != "null"]
         tasks, pagination = await service.list(
             project_id,
             user_id,
@@ -300,7 +307,7 @@ async def get_tasks(
             sort_by=sort_by,
             sort_order=sort_order,
             status_id=multi_query(request, "status_id"),
-            assignee_id=multi_query(request, "assignee_id"),
+            assignee_id=assignees,
             reporter_id=multi_query(request, "reporter_id"),
             sprint_id=multi_query(request, "sprint_id"),
             user_story_id=stories,

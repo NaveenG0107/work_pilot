@@ -144,11 +144,15 @@ class TaskSummary(BaseModel):
     id: str
     title: str
     key: str = ""
+    type: str = ""
     status: str = ""
     status_color: str = ""
     status_is_final: bool = False
     priority: str = ""
     is_favourite: bool = False
+    assignee_id: str | None = Field(default=None, exclude_if=omit_empty)
+    assignee_name: str | None = Field(default=None, exclude_if=omit_empty)
+    assignee: UserSummary | None = Field(default=None, exclude_if=omit_empty)
 
 
 class UserStoryResponse(BaseModel):
