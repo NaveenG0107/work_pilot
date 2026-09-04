@@ -2186,3 +2186,244 @@ class SprintService:
                 "Something went wrong. Please try again later.",
                 status_code=500,
             )
+   
+
+    async def complete_sprint(
+        self,
+        project_id: str,
+        sprint_id: str,
+        user_id: str,
+    ):
+        try:
+            # Get user
+            user = await self._get_user_by_id(user_id)
+
+            if user is None:
+                return None, error_response(
+                    ErrorCode.ErrNotFound,
+                    "User not found",
+                    status_code=404,
+                )
+
+            # Get sprint using sprint_id + project_id
+            sprint_result = await self.db.execute(
+                select(Sprint).where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.deleted_at.is_(None),
+                )
+            )
+
+            sprint = sprint_result.scalar_one_or_none()
+
+            if sprint is None:
+                return None, error_response(
+                    ErrorCode.ErrNotFound,
+                    "Sprint not found",
+                    status_code=404,
+                )
+
+            # Go checks user organization exists
+            if user.organization_id is None:
+                return None, error_response(
+                    ErrorCode.ErrForbidden,
+                    "You do not have permission to complete this sprint",
+                    status_code=403,
+                )
+
+            # Get project membership
+            member = await self._get_project_member(
+                user_id,
+                sprint.project_id,
+            )
+
+            role_name = getattr(
+                getattr(user, "role", None),
+                "name",
+                None,
+            )
+
+            is_org_admin = role_name == "org_admin"
+
+            # User is not project member
+            if member is None:
+                if not is_org_admin:
+                    return None, error_response(
+                        ErrorCode.ErrForbidden,
+                        "You do not have permission to complete this sprint",
+                        status_code=403,
+                    )
+
+            else:
+                member_role = getattr(
+                    getattr(member, "role", None),
+                    "name",
+                    None,
+                )
+
+                if (
+                    member_role not in (
+                        "org_admin",
+                        "project_manager",
+                    )
+                    and not is_org_admin
+                ):
+                    return None, error_response(
+                        ErrorCode.ErrForbidden,
+                        "You do not have permission to complete this sprint",
+                        status_code=403,
+                    )
+
+            # Only ACTIVE sprint can be completed
+            if sprint.status != "active":
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "Only active sprints can be completed",
+                    status_code=400,
+                )
+
+            # Backend generates actual end date
+            actual_end_date = datetime.now(timezone.utc)
+
+            # Calculate velocity from COMPLETED tasks only
+            velocity_result = await self.db.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(story_points), 0)
+                    FROM tasks
+                    WHERE sprint_id = :sprint_id
+                    AND deleted_at IS NULL
+                    AND status_id IN (
+                        SELECT id
+                        FROM custom_statuses
+                        WHERE is_final = true
+                            AND deleted_at IS NULL
+                    )
+                    """
+                ),
+                {
+                    "sprint_id": sprint_id,
+                },
+            )
+
+            velocity = int(
+                velocity_result.scalar() or 0
+            )
+
+            # Move INCOMPLETE tasks back to backlog
+            await self.db.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET sprint_id = NULL
+                    WHERE sprint_id = :sprint_id
+                    AND deleted_at IS NULL
+                    AND status_id IN (
+                        SELECT id
+                        FROM custom_statuses
+                        WHERE is_final = false
+                            AND deleted_at IS NULL
+                    )
+                    """
+                ),
+                {
+                    "sprint_id": sprint_id,
+                },
+            )
+
+            # Complete sprint
+            update_result = await self.db.execute(
+                update(Sprint)
+                .where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.status == "active",
+                    Sprint.deleted_at.is_(None),
+                )
+                .values(
+                    status="completed",
+                    actual_end_date=actual_end_date,
+                    velocity=velocity,
+                )
+            )
+
+            if update_result.rowcount == 0:
+                await self.db.rollback()
+
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "Only active sprints can be completed",
+                    status_code=400,
+                )
+
+            await self.db.commit()
+
+            #  Fetch updated sprint
+            updated_result = await self.db.execute(
+                select(Sprint).where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.deleted_at.is_(None),
+                )
+            )
+
+            updated_sprint = updated_result.scalar_one_or_none()
+
+            if updated_sprint is None:
+                return None, error_response(
+                    ErrorCode.ErrNotFound,
+                    "Sprint not found",
+                    status_code=404,
+                )
+
+            data = {
+                "id": str(updated_sprint.id),
+                "name": updated_sprint.name,
+                "goal": updated_sprint.goal,
+                "status": updated_sprint.status,
+                "start_date": (
+                    f"{updated_sprint.start_date.isoformat()}T00:00:00Z"
+                    if updated_sprint.start_date
+                    else None
+                ),
+                "end_date": (
+                    f"{updated_sprint.end_date.isoformat()}T00:00:00Z"
+                    if updated_sprint.end_date
+                    else None
+                ),
+                "actual_end_date": (
+                    updated_sprint.actual_end_date.isoformat()
+                    if updated_sprint.actual_end_date
+                    else None
+                ),
+            }
+
+            return data, None
+
+        except SQLAlchemyError as exc:
+            await self.db.rollback()
+
+            logger.exception(
+                "COMPLETE SPRINT SQL ERROR: %s",
+                exc,
+            )
+
+            return None, error_response(
+                ErrorCode.ErrInternalServerError,
+                "Something went wrong. Please try again later.",
+                status_code=500,
+            )
+
+        except Exception as exc:
+            await self.db.rollback()
+
+            logger.exception(
+                "COMPLETE SPRINT ERROR: %s",
+                exc,
+            )
+
+            return None, error_response(
+                ErrorCode.ErrInternalServerError,
+                "Something went wrong. Please try again later.",
+                status_code=500,
+            )
