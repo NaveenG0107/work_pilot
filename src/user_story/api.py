@@ -62,6 +62,17 @@ router = APIRouter(
 )
 
 
+def validated_story_identifier(value: str) -> str:
+    identifier = str(value or "").strip()
+    if not identifier:
+        raise UserStoryServiceError(
+            400,
+            "BAD_REQUEST",
+            "Invalid user story identifier",
+        )
+    return identifier
+
+
 @router.post("/{project_id}/user-stories", status_code=status.HTTP_201_CREATED, tags=["User Stories"])
 @require_jwt
 async def create_user_story(
@@ -119,8 +130,6 @@ async def get_user_stories(
 
         logger.info("Fetching user stories for project_id=%s, page=%d, page_size=%d", project_id, page, page_size)
 
-        effective_serial = sequence_number if serial_number is None else serial_number
-
         filter_ = UserStoryFilter(
             page=page if page > 0 else 1,
             page_size=page_size if page_size > 0 else 10,
@@ -133,7 +142,7 @@ async def get_user_stories(
             priority=priority.strip(),
             search=search,
             fields=fields,
-            serial_number=effective_serial,
+            serial_number=serial_number,
             sequence_number=sequence_number,
             is_unassigned_story=is_unassigned_story,
             is_closed=is_closed,
@@ -172,7 +181,7 @@ async def get_user_story(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -365,7 +374,7 @@ async def upload_user_story_attachment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -407,7 +416,7 @@ async def get_user_story_attachments(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -435,7 +444,7 @@ async def download_user_story_attachment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         attachment_id = validated_uuid(attachment_id)
         user_id = request.state.user_id
 
@@ -470,7 +479,7 @@ async def delete_user_story_attachment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         attachment_id = validated_uuid(attachment_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id

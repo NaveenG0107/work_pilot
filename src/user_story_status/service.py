@@ -370,6 +370,24 @@ class UserStoryStatusService:
             )
 
         status_model.deleted_at = datetime.now(timezone.utc)
+
+        await self.db.flush()
+        remaining_statuses = list((await self.db.execute(
+            select(UserStoryStatus)
+            .where(
+                UserStoryStatus.project_id == str(project.id),
+                UserStoryStatus.deleted_at.is_(None),
+            )
+            .order_by(
+                UserStoryStatus.display_order.asc(),
+                UserStoryStatus.created_at.asc(),
+                UserStoryStatus.id.asc(),
+            )
+        )).scalars())
+
+        for display_order, remaining_status in enumerate(remaining_statuses):
+            remaining_status.display_order = display_order
+
         await self.db.commit()
 
         await self._create_audit_log(
