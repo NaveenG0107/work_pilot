@@ -32,6 +32,15 @@ def normalize_task_status(status: str) -> str:
     return s.replace(" ", "_")
 
 
+def resolve_project_name(project: Project, fallback_id: UUID | str | None = None) -> str:
+    """Returns the project name, falling back to the project ID or "project"."""
+    if project.name:
+        return project.name
+    if fallback_id:
+        return str(fallback_id)
+    return "project"
+
+
 class CustomStatusService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -174,7 +183,7 @@ class CustomStatusService:
         self.db.add(custom_status)
 
         # 6. Audit Logging
-        project_name = project.name or "project"
+        project_name = resolve_project_name(project, project_id)
         user_name = user.full_name or user.username or str(user_id)
         audit_log = AuditLog(
             id=str(uuid7()),
@@ -300,7 +309,7 @@ class CustomStatusService:
         ]
 
         # 6. Audit Logging (best-effort)
-        project_name = project.name or "project"
+        project_name = resolve_project_name(project, project_id)
         user_name = user.full_name or user.username or str(user_id)
         now = datetime.now(timezone.utc)
         audit_log = AuditLog(
@@ -524,7 +533,7 @@ class CustomStatusService:
                 logger.info("Updated task statuses in project %s from '%s' to '%s'", project_id, old_name, custom_status.name)
 
             # Audit log
-            project_name = project.name or "project"
+            project_name = resolve_project_name(project, project_id)
             user_name = user.full_name or user.username or str(user_id)
             detail = (
                 f"Custom Status '{custom_status.name}' updated for project '{project_name}' by {user_name}: {', '.join(changes)}"
@@ -695,7 +704,7 @@ class CustomStatusService:
                 cs.updated_at = now
 
         # 8. Audit logging
-        project_name = project.name or "project"
+        project_name = resolve_project_name(project, project_id)
         user_name = user.full_name or user.username or str(user_id)
         audit_log = AuditLog(
             id=str(uuid7()),
