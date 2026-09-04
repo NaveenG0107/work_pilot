@@ -40,6 +40,7 @@ ALLOWED_SORT_BY = [
     "priority",
     "status",
     "serial_number",
+    "sequence_number",
 ]
 
 ALLOWED_SORT_ORDER = ["ASC", "DESC"]
@@ -163,6 +164,8 @@ class UserStoryResponse(BaseModel):
     sprint_name: str | None = Field(default=None, exclude_if=omit_empty)
     serial_number: int
     formatted_serial_number: str = Field(default="", exclude_if=omit_empty)
+    key: str | None = None
+    sequence_number: int | None = None
     title: str
     description: str | None = Field(default=None, exclude_if=omit_empty)
     priority: str

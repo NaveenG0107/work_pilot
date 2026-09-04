@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, event, text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, event, text
 from sqlalchemy.orm import relationship
 
 from uuid6 import uuid7
@@ -12,7 +12,7 @@ def format_serial_number(seq: int) -> str:
     if seq <= 0:
         return ""
 
-    return f"#{seq}"
+    return f"US-{seq}"
 
 
 def get_next_global_serial_number(connection) -> int:
@@ -48,6 +48,8 @@ class UserStory(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
     project_id = Column(String(36), ForeignKey("projects.id"), nullable=False, index=True)
     sprint_id = Column(String(36), ForeignKey("sprints.id"), nullable=True, index=True)
+    key = Column(String(50), nullable=True)
+    sequence_number = Column(Integer, nullable=True, index=True)
     serial_number = Column(BigInteger, nullable=False, unique=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
@@ -69,8 +71,22 @@ class UserStory(Base):
     reporter = relationship("User", foreign_keys=[reporter_id])
     attachments = relationship("UserStoryAttachment", back_populates="user_story", foreign_keys="UserStoryAttachment.user_story_id")
 
+    __table_args__ = (
+        Index(
+            "idx_project_user_story_key",
+            "project_id",
+            "key",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
     @property
     def formatted_serial_number(self):
+        if self.key:
+            return self.key
+        if self.sequence_number and self.sequence_number > 0:
+            return f"US-{self.sequence_number}"
         return format_serial_number(self.serial_number)
 
 

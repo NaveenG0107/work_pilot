@@ -247,6 +247,7 @@ class UserStoryService:
         return user
 
     async def _story(self, story_id: str, project_id: str) -> UserStory:
+        identifier = str(story_id).strip()
         story = (
             await self.db.execute(
                 select(UserStory)
@@ -258,7 +259,10 @@ class UserStoryService:
                     selectinload(UserStory.reporter).selectinload(User.role),
                 )
                 .where(
-                    UserStory.id == story_id,
+                    or_(
+                        UserStory.id == identifier,
+                        func.lower(UserStory.key) == identifier.lower(),
+                    ),
                     UserStory.project_id == project_id,
                     UserStory.deleted_at.is_(None),
                 )
@@ -627,6 +631,12 @@ class UserStoryService:
             sprint_id=str(story.sprint_id) if story.sprint_id else None,
             sprint_name=sprint_name or None,
             serial_number=story.serial_number,
+            key=getattr(story, "key", None) or (
+                f"US-{story.sequence_number}"
+                if getattr(story, "sequence_number", None)
+                else None
+            ),
+            sequence_number=getattr(story, "sequence_number", None),
             formatted_serial_number=story.formatted_serial_number,
             title=story.title,
             description=story.description or None,
@@ -801,9 +811,22 @@ class UserStoryService:
             status_name=req.status,
         )
 
+        sequence_number = int(
+            (
+                await self.db.execute(
+                    select(
+                        func.coalesce(func.max(UserStory.sequence_number), 0)
+                    ).where(UserStory.project_id == project_id)
+                )
+            ).scalar_one()
+            or 0
+        ) + 1
+
         story = UserStory(
             project_id=project_id,
             sprint_id=req.sprint_id if req.sprint_id else None,
+            key=f"US-{sequence_number}",
+            sequence_number=sequence_number,
             title=req.title,
             description=_sanitize_html(req.description),
             priority=req.priority,
@@ -1160,6 +1183,11 @@ class UserStoryService:
         if filter_.serial_number is not None:
             conditions.append(UserStory.serial_number == filter_.serial_number)
 
+        if filter_.sequence_number is not None:
+            conditions.append(
+                UserStory.sequence_number == filter_.sequence_number
+            )
+
         if filter_.is_closed is not None:
             conditions.append(UserStory.is_closed == filter_.is_closed)
 
@@ -1171,6 +1199,8 @@ class UserStoryService:
                 or_(
                     func.lower(UserStory.title).like(search_term),
                     func.lower(UserStory.description).like(search_term),
+                    func.lower(UserStory.key).like(search_term),
+                    func.cast(UserStory.sequence_number, String).like(clean_term),
                     func.cast(UserStory.serial_number, String).like(clean_term),
                 )
             )
@@ -1190,6 +1220,8 @@ class UserStoryService:
             order_column = UserStory.priority
         elif filter_.sort_by == "serial_number":
             order_column = UserStory.serial_number
+        elif filter_.sort_by == "sequence_number":
+            order_column = UserStory.sequence_number
 
         stories = list(
             (
@@ -1427,6 +1459,7 @@ class UserStoryService:
         logger.info("Service: Uploading %d attachment(s) for user_story_id=%s", len(files), user_story_id)
 
         story = await self._story(user_story_id, project_id)
+        resolved_story_id = str(story.id)
         max_files = get_settings().attachment_max_files_count
 
         if len(files) > max_files:
@@ -1441,7 +1474,7 @@ class UserStoryService:
                 await self.db.execute(
                     select(func.count())
                     .select_from(UserStoryAttachment)
-                    .where(UserStoryAttachment.user_story_id == user_story_id)
+                    .where(UserStoryAttachment.user_story_id == resolved_story_id)
                 )
             ).scalar_one()
         )
@@ -1525,7 +1558,7 @@ class UserStoryService:
                     ".zip": "application/zip",
                     ".txt": "text/plain",
                 }[extension]
-                storage_path = build_attachment_key("user_stories", user_story_id, filename)
+                storage_path = build_attachment_key("user_stories", resolved_story_id, filename)
                 stored_name = storage_path.rsplit("/", 1)[-1]
                 url = await asyncio.to_thread(
                     upload_s3_object,
@@ -1536,7 +1569,7 @@ class UserStoryService:
                 uploaded_keys.append(storage_path)
 
                 attachment = UserStoryAttachment(
-                    user_story_id=user_story_id,
+                    user_story_id=resolved_story_id,
                     original_filename=filename,
                     stored_filename=stored_name,
                     mime_type=mime_type,
@@ -1595,10 +1628,10 @@ class UserStoryService:
             user_id=user_id,
             organization_id=organization_id,
             project_id=project_id,
-            user_story_id=user_story_id,
+            user_story_id=resolved_story_id,
             action="uploaded",
             resource_type="user_story_attachment",
-            resource_id=user_story_id,
+            resource_id=resolved_story_id,
             details=f"Uploaded {len(files)} attachment(s) to user story '{story.title}'",
             audit_type=AuditLogType.ACTIVITY,
         )
@@ -1612,12 +1645,13 @@ class UserStoryService:
     ) -> List[UserStoryAttachmentResponse]:
         logger.info("Service: Fetching attachments for user_story_id=%s", user_story_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        resolved_story_id = str(story.id)
 
         attachments = (
             await self.db.execute(
                 select(UserStoryAttachment).where(
-                    UserStoryAttachment.user_story_id == user_story_id
+                    UserStoryAttachment.user_story_id == resolved_story_id
                 )
             )
         ).scalars().all()
@@ -1644,13 +1678,14 @@ class UserStoryService:
     ) -> Tuple[bytes, str, str]:
         logger.info("Service: Downloading attachment_id=%s for user_story_id=%s", attachment_id, user_story_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        resolved_story_id = str(story.id)
 
         attachment = (
             await self.db.execute(
                 select(UserStoryAttachment).where(
                     UserStoryAttachment.id == attachment_id,
-                    UserStoryAttachment.user_story_id == user_story_id,
+                    UserStoryAttachment.user_story_id == resolved_story_id,
                 )
             )
         ).scalar_one_or_none()
@@ -1674,12 +1709,13 @@ class UserStoryService:
         logger.info("Service: Deleting attachment_id=%s from user_story_id=%s", attachment_id, user_story_id)
 
         story = await self._story(user_story_id, project_id)
+        resolved_story_id = str(story.id)
 
         attachment = (
             await self.db.execute(
                 select(UserStoryAttachment).where(
                     UserStoryAttachment.id == attachment_id,
-                    UserStoryAttachment.user_story_id == user_story_id,
+                    UserStoryAttachment.user_story_id == resolved_story_id,
                 )
             )
         ).scalar_one_or_none()
