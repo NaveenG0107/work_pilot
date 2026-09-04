@@ -3,6 +3,7 @@
 Organization service logic.
 """
 
+import logging
 import math
 import os
 import re
@@ -50,6 +51,8 @@ from src.task.models import Task
 from src.utils.core import bcrypt_hash, create_jwt, generate_refresh_secret_64hex
 from src.utils.setting import get_settings
 
+logger = logging.getLogger(__name__)
+
 INDUSTRY_VALUES = {
     "Information_Technology",
     "Finance",
@@ -85,7 +88,6 @@ DEFAULT_ROLE_SCOPE: dict = {
         ("comments", "add"),
         ("comments", "modify"),
         ("comments", "delete"),
-        ("comments", "comment"),
     },
     "qa": {
         ("projects", "view"),
@@ -97,7 +99,6 @@ DEFAULT_ROLE_SCOPE: dict = {
         ("tasks", "modify"),
         ("comments", "view"),
         ("comments", "add"),
-        ("comments", "comment"),
     },
     "stakeholder": {
         ("projects", "view"),
@@ -105,7 +106,6 @@ DEFAULT_ROLE_SCOPE: dict = {
         ("user_stories", "view"),
         ("tasks", "view"),
         ("comments", "view"),
-        ("comments", "comment"),
     },
 }
 
@@ -118,6 +118,16 @@ ROLE_DESCRIPTIONS = {
     "qa": "Quality assurance engineer with access to test tasks",
     "stakeholder": "Read-only stakeholder with basic viewing and commenting privileges",
 }
+
+AUTO_VIEW_PERMISSIONS = [
+    ("projects", "view"),
+    ("sprints", "view"),
+    ("user_stories", "view"),
+    ("tasks", "view"),
+    ("comments", "view"),
+    ("attachments", "view"),
+    ("custom_statuses", "view"),
+]
 
 
 def _slug_from_domain(domain: str) -> str:
@@ -1041,7 +1051,7 @@ class OrganizationService:
             "sprints": ["view", "add", "modify", "delete"],
             "user_stories": ["view", "add", "modify", "delete"],
             "tasks": ["view", "add", "modify", "delete"],
-            "comments": ["view", "add", "modify", "delete", "comment"],
+            "comments": ["view", "add", "modify", "delete"],
         }
         permissions_map: Dict[str, Dict[str, bool]] = {}
         for res, actions in resource_actions.items():
@@ -1087,12 +1097,33 @@ class OrganizationService:
             )
         return perm
 
-    async def _resolve_enabled_permissions(self, permissions: Dict[str, Dict[str, bool]]) -> List[Permission]:
+    async def _resolve_enabled_permissions(
+        self,
+        permissions: Optional[Dict[str, Dict[str, bool]]],
+        auto_include_view: bool = True,
+    ) -> List[Permission]:
         resolved: List[Permission] = []
-        for resource, action_map in permissions.items():
-            for action, enabled in action_map.items():
-                if enabled:
-                    resolved.append(await self._get_permission_by_resource_action(resource, action))
+        seen = set()
+        if permissions:
+            for resource, action_map in permissions.items():
+                for action, enabled in action_map.items():
+                    if enabled:
+                        perm = await self._get_permission_by_resource_action(resource, action)
+                        resolved.append(perm)
+                        seen.add((resource, action))
+        if auto_include_view:
+            for resource, action in AUTO_VIEW_PERMISSIONS:
+                if (resource, action) not in seen:
+                    result = await self.db.execute(
+                        select(Permission).where(
+                            Permission.resource == resource,
+                            Permission.action == action,
+                        )
+                    )
+                    perm = result.scalar_one_or_none()
+                    if perm is not None:
+                        resolved.append(perm)
+                        seen.add((resource, action))
         return resolved
 
     async def _is_role_assigned(self, role_id: UUID) -> bool:
@@ -1118,7 +1149,12 @@ class OrganizationService:
         name = req.name.strip()
         if not name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role name is required")
-        permissions_to_attach = await self._resolve_enabled_permissions(req.permissions)
+        if name.lower() in ("super_admin", "org_admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot create a role with name '{name}'",
+            )
+        permissions_to_attach = await self._resolve_enabled_permissions(req.permissions, auto_include_view=True)
 
         role = Role(
             id=str(uuid_lib.uuid4()),
@@ -1152,16 +1188,24 @@ class OrganizationService:
             .options(selectinload(Role.permissions))
         )
         rows = result.scalars().all()
-        return [self._map_role_response(r) for r in rows]
+        return [
+            self._map_role_response(r)
+            for r in rows
+            if r.name not in ("super_admin", "org_admin")
+        ]
 
     async def get_role_by_id(self, org_id: UUID, role_id: UUID) -> RoleResponse:
         role = await self._get_role_by_id_raw(role_id)
         if role.organization_id is not None and role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this role")
+        if role.name in ("super_admin", "org_admin"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this role")
         return self._map_role_response(role)
 
     async def update_role(self, org_id: UUID, role_id: UUID, req: UpdateRoleRequest) -> RoleResponse:
         role = await self._get_role_by_id_raw(role_id)
+        if role.name in ("super_admin", "org_admin"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to modify this role")
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to modify this role")
 
@@ -1169,12 +1213,17 @@ class OrganizationService:
             name = req.name.strip()
             if not name:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role name cannot be empty")
+            if name.lower() in ("super_admin", "org_admin"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Cannot rename a role to '{name}'",
+                )
             role.name = name
         if req.description is not None:
             role.description = req.description
 
         if req.permissions is not None:
-            permissions_to_attach = await self._resolve_enabled_permissions(req.permissions)
+            permissions_to_attach = await self._resolve_enabled_permissions(req.permissions, auto_include_view=True)
             role.permissions = permissions_to_attach
         role.updated_at = datetime.now(timezone.utc)
         try:
@@ -1190,7 +1239,7 @@ class OrganizationService:
 
     async def delete_role(self, org_id: UUID, role_id: UUID) -> None:
         role = await self._get_role_by_id_raw(role_id)
-        if role.is_system:
+        if role.name in ("super_admin", "org_admin") or role.is_system:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System roles cannot be deleted")
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to delete this role")

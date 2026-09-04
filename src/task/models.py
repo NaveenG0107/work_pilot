@@ -30,7 +30,7 @@ class TaskAttachment(Base):
     uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     uploaded_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
-    task = relationship("Task", foreign_keys=[task_id])
+    task = relationship("Task", back_populates="attachments", foreign_keys=[task_id])
     uploader = relationship("User", foreign_keys=[uploaded_by])
 
 
@@ -67,7 +67,7 @@ class Task(Base):
     assignee = relationship("User", foreign_keys=[assignee_id])
     reporter = relationship("User", foreign_keys=[reporter_id])
     labels = relationship("Label", secondary=task_labels)
-    attachments = relationship("TaskAttachment", foreign_keys=[TaskAttachment.task_id])
+    attachments = relationship("TaskAttachment", back_populates="task", foreign_keys=[TaskAttachment.task_id])
 
     __table_args__ = (
         UniqueConstraint("project_id", "key", name="idx_project_task_key"),

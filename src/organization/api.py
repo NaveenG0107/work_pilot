@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.auth.deps import get_current_user
+from src.auth.deps import get_current_user, require_role
 
 from src.utils import storage as storage_service
 from src.organization.schemas import (
@@ -66,7 +66,7 @@ async def _service(db: AsyncSession = Depends(get_db)) -> OrganizationService:
 @router.delete("/organization/delete")
 async def delete_organization(
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     await service.delete_organization(org_id, UUID(current_user["user_id"]))
@@ -84,7 +84,7 @@ async def update_organization(
     country_id: Optional[str] = Form(None),
     logo: Optional[UploadFile] = File(None),
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     country_name = None
@@ -145,7 +145,7 @@ async def get_organization(
 async def get_all_organizations(
     filter_: OrganizationFilterRequest = Query(),
     service: OrganizationService = Depends(_service),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_role("super_admin")),
 ):
     summaries, pagination = await service.get_all_organizations(filter_)
     return success(
@@ -163,7 +163,7 @@ async def update_organization_status(
     organization_id: UUID,
     payload: UpdateOrganizationStatusRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("super_admin")),
 ):
     await service.update_organization_status(organization_id, payload.is_active, UUID(current_user["user_id"]))
     message = "Organization activated successfully" if payload.is_active else "Organization deactivated successfully"
@@ -244,7 +244,7 @@ async def create_organization(
 async def update_user_status(
     payload: UserStatusRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     await service.update_user_status(org_id, payload.user_id, payload.is_active)
@@ -261,7 +261,7 @@ async def update_user_status(
 async def update_user_role(
     payload: UserRoleRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     if payload.role not in ("org_admin", "member"):
         return error("Role must be one of org_admin or member.", 400, code="VALIDATION_ERROR")
@@ -298,7 +298,7 @@ async def get_users_in_organization(
 async def get_all_members(
     filter_: GlobalMemberListFilter = Query(),
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("super_admin")),
 ):
     users, pagination = await service.get_all_members(filter_)
     return success(
@@ -315,7 +315,7 @@ async def get_all_members(
 async def remove_user(
     user_id: UUID,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     await service.remove_user(org_id, user_id)
@@ -332,7 +332,7 @@ async def remove_user(
 async def invite_member(
     payload: InviteOrganizationMemberRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     user_id = UUID(current_user["user_id"])
@@ -427,7 +427,7 @@ async def accept_invitation(
 async def create_role(
     payload: CreateRoleRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     role = await service.create_role(org_id, payload)
@@ -470,7 +470,7 @@ async def update_role(
     role_id: UUID,
     payload: UpdateRoleRequest,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     role = await service.update_role(org_id, role_id, payload)
@@ -484,7 +484,7 @@ async def update_role(
 async def delete_role(
     role_id: UUID,
     service: OrganizationService = Depends(_service),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role("org_admin")),
 ):
     org_id = UUID(current_user["organization_id"])
     await service.delete_role(org_id, role_id)
