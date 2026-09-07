@@ -6,13 +6,7 @@ from sqlalchemy.orm import relationship
 from uuid6 import uuid7
 
 from src.database import Base
-
-
-def format_serial_number(seq: int) -> str:
-    if seq <= 0:
-        return ""
-
-    return f"US-{seq}"
+from src.serial.models import format_serial_number
 
 
 def get_next_global_serial_number(connection) -> int:
@@ -48,8 +42,8 @@ class UserStory(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
     project_id = Column(String(36), ForeignKey("projects.id"), nullable=False, index=True)
     sprint_id = Column(String(36), ForeignKey("sprints.id"), nullable=True, index=True)
-    key = Column(String(50), nullable=True)
-    sequence_number = Column(Integer, nullable=True, index=True)
+    key = Column(String(50), nullable=False, default="", server_default="")
+    sequence_number = Column(Integer, nullable=False, default=0, server_default="0", index=True)
     serial_number = Column(BigInteger, nullable=False, unique=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
@@ -83,10 +77,6 @@ class UserStory(Base):
 
     @property
     def formatted_serial_number(self):
-        if self.key:
-            return self.key
-        if self.sequence_number and self.sequence_number > 0:
-            return f"US-{self.sequence_number}"
         return format_serial_number(self.serial_number)
 
 
@@ -109,7 +99,8 @@ class UserStoryAttachment(Base):
     __tablename__ = "user_story_attachments"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
-    user_story_id = Column(String(36), ForeignKey("user_stories.id"), nullable=False, index=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_story_id = Column(String(36), ForeignKey("user_stories.id"), nullable=True, index=True)
     original_filename = Column(String(255), nullable=False)
     stored_filename = Column(String(255), nullable=False)
     mime_type = Column(String(100), nullable=False)

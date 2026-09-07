@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Column, DateTime, Float, ForeignKey, Integer, String, Table, Text, UniqueConstraint, event, text
+from sqlalchemy import BigInteger, Column, DateTime, Numeric, ForeignKey, Integer, String, Table, Text, UniqueConstraint, event, text
 from sqlalchemy.orm import relationship
 
 from uuid6 import uuid7
 
 from src.database import Base
+from src.serial.models import format_serial_number
 
 
 task_labels = Table(
@@ -20,7 +21,8 @@ class TaskAttachment(Base):
     __tablename__ = "task_attachments"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid7()))
-    task_id = Column(String(36), ForeignKey("tasks.id"), nullable=False, index=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id = Column(String(36), ForeignKey("tasks.id"), nullable=True, index=True)
     original_filename = Column(String(255), nullable=False)
     stored_filename = Column(String(255), nullable=False)
     mime_type = Column(String(100), nullable=False)
@@ -50,13 +52,12 @@ class Task(Base):
     priority = Column(String(50), nullable=False, default="medium")
     status_id = Column(String(36), nullable=False, index=True)
     status = Column(String(50), nullable=False, default="todo")
-    blocked_reason = Column(Text, nullable=True)
     assignee_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     reporter_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     story_points = Column(Integer, nullable=False, default=0)
     due_date = Column(DateTime(timezone=True), nullable=True)
-    estimated_hours = Column(Float, nullable=True)
-    actual_hours = Column(Float, nullable=True)
+    estimated_hours = Column(Numeric, nullable=True)
+    actual_hours = Column(Numeric, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
@@ -113,13 +114,6 @@ def normalize_task_status(status: str) -> str:
 
 def is_default_task_status(status: str) -> bool:
     return normalize_task_status(status) in DEFAULT_STATUS_COLORS
-
-
-def format_serial_number(seq: int) -> str:
-    if seq <= 0:
-        return ""
-
-    return f"#{seq}"
 
 
 def get_next_global_serial_number(connection) -> int:

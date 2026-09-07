@@ -397,8 +397,8 @@ class DashboardService:
         tasks_res = await self.db.execute(tasks_stmt)
         tasks = tasks_res.scalars().all()
 
-        total_estimated_hours = sum(t.estimated_hours or 0.0 for t in tasks)
-        total_actual_hours = sum(t.actual_hours or 0.0 for t in tasks)
+        total_estimated_hours = float(sum(t.estimated_hours or 0 for t in tasks))
+        total_actual_hours = float(sum(t.actual_hours or 0 for t in tasks))
 
         total_estimated_hours = round(total_estimated_hours, 2)
         total_actual_hours = round(total_actual_hours, 2)
