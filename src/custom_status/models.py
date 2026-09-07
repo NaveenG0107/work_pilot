@@ -18,8 +18,8 @@ class CustomStatus(Base):
     display_order = Column(Integer, nullable=False)
     is_default = Column(Boolean, nullable=False, default=False)
     is_final = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     project = relationship("Project", foreign_keys=[project_id])
