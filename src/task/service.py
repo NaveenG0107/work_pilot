@@ -529,7 +529,6 @@ class TaskService:
             due_date=task.due_date,
             estimated_hours=task.estimated_hours,
             actual_hours=task.actual_hours,
-            blocked_reason=task.blocked_reason or "",
             created_at=task.created_at or now,
             updated_at=task.updated_at or now,
             labels=labels,
@@ -1182,11 +1181,6 @@ class TaskService:
                 project_id, body.status_id, body.status, statuses
             )
             status_changing = new_status_id != str(task.status_id)
-        if status_changing and normalize_task_status(new_status_name) == "blocked":
-            if body.blocked_reason is None or not body.blocked_reason.strip():
-                raise TaskServiceError(
-                    400, "BAD_REQUEST", "Moving to Blocked requires a blocked reason"
-                )
         if status_changing and not is_pm_or_admin:
             old_status = normalize_task_status(task.status)
             new_status = normalize_task_status(new_status_name)
@@ -1223,11 +1217,6 @@ class TaskService:
             changes.append(f"status changed from '{task.status}' to '{new_status_name}'")
             task.status_id = new_status_id
             task.status = new_status_name
-            task.blocked_reason = (
-                body.blocked_reason
-                if normalize_task_status(new_status_name) == "blocked"
-                else ""
-            )
         if body.explicitly_set("assignee_id"):
             target = None if body.assignee_id is None or _is_nil(body.assignee_id) else str(body.assignee_id)
             if target != task.assignee_id:
@@ -1382,22 +1371,12 @@ class TaskService:
                         project_id, item.status_id, item.status, statuses
                     )
                     status_changing = new_status_id != str(task.status_id)
-                if status_changing and normalize_task_status(new_status_name) == "blocked":
-                    if item.blocked_reason is None or not item.blocked_reason.strip():
-                        raise TaskServiceError(
-                            400, "BAD_REQUEST", "Moving to Blocked requires a blocked reason"
-                        )
 
                 changes: list[str] = []
                 if status_changing:
                     changes.append(f"status changed from '{task.status}' to '{new_status_name}'")
                     task.status_id = new_status_id
                     task.status = new_status_name
-                    task.blocked_reason = (
-                        item.blocked_reason
-                        if normalize_task_status(new_status_name) == "blocked"
-                        else ""
-                    )
                 if item.assignee_id is not None:
                     target = None if _is_nil(item.assignee_id) else str(item.assignee_id)
                     if target != task.assignee_id:
@@ -2108,6 +2087,7 @@ class TaskService:
                 url = await asyncio.to_thread(upload_s3_object, data, key, mime_type)
                 uploaded_keys.append(key)
                 attachment = TaskAttachment(
+                    project_id=str(task.project_id),
                     task_id=task_id,
                     original_filename=original,
                     stored_filename=sanitized,

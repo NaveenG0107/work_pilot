@@ -99,7 +99,6 @@ class UpdateTaskRequest(TaskSchema):
     priority: TaskPriority | None = None
     status_id: UUID | None = None
     status: str | None = None
-    blocked_reason: str | None = None
     assignee_id: UUID | None = None
     reporter_id: UUID | None = None
     sprint_id: UUID | None = None
@@ -139,7 +138,6 @@ class BulkUpdateTaskItem(TaskSchema):
     task_id: UUID
     status_id: UUID | None = None
     status: str | None = None
-    blocked_reason: str | None = None
     sprint_id: UUID | None = None
     assignee_id: UUID | None = None
 
@@ -215,7 +213,6 @@ class TaskResponse(TaskSchema):
     due_date: datetime | None = Field(default=None, exclude_if=omit_empty)
     estimated_hours: float | None = Field(default=None, exclude_if=omit_empty)
     actual_hours: float | None = Field(default=None, exclude_if=omit_empty)
-    blocked_reason: str = Field(default="", exclude_if=omit_empty)
     created_at: datetime
     updated_at: datetime
     labels: list[LabelResponse] = Field(default_factory=list, exclude_if=omit_empty)

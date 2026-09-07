@@ -1565,6 +1565,7 @@ class UserStoryService:
                 uploaded_keys.append(storage_path)
 
                 attachment = UserStoryAttachment(
+                    project_id=str(story.project_id),
                     user_story_id=resolved_story_id,
                     original_filename=filename,
                     stored_filename=stored_name,

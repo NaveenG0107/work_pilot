@@ -30,7 +30,7 @@ class AuditLog(Base):
     resource_type = Column(String(50), nullable=False, index=True)
     resource_id = Column(String(255), nullable=True)
     details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     type = Column(String(50), default=AuditLogType.ACTIVITY, nullable=False, index=True)
 
     user = relationship("User", foreign_keys=[user_id])
