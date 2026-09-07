@@ -1,8 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from src.config import get_logger
-from src.database import Base, engine
-from sqlalchemy import text
+from fastapi.middleware.cors import CORSMiddleware
+from src.config import CORS_ORIGINS, get_logger
 
 API_PREFIX = "/api/v1"
 
@@ -26,36 +25,9 @@ from src.work_item.api import router as work_item_router
 
 logger = get_logger(__name__)
 
-# Import every model *module* so they are registered on Base.metadata
-from src.audit import models as _audit_models  
-from src.auth import models as _auth_models 
-from src.comments import models as _comments_models  
-from src.custom_status import models as _custom_status_models 
-from src.favorite import models as _favorite_models
-from src.label import models as _label_models  
-from src.organization import models as _organization_models  
-from src.project import models as _project_models  
-from src.public import models as _public_models  
-from src.serial import models as _serial_models  
-from src.sprint import models as _sprint_models  
-from src.task import models as _task_models  
-from src.user_story import models as _user_story_models  
-from src.user_story_status import models as _user_story_status_models  
-
-async def _create_tables() -> None:
-    """Create all tables on startup (idempotent)."""
-    async with engine.begin() as conn:
-        try:
-            await conn.execute(text("CREATE SEQUENCE IF NOT EXISTS global_work_item_serial_seq START WITH 1 INCREMENT BY 1"))
-        except Exception:
-            pass
-        await conn.run_sync(Base.metadata.create_all)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Work Pilot backend starting up")
-    await _create_tables()
     yield
     logger.info("Work Pilot backend shutting down")
 
@@ -65,6 +37,15 @@ app = FastAPI(
     title="Work Pilot Backend",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 register_exception_handlers(app)
