@@ -92,14 +92,15 @@ async def seed_permissions(session: AsyncSession) -> int:
     seeded_count = 0
 
     # 1. Query existing permissions
-    result = await session.execute(select(Permission.resource, Permission.action))
+    permissions = Permission.__table__
+    result = await session.execute(select(permissions.c.resource, permissions.c.action))
     existing_perms = {(row[0], row[1]) for row in result.all()}
 
     # 2. Insert only missing permissions
     for resource, action in DEFAULT_PERMISSIONS:
         if (resource, action) not in existing_perms:
-            session.add(
-                Permission(
+            await session.execute(
+                pg_insert(permissions).values(
                     id=str(uuid7()),
                     resource=resource,
                     action=action,
@@ -158,7 +159,7 @@ async def seed_countries(session: AsyncSession, sql_file_path: Optional[str] = N
         logger.error(
             "Countries SQL seed file not found! Checked locations include 'src/utils/seeds/seed_countries.sql'."
         )
-        return 0
+        raise FileNotFoundError("Countries SQL seed file not found")
 
     logger.info(f"Reading countries seed file: {filepath}")
     sql_content = filepath.read_text(encoding="utf-8")
@@ -168,7 +169,7 @@ async def seed_countries(session: AsyncSession, sql_file_path: Optional[str] = N
     await session.commit()
 
     # Query total countries count to verify database state
-    result = await session.execute(select(Country.id))
+    result = await session.execute(select(Country.__table__.c.id))
     total_in_db = len(result.all())
 
     logger.info(
@@ -192,51 +193,53 @@ async def seed_super_admin(
     """
     logger.info("Seeding super_admin role and user...")
     now = datetime.now(timezone.utc)
+    roles = Role.__table__
+    users = User.__table__
 
     # 1. Seed or get super_admin role
     result = await session.execute(
-        select(Role).where(
-            Role.name == "super_admin",
-            Role.organization_id.is_(None),
-            Role.deleted_at.is_(None),
+        select(roles).where(
+            roles.c.name == "super_admin",
+            roles.c.organization_id.is_(None),
+            roles.c.deleted_at.is_(None),
         )
     )
-    role = result.scalar_one_or_none()
+    role = result.mappings().one_or_none()
 
     if not role:
-        role = Role(
-            id=str(uuid7()),
+        role_id = str(uuid7())
+        await session.execute(roles.insert().values(
+            id=role_id,
             organization_id=None,
             name="super_admin",
             description="System administrator with global access",
             is_system=True,
             created_at=now,
             updated_at=now,
-        )
-        session.add(role)
-        await session.flush()
+        ))
         logger.info("Created 'super_admin' system role.")
     else:
+        role_id = role["id"]
         logger.info("Role 'super_admin' already exists.")
 
     # 2. Seed or get super_admin user
     result = await session.execute(
-        select(User).where(
-            (User.email == email) | (User.username == username),
-            User.deleted_at.is_(None),
+        select(users).where(
+            (users.c.email == email) | (users.c.username == username),
+            users.c.deleted_at.is_(None),
         )
     )
-    user = result.scalar_one_or_none()
+    user = result.mappings().one_or_none()
 
     if not user:
-        user = User(
+        await session.execute(users.insert().values(
             id=str(uuid7()),
             organization_id=None,
             full_name=full_name,
             username=username,
             email=email,
             password_hash=hash_password(password),
-            role_id=role.id,
+            role_id=role_id,
             is_active=True,
             is_verified=True,
             color="#E74C3C",
@@ -245,15 +248,13 @@ async def seed_super_admin(
             created_at=now,
             joined_at=now,
             updated_at=now,
-        )
-        session.add(user)
+        ))
         logger.info(f"Created default super_admin user '{username}' ({email}).")
     else:
         # Ensure role_id points to super_admin role and user is active/verified
-        user.role_id = role.id
-        user.is_active = True
-        user.is_verified = True
-        user.updated_at = now
+        await session.execute(users.update().where(users.c.id == user["id"]).values(
+            role_id=role_id, is_active=True, is_verified=True, updated_at=now,
+        ))
         logger.info(f"User '{username}' already exists; verified super_admin role assignment.")
 
     await session.commit()

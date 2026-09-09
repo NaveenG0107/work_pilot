@@ -2,6 +2,7 @@ import asyncio
 import html.parser
 import math
 import re
+from uuid import UUID
 from datetime import datetime, timezone
 from typing import List, Tuple
 
@@ -248,6 +249,12 @@ class UserStoryService:
 
     async def _story(self, story_id: str, project_id: str) -> UserStory:
         identifier = str(story_id).strip()
+        try:
+            uuid_identifier = str(UUID(identifier))
+        except ValueError:
+            identifier_condition = func.lower(UserStory.key) == identifier.lower()
+        else:
+            identifier_condition = UserStory.id == uuid_identifier
         story = (
             await self.db.execute(
                 select(UserStory)
@@ -259,10 +266,7 @@ class UserStoryService:
                     selectinload(UserStory.reporter).selectinload(User.role),
                 )
                 .where(
-                    or_(
-                        UserStory.id == identifier,
-                        func.lower(UserStory.key) == identifier.lower(),
-                    ),
+                    identifier_condition,
                     UserStory.project_id == project_id,
                     UserStory.deleted_at.is_(None),
                 )
@@ -523,7 +527,7 @@ class UserStoryService:
             await self.db.execute(
                 select(Favorite.user_story_id).where(
                     Favorite.user_id == user_id,
-                    Favorite.item_type == Favorite.USER_STORY,
+                    Favorite.item_type == "user_story",
                     Favorite.user_story_id.is_not(None),
                     Favorite.deleted_at.is_(None),
                 )
@@ -540,7 +544,7 @@ class UserStoryService:
             await self.db.execute(
                 select(Favorite.task_id).where(
                     Favorite.user_id == user_id,
-                    Favorite.item_type == Favorite.TASK,
+                    Favorite.item_type == "task",
                     Favorite.task_id.is_not(None),
                     Favorite.deleted_at.is_(None),
                 )
@@ -1377,7 +1381,7 @@ class UserStoryService:
             await self.db.execute(
                 select(Favorite).where(
                     Favorite.user_id == user_id,
-                    Favorite.item_type == Favorite.USER_STORY,
+                    Favorite.item_type == "user_story",
                     Favorite.user_story_id == user_story_id,
                     Favorite.deleted_at.is_(None),
                 )
@@ -1392,7 +1396,7 @@ class UserStoryService:
 
         fav = Favorite(
             user_id=user_id,
-            item_type=Favorite.USER_STORY,
+            item_type="user_story",
             user_story_id=user_story_id,
             created_at=datetime.now(timezone.utc),
         )
@@ -1428,7 +1432,7 @@ class UserStoryService:
             await self.db.execute(
                 select(Favorite).where(
                     Favorite.user_id == user_id,
-                    Favorite.item_type == Favorite.USER_STORY,
+                    Favorite.item_type == "user_story",
                     Favorite.user_story_id == user_story_id,
                     Favorite.deleted_at.is_(None),
                 )
