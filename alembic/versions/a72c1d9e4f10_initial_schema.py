@@ -1,6 +1,6 @@
 """initial schema
 
-Revision ID: 0001_initial_schema
+Revision ID: a72c1d9e4f10
 Revises: 
 Create Date: 2026-09-08 15:59:14.390327
 
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 
-revision: str = '0001_initial_schema'
+revision: str = 'a72c1d9e4f10'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -21,7 +21,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.execute(sa.text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
     op.execute(sa.text('CREATE EXTENSION IF NOT EXISTS "pg_trgm"'))
     op.execute(sa.text('CREATE SEQUENCE IF NOT EXISTS global_work_item_serial_seq START WITH 1 INCREMENT BY 1'))
 

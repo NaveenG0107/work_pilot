@@ -1,13 +1,13 @@
 """Align reported defaults and active user-story key uniqueness with Go backup.
 
-Revision ID: 0002_align_reported_defaults
-Revises: 0001_initial_schema
+Revision ID: b83d2ea5f621
+Revises: a72c1d9e4f10
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0002_align_reported_defaults"
-down_revision = "0001_initial_schema"
+revision = "b83d2ea5f621"
+down_revision = "a72c1d9e4f10"
 branch_labels = None
 depends_on = None
 
