@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     # JWT
     # -----------------------------------------------------------------
     jwt_secret_key: str = Field(..., env="JWT_SECRET_KEY")  # required, no default
-    jwt_expiry: int = Field(default=900, env="JWT_EXPIRY")  # seconds, default 15 min
+    jwt_expiry: int = Field(default=1800, gt=0, env="JWT_EXPIRY")  # seconds
+    jwt_sliding_session_enabled: bool = True
+    jwt_renewal_interval: int = Field(default=60, gt=0)  # seconds between cookie renewals
     refresh_token_expiry: int = Field(default=604800, env="REFRESH_TOKEN_EXPIRY")  # seconds, default 7 days
     otp_expiry_minutes: int = Field(default=15, env="OTP_EXPIRY_MINUTES")  # minutes
 
