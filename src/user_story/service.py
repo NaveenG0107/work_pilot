@@ -6,7 +6,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 from typing import List, Tuple
 
-from sqlalchemy import String, and_, case, func, or_, select
+from sqlalchemy import String, and_, case, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -186,6 +186,24 @@ def _sanitize_html(raw: str | None) -> str:
 class UserStoryService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def _allocate_global_serial(self) -> int:
+        # Include deleted records: their serials still occupy unique indexes.
+        highest = int((await self.db.execute(text(
+            "SELECT GREATEST(COALESCE((SELECT MAX(serial_number) FROM tasks), 0), "
+            "COALESCE((SELECT MAX(serial_number) FROM user_stories), 0))"
+        ))).scalar_one())
+        candidate = int((await self.db.execute(text(
+            "SELECT nextval('global_work_item_serial_seq')"
+        ))).scalar_one())
+        # A restored database may contain serials ahead of its sequence. Advance
+        # with nextval (never rewind with setval), preserving concurrent allocation.
+        while candidate <= highest:
+            candidate = int((await self.db.execute(text(
+                "SELECT MAX(nextval('global_work_item_serial_seq')) "
+                "FROM generate_series(1, :count)"
+            ), {"count": min(highest - candidate + 1, 1000)})).scalar_one())
+        return candidate
 
     async def _commit(self) -> None:
         try:
@@ -797,6 +815,11 @@ class UserStoryService:
                     "Sprint must belong to the same project",
                 )
 
+        # Serialize numbering for creations in this project until commit.
+        await self.db.execute(
+            select(Project.id).where(Project.id == project_id).with_for_update()
+        )
+
         max_order = (
             await self.db.execute(
                 select(func.coalesce(func.max(UserStory.backlog_order), 0)).where(
@@ -824,6 +847,7 @@ class UserStoryService:
 
         story = UserStory(
             project_id=project_id,
+            serial_number=await self._allocate_global_serial(),
             sprint_id=req.sprint_id if req.sprint_id else None,
             key=f"US-{sequence_number}",
             sequence_number=sequence_number,
