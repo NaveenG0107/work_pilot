@@ -1,13 +1,13 @@
 """Add the country-name trigram index from Go migration 005.
 
-Revision ID: 0004_countries_name_trgm
-Revises: 0003_fix_remaining_defaults
+Revision ID: da5f40c71843
+Revises: c94e3fb60732
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0004_countries_name_trgm"
-down_revision = "0003_fix_remaining_defaults"
+revision = "da5f40c71843"
+down_revision = "c94e3fb60732"
 branch_labels = None
 depends_on = None
 

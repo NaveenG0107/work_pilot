@@ -1,13 +1,13 @@
 """Correct quoted empty defaults and remove user boolean database defaults.
 
-Revision ID: 0003_fix_remaining_defaults
-Revises: 0002_align_reported_defaults
+Revision ID: c94e3fb60732
+Revises: b83d2ea5f621
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0003_fix_remaining_defaults"
-down_revision = "0002_align_reported_defaults"
+revision = "c94e3fb60732"
+down_revision = "b83d2ea5f621"
 branch_labels = None
 depends_on = None
 
