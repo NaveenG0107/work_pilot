@@ -130,6 +130,8 @@ async def get_user_stories(
 
         logger.info("Fetching user stories for project_id=%s, page=%d, page_size=%d", project_id, page, page_size)
 
+        sprint_filter = sprint_id.strip()
+        without_sprint = sprint_filter.lower() in ("null", "none")
         filter_ = UserStoryFilter(
             page=page if page > 0 else 1,
             page_size=page_size if page_size > 0 else 10,
@@ -138,13 +140,13 @@ async def get_user_stories(
             status=status.strip(),
             assignee_id=assignee_id.strip() or None,
             reporter_id=reporter_id.strip() or None,
-            sprint_id=sprint_id.strip() or None,
+            sprint_id=None if without_sprint else (sprint_filter or None),
             priority=priority.strip(),
             search=search,
             fields=fields,
             serial_number=serial_number,
             sequence_number=sequence_number,
-            is_unassigned_story=is_unassigned_story,
+            is_unassigned_story=is_unassigned_story or without_sprint,
             is_closed=is_closed,
         )
 

@@ -22,6 +22,7 @@ from src.user_story.api import router as user_story_router
 from src.user_story_status.api import router as user_story_status_router
 from src.utils.exception_handlers import register_exception_handlers
 from src.work_item.api import router as work_item_router
+from src.utils.session_middleware import SlidingSessionMiddleware
 
 logger = get_logger(__name__)
 
@@ -39,6 +40,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(SlidingSessionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
