@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -16,6 +17,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not configured")
+
+if not os.path.exists("/.dockerenv") and "@host.docker.internal" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("@host.docker.internal", "@localhost")
 
 # Normalize the URL to the async-capable psycopg driver if a sync driver
 # (psycopg2) was configured. psycopg v3 supports both sync and async.
@@ -45,8 +49,17 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+naming_convention = {
+    "ix": "idx_%(table_name)s_%(column_0_name)s",
+    "uq": "uni_%(table_name)s_%(column_0_name)s",
+    "ck": "chk_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s",
+    "pk": "%(table_name)s_pkey",
+}
+
+
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(naming_convention=naming_convention)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
