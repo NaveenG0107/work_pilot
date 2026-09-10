@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from src.user_story.models import format_serial_number
+from src.task.schema import TaskResponse
 
 
 def validate_uuid(value: str | None) -> str | None:
@@ -47,6 +48,13 @@ ALLOWED_SORT_ORDER = ["ASC", "DESC"]
 
 
 class CreateUserStoryRequest(BaseModel):
+    attachment_ids: List[str] = Field(default_factory=list, validation_alias=AliasChoices("attachments", "attachment_ids"))
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def validate_draft_attachments(cls, values):
+        return list(dict.fromkeys(validate_uuid(value) for value in values))
+
     title: str = Field(..., min_length=3, max_length=255)
     description: Optional[str] = None
     priority: str = Field(..., json_schema_extra={"enum": PRIORITIES})
@@ -136,23 +144,14 @@ class UserSummary(BaseModel):
     id: str
     full_name: str = Field(default="", serialization_alias="name")
     email: str = ""
-    avatar_url: str | None = Field(default=None, exclude_if=omit_empty)
-    color: str | None = Field(default=None, exclude_if=omit_empty)
+    avatar_url: str | None = None
+    color: str = ""
     role: str | None = Field(default=None, exclude_if=omit_empty)
 
 
-class TaskSummary(BaseModel):
-    id: str
-    title: str
-    key: str = ""
-    type: str = ""
-    status: str = ""
-    status_color: str = ""
-    status_is_final: bool = False
-    priority: str = ""
-    is_favourite: bool = False
-    assignee_id: str | None = Field(default=None, exclude_if=omit_empty)
-    assignee_name: str | None = Field(default=None, exclude_if=omit_empty)
+class TaskSummary(TaskResponse):
+    """Full task response embedded in a user story, matching Go TaskResponse."""
+    reporter: UserSummary | None = Field(default=None, exclude_if=omit_empty)
     assignee: UserSummary | None = Field(default=None, exclude_if=omit_empty)
 
 
@@ -163,8 +162,6 @@ class UserStoryResponse(BaseModel):
     sprint_id: str | None = Field(default=None, exclude_if=omit_empty)
     sprint_name: str | None = Field(default=None, exclude_if=omit_empty)
     serial_number: int
-    key: str | None = Field(default=None, exclude_if=omit_empty)
-    sequence_number: int | None = Field(default=None, exclude_if=omit_empty)
     formatted_serial_number: str = Field(default="", exclude_if=omit_empty)
     key: str | None = None
     sequence_number: int | None = None
@@ -204,16 +201,12 @@ class PaginationResponse(BaseModel):
 def user_summary_from_user(user) -> UserSummary | None:
     if user is None:
         return None
-    role_name = None
-    if "role" in user.__dict__ and user.role:
-        role_name = getattr(user.role, "name", None)
     return UserSummary(
         id=str(user.id),
         full_name=getattr(user, "full_name", None) or "",
         email=getattr(user, "email", None) or "",
         avatar_url=getattr(user, "avatar_url", None) or None,
-        color=getattr(user, "color", None) or None,
-        role=role_name,
+        color=getattr(user, "color", None) or "",
     )
 
 
@@ -225,11 +218,12 @@ class FavoriteResponse(BaseModel):
     id: str
     user_id: str
     item_type: str = "user_story"
-    user_story_id: Optional[str] = None
-    project_id: Optional[str] = None
-    project_name: Optional[str] = None
-    user_story_name: Optional[str] = None
-    user_story_title: Optional[str] = None
+    user_story_id: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    project_id: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    project_name: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    user_story_name: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    user_story_title: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    user_story: UserStoryResponse | None = Field(default=None, exclude_if=omit_empty)
     created_at: datetime
 
 
@@ -239,12 +233,23 @@ class RemoveFavoriteResponse(BaseModel):
 
 class UserStoryAttachmentResponse(BaseModel):
     id: str
-    user_story_id: str
+    user_story_id: str | None = Field(default=None, exclude_if=omit_empty)
     original_filename: str
-    stored_filename: str
+    stored_filename: str = Field(default="", exclude=True)
     mime_type: str
     file_size: int
-    url: str
+    url: str = Field(default="", exclude_if=omit_empty)
+    uploaded_by: str
+    uploaded_at: datetime
+
+
+class CommentAttachmentResponse(BaseModel):
+    id: str
+    comment_id: str | None = Field(default=None, exclude_if=omit_empty)
+    original_filename: str
+    mime_type: str
+    file_size: int
+    url: str = Field(default="", exclude_if=omit_empty)
     uploaded_by: str
     uploaded_at: datetime
 
@@ -285,20 +290,36 @@ class UpdateCommentRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=5000)
 
 
-class CommentResponse(BaseModel):
+class ParentCommentResponse(BaseModel):
     id: str
-    task_id: Optional[str] = None
-    user_story_id: Optional[str] = None
     user_id: str
-    user_name: Optional[str] = None
-    full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
-    color: Optional[str] = None
+    user_name: str = ""
+    full_name: str = ""
+    email: str = ""
+    avatar_url: str | None = None
+    color: str = ""
     content: str
-    parent_comment_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     is_deleted: bool = False
-    attachments: list[dict] = Field(default_factory=list)
+
+
+class CommentResponse(BaseModel):
+    id: str
+    task_id: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    user_story_id: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    user_id: str
+    user_name: Optional[str] = None
+    full_name: Optional[str] = None
+    email: str = ""
+    avatar_url: Optional[str] = None
+    color: Optional[str] = None
+    content: str
+    parent_comment_id: Optional[str] = Field(default=None, exclude_if=omit_empty)
+    parent_comment: ParentCommentResponse | None = Field(default=None, exclude_if=omit_empty)
+    created_at: datetime
+    updated_at: datetime
+    is_deleted: bool = False
+    attachments: list[CommentAttachmentResponse] = Field(default_factory=list, exclude_if=omit_empty)
     replies_count: int = 0
 

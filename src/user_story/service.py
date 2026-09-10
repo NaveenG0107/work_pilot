@@ -39,6 +39,7 @@ from src.utils.storage import (
 from src.user_story.models import UserStory, UserStoryAttachment
 from src.user_story_status.models import UserStoryStatus
 from src.user_story.schema import (
+    CommentAttachmentResponse,
     CommentResponse,
     CreateCommentRequest,
     CreateUserStoryRequest,
@@ -186,6 +187,23 @@ def _sanitize_html(raw: str | None) -> str:
 class UserStoryService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    @staticmethod
+    def _parent_comment_response(comment):
+        parent = comment.__dict__.get("parent_comment")
+        if parent is None:
+            return None
+        user = parent.user
+        return {
+            "id": str(parent.id), "user_id": str(parent.user_id),
+            "user_name": user.username if user else "",
+            "full_name": user.full_name if user else "",
+            "email": user.email if user else "",
+            "avatar_url": (user.avatar_url or None) if user else None,
+            "color": (user.color or "") if user else "",
+            "content": parent.content, "created_at": parent.created_at,
+            "updated_at": parent.updated_at, "is_deleted": bool(parent.is_deleted),
+        }
 
     async def _allocate_global_serial(self) -> int:
         # Include deleted records: their serials still occupy unique indexes.
@@ -610,6 +628,10 @@ class UserStoryService:
                     select(Task)
                     .options(
                         selectinload(Task.assignee).selectinload(User.role),
+                        selectinload(Task.reporter),
+                        selectinload(Task.project),
+                        selectinload(Task.sprint),
+                        selectinload(Task.labels),
                     )
                     .where(
                         Task.user_story_id == user_story_id,
@@ -649,7 +671,7 @@ class UserStoryService:
         return UserStoryResponse(
             id=str(story.id),
             project_id=str(story.project_id),
-            project_name=project_name or None,
+            project_name=None,
             sprint_id=str(story.sprint_id) if story.sprint_id else None,
             sprint_name=sprint_name or None,
             serial_number=story.serial_number,
@@ -690,17 +712,37 @@ class UserStoryService:
             result.append(
                 TaskSummary(
                     id=str(t.id),
+                    project_id=str(t.project_id),
+                    project_name=t.project.name if t.project else "",
+                    sprint_id=str(t.sprint_id) if t.sprint_id else None,
+                    sprint_name=t.sprint.name if t.sprint else "",
+                    user_story_id=str(t.user_story_id) if t.user_story_id else None,
+                    serial_number=int(t.serial_number or 0),
+                    formatted_serial_number=f"#{t.serial_number}" if t.serial_number else "",
                     title=t.title,
+                    description=t.description or "",
                     key=t.key,
                     type=t.type,
                     status=t.status,
                     status_color=color_map.get(norm, "#808080"),
-                    status_is_final=is_final_map.get(norm, False),
+                    status_id=str(t.status_id),
+                    is_final=is_final_map.get(norm, False),
                     priority=t.priority,
                     is_favourite=fav_task_map.get(str(t.id), False),
                     assignee_id=str(t.assignee_id) if t.assignee_id else None,
-                    assignee_name=(t.assignee.full_name if t.assignee else None),
+                    assignee_name=(t.assignee.full_name if t.assignee else ""),
                     assignee=user_summary_from_user(t.assignee),
+                    reporter_id=str(t.reporter_id) if t.reporter_id else None,
+                    reporter_name=t.reporter.full_name if t.reporter else "",
+                    reporter=user_summary_from_user(t.reporter),
+                    story_points=t.story_points,
+                    due_date=t.due_date,
+                    estimated_hours=t.estimated_hours,
+                    actual_hours=t.actual_hours,
+                    created_at=t.created_at,
+                    updated_at=t.updated_at,
+                    labels=[{"id": str(label.id), "name": label.name, "color": label.color}
+                            for label in t.labels if label.deleted_at is None],
                 )
             )
 
@@ -861,8 +903,27 @@ class UserStoryService:
             reporter_id=reporter_id,
         )
 
+        draft_attachments = []
+        if req.attachment_ids:
+            if len(req.attachment_ids) > get_settings().attachment_max_files_count:
+                raise UserStoryServiceError(400, "BAD_REQUEST", "Too many attachments")
+            draft_attachments = list((await self.db.execute(
+                select(UserStoryAttachment).where(
+                    UserStoryAttachment.id.in_(req.attachment_ids),
+                    UserStoryAttachment.project_id == project_id,
+                    UserStoryAttachment.uploaded_by == reporter_id,
+                    UserStoryAttachment.user_story_id.is_(None),
+                ).with_for_update()
+            )).scalars())
+            if len(draft_attachments) != len(req.attachment_ids):
+                raise UserStoryServiceError(400, "BAD_REQUEST", "Invalid draft attachment IDs")
+
         self.db.add(story)
         await self._flush()
+        for attachment in draft_attachments:
+            attachment.user_story_id = story.id
+        if draft_attachments:
+            await self._flush()
 
         await self._recalculate_is_closed(story.id)
         await self._commit()
@@ -1442,6 +1503,7 @@ class UserStoryService:
             project_name=project_name,
             user_story_name=story.title,
             user_story_title=story.title,
+            user_story=await self._build_single_story(story, user_id, project_id),
             created_at=fav.created_at,
         )
 
@@ -1477,13 +1539,16 @@ class UserStoryService:
         return RemoveFavoriteResponse(id=str(fav.id))
 
     async def upload_attachments(
-        self, user_story_id: str, project_id: str, user_id: str, organization_id: str,
+        self, user_story_id: str | None, project_id: str, user_id: str, organization_id: str,
         files: List[UploadFile]
     ) -> List[UserStoryAttachmentResponse]:
         logger.info("Service: Uploading %d attachment(s) for user_story_id=%s", len(files), user_story_id)
 
-        story = await self._story(user_story_id, project_id)
-        resolved_story_id = str(story.id)
+        _, _, authorized = await self._check_authorization(project_id, user_id)
+        if not authorized:
+            raise UserStoryServiceError(403, "FORBIDDEN", "You do not have permission to upload attachments")
+        story = await self._story(user_story_id, project_id) if user_story_id else None
+        resolved_story_id = str(story.id) if story else None
         max_files = get_settings().attachment_max_files_count
 
         if len(files) > max_files:
@@ -1498,7 +1563,9 @@ class UserStoryService:
                 await self.db.execute(
                     select(func.count())
                     .select_from(UserStoryAttachment)
-                    .where(UserStoryAttachment.user_story_id == resolved_story_id)
+                    .where(UserStoryAttachment.user_story_id == resolved_story_id,
+                           UserStoryAttachment.project_id == project_id,
+                           *([] if story else [UserStoryAttachment.uploaded_by == user_id]))
                 )
             ).scalar_one()
         )
@@ -1582,7 +1649,7 @@ class UserStoryService:
                     ".zip": "application/zip",
                     ".txt": "text/plain",
                 }[extension]
-                storage_path = build_attachment_key("user_stories", resolved_story_id, filename)
+                storage_path = build_attachment_key("user_stories", resolved_story_id or project_id, filename)
                 stored_name = storage_path.rsplit("/", 1)[-1]
                 url = await asyncio.to_thread(
                     upload_s3_object,
@@ -1593,7 +1660,7 @@ class UserStoryService:
                 uploaded_keys.append(storage_path)
 
                 attachment = UserStoryAttachment(
-                    project_id=str(story.project_id),
+                    project_id=project_id,
                     user_story_id=resolved_story_id,
                     original_filename=filename,
                     stored_filename=stored_name,
@@ -1637,7 +1704,7 @@ class UserStoryService:
         responses = [
             UserStoryAttachmentResponse(
                 id=str(attachment.id),
-                user_story_id=str(attachment.user_story_id),
+                user_story_id=str(attachment.user_story_id) if attachment.user_story_id else None,
                 original_filename=attachment.original_filename,
                 stored_filename=attachment.stored_filename,
                 mime_type=attachment.mime_type,
@@ -1656,8 +1723,8 @@ class UserStoryService:
             user_story_id=resolved_story_id,
             action="uploaded",
             resource_type="user_story_attachment",
-            resource_id=resolved_story_id,
-            details=f"Uploaded {len(files)} attachment(s) to user story '{story.title}'",
+            resource_id=resolved_story_id or project_id,
+            details=f"Uploaded {len(files)} attachment(s) to user story '{story.title}'" if story else "Uploaded draft user story attachments",
             audit_type=AuditLogType.ACTIVITY,
         )
 
@@ -1875,10 +1942,12 @@ class UserStoryService:
             user_id=str(comment.user_id),
             user_name=getattr(user, "username", None),
             full_name=getattr(user, "full_name", None),
+            email=getattr(user, "email", "") or "",
             avatar_url=getattr(user, "avatar_url", None),
             color=getattr(user, "color", None),
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
+                parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
@@ -1906,7 +1975,7 @@ class UserStoryService:
 
         from src.comments.service import CommentService
         try:
-            return await CommentService(self.db).upload_comment_attachments(
+            attachments = await CommentService(self.db).upload_comment_attachments(
                 comment_id=comment_id,
                 task_id=None,
                 user_story_id=user_story_id,
@@ -1914,6 +1983,8 @@ class UserStoryService:
                 organization_id=organization_id,
                 files=files,
             )
+            return [CommentAttachmentResponse.model_validate(item.model_dump(mode="json"))
+                    for item in attachments]
         except HTTPException as exc:
             raise UserStoryServiceError(
                 exc.status_code,
@@ -2025,7 +2096,8 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments),
+                         selectinload(Comments.parent_comment).selectinload(Comments.user))
                 .where(
                     Comments.user_story_id == user_story_id,
                     Comments.project_id == project_id,
@@ -2059,10 +2131,12 @@ class UserStoryService:
                 user_id=str(c.user_id),
                 user_name=c.user.username if c.user else None,
                 full_name=c.user.full_name if c.user else None,
+                email=c.user.email if c.user else "",
                 avatar_url=c.user.avatar_url if c.user else None,
                 color=getattr(c.user, "color", None) if c.user else None,
                 content=c.content,
                 parent_comment_id=str(c.parent_comment_id) if c.parent_comment_id else None,
+                parent_comment=self._parent_comment_response(c),
                 created_at=c.created_at,
                 updated_at=c.updated_at,
                 is_deleted=c.is_deleted,
@@ -2098,7 +2172,8 @@ class UserStoryService:
         comment = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments),
+                         selectinload(Comments.parent_comment).selectinload(Comments.user))
                 .where(
                     Comments.id == comment_id,
                     Comments.user_story_id == user_story_id,
@@ -2122,10 +2197,12 @@ class UserStoryService:
             user_id=str(comment.user_id),
             user_name=comment.user.username if comment.user else None,
             full_name=comment.user.full_name if comment.user else None,
+                email=comment.user.email if comment.user else "",
             avatar_url=comment.user.avatar_url if comment.user else None,
             color=getattr(comment.user, "color", None) if comment.user else None,
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
+                parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
@@ -2167,7 +2244,8 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments))
+                .options(selectinload(Comments.user), selectinload(Comments.attachments),
+                         selectinload(Comments.parent_comment).selectinload(Comments.user))
                 .where(
                     Comments.parent_comment_id == parent_comment_id,
                     Comments.user_story_id == user_story_id,
@@ -2187,10 +2265,12 @@ class UserStoryService:
                 user_id=str(c.user_id),
                 user_name=c.user.username if c.user else None,
                 full_name=c.user.full_name if c.user else None,
+                email=c.user.email if c.user else "",
                 avatar_url=c.user.avatar_url if c.user else None,
                 color=getattr(c.user, "color", None) if c.user else None,
                 content=c.content,
                 parent_comment_id=str(c.parent_comment_id) if c.parent_comment_id else None,
+                parent_comment=self._parent_comment_response(c),
                 created_at=c.created_at,
                 updated_at=c.updated_at,
                 is_deleted=c.is_deleted,
@@ -2266,10 +2346,12 @@ class UserStoryService:
             user_id=str(comment.user_id),
             user_name=comment.user.username if comment.user else None,
             full_name=comment.user.full_name if comment.user else None,
+                email=comment.user.email if comment.user else "",
             avatar_url=comment.user.avatar_url if comment.user else None,
             color=getattr(comment.user, "color", None) if comment.user else None,
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
+                parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,

@@ -200,6 +200,32 @@ async def get_user_story(
         return failure(exc)
 
 
+@router.patch("/{project_id}/user-stories/reorder", tags=["User Stories"])
+@require_jwt
+async def reorder_user_stories(
+    project_id: str,
+    body: ReorderUserStoriesRequest,
+    request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
+
+        logger.info("Reordering %d user stories for project_id=%s", len(body.story_ids), project_id)
+
+        await service.reorder(body, project_id, user_id, org_id)
+
+        logger.info("Successfully reordered user stories for project_id=%s", project_id)
+
+        return success("User Stories reordered successfully")
+
+    except Exception as exc:
+        logger.warning("Error reordering user stories: %s", exc)
+        return failure(exc)
+
+
 @router.patch("/{project_id}/user-stories/{user_story_id}", tags=["User Stories"])
 @require_jwt
 async def update_user_story(
@@ -256,32 +282,6 @@ async def update_user_story_status(
         return failure(exc)
 
 
-@router.patch("/{project_id}/user-stories/reorder", tags=["User Stories"])
-@require_jwt
-async def reorder_user_stories(
-    project_id: str,
-    body: ReorderUserStoriesRequest,
-    request: Request,
-    service: UserStoryService = Depends(get_user_story_service),
-):
-    try:
-        project_id = validated_uuid(project_id)
-        user_id = request.state.user_id
-        org_id = request.state.organization_id
-
-        logger.info("Reordering %d user stories for project_id=%s", len(body.story_ids), project_id)
-
-        await service.reorder(body, project_id, user_id, org_id)
-
-        logger.info("Successfully reordered user stories for project_id=%s", project_id)
-
-        return success("User Stories reordered successfully")
-
-    except Exception as exc:
-        logger.warning("Error reordering user stories: %s", exc)
-        return failure(exc)
-
-
 @router.delete("/{project_id}/user-stories/{user_story_id}", tags=["User Stories"])
 @require_jwt
 async def delete_user_story(
@@ -328,7 +328,7 @@ async def add_user_story_favorite(
 
         logger.info("Successfully added user story id=%s to favorites", user_story_id)
 
-        return success("User Story added to favorites successfully", dumped(fav), code=201)
+        return JSONResponse(status_code=201, content={"success": True, "status_code": 0, "message": "", "data": dumped(fav)})
 
     except Exception as exc:
         logger.warning("Error adding user story to favorites: %s", exc)
@@ -354,10 +354,34 @@ async def remove_user_story_favorite(
 
         logger.info("Successfully removed user story id=%s from favorites", user_story_id)
 
-        return success("User Story removed from favorites successfully", dumped(res))
+        return JSONResponse(status_code=200, content={"success": True, "status_code": 0, "message": "User story removed from favorites", "data": dumped(res)})
 
     except Exception as exc:
         logger.warning("Error removing user story from favorites: %s", exc)
+        return failure(exc)
+
+
+@router.post(
+    "/{project_id}/user-stories/attachments",
+    status_code=status.HTTP_201_CREATED,
+    tags=["User Story Attachments"],
+    openapi_extra=_ATTACHMENT_UPLOAD_OPENAPI,
+)
+@require_jwt
+async def upload_draft_user_story_attachments(
+    project_id: str, request: Request,
+    service: UserStoryService = Depends(get_user_story_service),
+):
+    try:
+        project_id = validated_uuid(project_id)
+        files = await _comment_attachment_files(request)
+        if not files:
+            raise UserStoryServiceError(400, "BAD_REQUEST", "Missing file(s) in request payload (use form-data keys 'file' or 'files')")
+        attachments = await service.upload_attachments(
+            None, project_id, request.state.user_id, request.state.organization_id, files,
+        )
+        return success("Attachments uploaded successfully", dumped(attachments), code=201)
+    except Exception as exc:
         return failure(exc)
 
 
@@ -520,7 +544,7 @@ async def create_user_story_comment(
 
         logger.info("Successfully created comment id=%s for user_story_id=%s", comment.id, user_story_id)
 
-        return success("Comment created successfully", dumped(comment), code=201)
+        return success("Comment created successfully", comment.model_dump(mode="json", include={"id", "task_id", "user_story_id", "user_id", "user_name", "full_name", "avatar_url", "color"}), code=201)
 
     except Exception as exc:
         logger.warning("Error creating user story comment: %s", exc)
@@ -685,7 +709,7 @@ async def get_user_story_comments(
 
         logger.info("Successfully fetched %d top-level comment(s) for user_story_id=%s", len(comments), user_story_id)
 
-        return success("Comments retrieved successfully", dumped(comments), meta=meta.model_dump(mode="json"))
+        return success("Comments received successfully", dumped(comments), meta=meta.model_dump(mode="json"))
 
     except Exception as exc:
         logger.warning("Error retrieving user story comments: %s", exc)
@@ -714,7 +738,7 @@ async def get_user_story_comment(
 
         logger.info("Successfully fetched comment_id=%s", comment_id)
 
-        return success("Comment fetched successfully", dumped(comment))
+        return JSONResponse(status_code=200, content={"success": True, "status_code": 0, "message": "Comment fetched successfully", "data": dumped(comment)})
 
     except Exception as exc:
         logger.warning("Error fetching user story comment: %s", exc)
@@ -775,7 +799,7 @@ async def update_user_story_comment(
 
         logger.info("Successfully updated comment_id=%s", comment_id)
 
-        return success("Comment updated successfully", dumped(comment))
+        return success("Comment updated successfully", comment.model_dump(mode="json", include={"id", "task_id", "user_story_id", "user_id", "user_name", "full_name", "avatar_url", "color"}))
 
     except Exception as exc:
         logger.warning("Error updating user story comment: %s", exc)
