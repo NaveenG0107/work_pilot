@@ -14,6 +14,7 @@ depends_on = None
 
 def upgrade():
     op.execute(sa.text('CREATE EXTENSION IF NOT EXISTS "pg_trgm"'))
+    op.drop_index("idx_countries_name_trgm", table_name="countries", if_exists=True)
     op.create_index(
         "idx_countries_name_trgm", "countries", ["name"],
         postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"},

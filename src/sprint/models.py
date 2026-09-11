@@ -36,7 +36,7 @@ class Sprint(Base):
 class SprintSnapshot(Base):
     __tablename__ = "sprint_snapshots"
     __table_args__ = (
-        Index("idx_sprint_snapshot_sprint_date", "date", unique=True),
+        Index("idx_sprint_snapshot_sprint_date", "sprint_id", "date", unique=True),
         Index("idx_sprint_snapshots_sprint_id", "sprint_id"),
     )
 

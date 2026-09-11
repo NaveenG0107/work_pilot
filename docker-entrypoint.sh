@@ -1,22 +1,14 @@
 #!/bin/sh
+set -e
 
-# set -e
+# Preserve one-off container commands such as:
+# docker compose run --rm fastapi alembic check
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
 
-# echo "Waiting for database..."
-# 
-# until alembic current > /dev/null 2>&1
-# do
-#     echo "Database is not ready yet..."
-#     sleep 2
-# done
-# 
-# echo "Database is ready."
-# 
-# echo "Running database migrations..."
-# alembic upgrade head
-# 
-# echo "Seeding initial database data (permissions, countries)..."
-# python -m src.seeder
+echo "[DB] Preparing database..."
+python -m src.utils.database_migration
 
-# echo "Starting FastAPI..."
-# exec uvicorn src.main:app --host 0.0.0.0 --port 8000
+echo "[APP] Starting FastAPI..."
+exec uvicorn src.main:app --host 0.0.0.0 --port "${PORT:-8000}"
