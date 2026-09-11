@@ -2060,21 +2060,6 @@ class TaskService:
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to access this project"
             )
-        existing_count = int(
-            (
-                await self.db.execute(
-                    select(func.count())
-                    .select_from(TaskAttachment)
-                    .where(TaskAttachment.task_id == task_id)
-                )
-            ).scalar_one()
-        )
-        if existing_count + len(files) > max_files:
-            raise TaskServiceError(
-                400,
-                "BAD_REQUEST",
-                f"Maximum of {max_files} attachments are allowed per task.",
-            )
         prepared = [
             (filename, data, *self._validate_attachment(filename, data, max_size_mb))
             for filename, data in files
