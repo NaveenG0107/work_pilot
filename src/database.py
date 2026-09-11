@@ -37,6 +37,9 @@ engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     future=True,
+    connect_args={
+        "prepare_threshold": None,
+    },
 )
 
 

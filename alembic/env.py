@@ -2,6 +2,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import inspect, text, UUID
 
 from alembic import context
 
@@ -103,6 +104,28 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # The retired consolidated initial migration reused an original ID.
+        # Do not interpret its UUID schema as the original VARCHAR schema and
+        # replay migrations that have already been incorporated into it.
+        inspector = inspect(connection)
+        if inspector.has_table("alembic_version"):
+            revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+            if revisions == ["a72c1d9e4f10"] and inspector.has_table("users"):
+                columns = inspector.get_columns("users")
+                consolidated = any(c["name"] == "id" and isinstance(c["type"], UUID) for c in columns)
+                requested = context.get_revision_argument()
+                cli_command = getattr(getattr(config, "cmd_opts", None), "cmd", (None,))[0]
+                corrective_stamp = (
+                    requested == "ab93e7d10f24"
+                    and getattr(cli_command, "__name__", None) == "stamp"
+                )
+                if consolidated and not corrective_stamp:
+                    raise RuntimeError(
+                        "Revision a72c1d9e4f10 belongs to the retired consolidated history. "
+                        "Validate that schema against the former initial migration, then run "
+                        "alembic stamp ab93e7d10f24 before alembic upgrade head."
+                    )
+        connection.rollback()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
