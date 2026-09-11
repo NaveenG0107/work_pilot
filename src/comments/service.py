@@ -1516,39 +1516,28 @@ class CommentService:
                 detail="You do not have permission to access this project",
             )
 
-        existing_count = int(
-            (
-                await self.db.execute(
-                    select(func.count())
-                    .select_from(CommentAttachment)
-                    .where(
-                        CommentAttachment.comment_id == comment_id
-                        if comment_id is not None
-                        else (
-                            CommentAttachment.comment_id.is_(None)
-                            & (
-                                (CommentAttachment.task_id == task_id)
-                                if task_id
-                                else (CommentAttachment.user_story_id == user_story_id)
-                            )
-                            & (CommentAttachment.uploaded_by == user_id)
-                        )
+        if comment_id is not None:
+            existing_count = int(
+                (
+                    await self.db.execute(
+                        select(func.count())
+                        .select_from(CommentAttachment)
+                        .where(CommentAttachment.comment_id == comment_id)
                     )
+                ).scalar_one()
+            )
+            if existing_count + len(files) > max_files:
+                logger.warning(
+                    "Comment %s attachment limit exceeded: existing=%d incoming=%d max=%d",
+                    comment_id,
+                    existing_count,
+                    len(files),
+                    max_files,
                 )
-            ).scalar_one()
-        )
-        if existing_count + len(files) > max_files:
-            logger.warning(
-                "Comment %s attachment limit exceeded: existing=%d incoming=%d max=%d",
-                comment_id,
-                existing_count,
-                len(files),
-                max_files,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Maximum of {max_files} attachments are allowed per comment.",
-            )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Maximum of {max_files} attachments are allowed per comment.",
+                )
 
         # 5. Read and validate the whole batch before writing anything to S3.
         validated_files: list[tuple[UploadFile, str, bytes]] = []

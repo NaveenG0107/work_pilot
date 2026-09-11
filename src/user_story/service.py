@@ -1558,24 +1558,6 @@ class UserStoryService:
                 f"Maximum of {max_files} files can be uploaded per request.",
             )
 
-        existing_count = int(
-            (
-                await self.db.execute(
-                    select(func.count())
-                    .select_from(UserStoryAttachment)
-                    .where(UserStoryAttachment.user_story_id == resolved_story_id,
-                           UserStoryAttachment.project_id == project_id,
-                           *([] if story else [UserStoryAttachment.uploaded_by == user_id]))
-                )
-            ).scalar_one()
-        )
-        if existing_count + len(files) > max_files:
-            raise UserStoryServiceError(
-                400,
-                ErrorCode.ErrBadRequest.value,
-                f"Maximum of {max_files} attachments are allowed per user story.",
-            )
-
         max_size_mb = get_settings().attachment_max_file_size_mb
         max_size_bytes = max_size_mb * 1024 * 1024
         allowed_extensions = {".png", ".jpg", ".jpeg", ".pdf", ".docx", ".xlsx", ".zip", ".txt"}
