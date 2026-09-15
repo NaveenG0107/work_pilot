@@ -8,7 +8,7 @@ from src.utils.core import verify_jwt
 security = HTTPBearer(auto_error=False)
 
 
-def is_mobile_client(client_type: str | None = Header(default=None, alias="X-Client-Type")) -> bool:
+def is_mobile_client(client_type: str | None = Header(default=None, alias="x-client-type")) -> bool:
     return (client_type or "").strip().lower() == "mobile"
 
 

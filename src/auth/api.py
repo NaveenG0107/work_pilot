@@ -284,7 +284,7 @@ async def signup(
 async def signin(
     req: SignInRequest,
     response: Response,
-    platform: str | None = Header(default=None, alias="X-Client-Platform"),
+    platform: str | None = Header(default=None, alias="x-client-platform"),
     service: AuthService = Depends(get_auth_service),
 ):
     """Authenticate user and return tokens."""
@@ -294,7 +294,7 @@ async def signin(
         if platform not in {"web", "mobile"}:
             return auth_failure(
                 ErrorCode.ErrValidation,
-                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                "Invalid x-client-platform header. Supported platforms: web, mobile",
                 status_code=400,
             )
 
@@ -353,7 +353,7 @@ async def signin(
 async def refresh_token(
     req: RefreshTokenRequest,
     response: Response,
-    platform: str | None = Header(default=None, alias="X-Client-Platform"),
+    platform: str | None = Header(default=None, alias="x-client-platform"),
     service: AuthService = Depends(get_auth_service),
 ):
     """Generate a new access token using refresh token."""
@@ -363,7 +363,7 @@ async def refresh_token(
         if platform not in {"web", "mobile"}:
             return error_response(
                 ErrorCode.ErrValidation,
-                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                "Invalid x-client-platform header. Supported platforms: web, mobile",
                 status_code=400,
             )
 
@@ -574,7 +574,7 @@ async def reset_password(req: ResetPasswordRequest, service: AuthService = Depen
 async def verify_email(
     req: VerifyEmailRequest,
     response: Response,
-    platform: str | None = Header(default=None, alias="X-Client-Platform"),
+    platform: str | None = Header(default=None, alias="x-client-platform"),
     service: AuthService = Depends(get_auth_service),
 ):
     """Verify user's email using OTP."""
@@ -584,7 +584,7 @@ async def verify_email(
         if platform not in {"web", "mobile"}:
             return error_response(
                 ErrorCode.ErrValidation,
-                "Invalid X-Client-Platform header. Supported platforms: web, mobile",
+                "Invalid x-client-platform header. Supported platforms: web, mobile",
                 status_code=400,
             )
 
@@ -825,7 +825,7 @@ async def update_user(
         avatar_url = None
         cover_img_url = None
         if cover_img is not None and not mobile:
-            return auth_failure(ErrorCode.ErrValidation, "Cover images require X-Client-Type: mobile", 400)
+            return auth_failure(ErrorCode.ErrValidation, "Cover images require x-client-type: mobile", 400)
         if avatar is not None:
             avatar_url, uploaded_key = await upload_avatar(avatar)
             uploaded_keys.append(uploaded_key)
