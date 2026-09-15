@@ -139,6 +139,7 @@ class UpdateUserRequest(BaseModel):
     full_name: str | None = None
     username: str | None = None
     avatar_url: str | None = None
+    cover_img_url: str | None = None
     timezone: str | None = None
 
 
@@ -176,6 +177,14 @@ class UserProfile(BaseModel):
     require_password_change: bool
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MobileUserProfile(UserProfile):
+    cover_img_url: str | None = None
+
+
+class MobileUpdateUserSuccessResponse(AuthSuccessResponse):
+    data: MobileUserProfile
 
 
 class ProjectSummary(BaseModel):

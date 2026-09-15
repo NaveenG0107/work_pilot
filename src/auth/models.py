@@ -32,6 +32,7 @@ class User(Base):
     password_hash = Column(Text, nullable=True)
     role_id = Column(UUID(as_uuid=False), ForeignKey("roles.id", name="fk_users_role"), nullable=True)
     avatar_url = Column(String(500), nullable=True)
+    cover_img_url = Column(String(500), nullable=True)
     color = Column(String(7), nullable=False, default="#3498DB", server_default="#3498DB")
     timezone = Column(String(50), nullable=True, default="UTC", server_default="UTC")
     is_active = Column(Boolean, nullable=True, default=True)
