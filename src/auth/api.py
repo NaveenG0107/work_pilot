@@ -825,7 +825,7 @@ async def update_user(
         avatar_url = None
         cover_img_url = None
         if cover_img is not None and not mobile:
-            return auth_failure(ErrorCode.ErrValidation, "Cover images require x-client-type: mobile", 400)
+            return auth_failure(ErrorCode.ErrValidation, "Cover images require x-client-platform: mobile", 400)
         if avatar is not None:
             avatar_url, uploaded_key = await upload_avatar(avatar)
             uploaded_keys.append(uploaded_key)
