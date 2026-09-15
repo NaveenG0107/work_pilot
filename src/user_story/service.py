@@ -1551,6 +1551,22 @@ class UserStoryService:
         resolved_story_id = str(story.id) if story else None
         max_files = get_settings().attachment_max_files_count
 
+        await self.db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+        conditions = [
+            UserStoryAttachment.project_id == project_id,
+            UserStoryAttachment.user_story_id == resolved_story_id,
+        ]
+        if story is None:
+            conditions.append(UserStoryAttachment.uploaded_by == user_id)
+        existing_count = int((await self.db.execute(
+            select(func.count()).select_from(UserStoryAttachment).where(*conditions)
+        )).scalar_one())
+        if existing_count + len(files) > max_files:
+            raise UserStoryServiceError(
+                400, ErrorCode.ErrBadRequest.value,
+                f"Maximum of {max_files} attachments are allowed per user story.",
+            )
+
         if len(files) > max_files:
             raise UserStoryServiceError(
                 400,
@@ -1859,8 +1875,18 @@ class UserStoryService:
                     "Parent comment belongs to a different user story or project",
                 )
 
+        from src.comments.attachment_refs import attachment_ids_from_content
+        attachment_ids = attachment_ids_from_content(req.content, req.attachment_ids)
+        maximum = get_settings().attachment_max_files_count
+        if len(attachment_ids) > maximum:
+            raise UserStoryServiceError(
+                400, ErrorCode.ErrBadRequest.value,
+                f"Maximum of {maximum} attachments are allowed per comment.",
+            )
+        await self.db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+        user_story_id = str(story.id)
         sanitized_content = _sanitize_html(req.content).strip()
-        if not sanitized_content:
+        if not sanitized_content and not attachment_ids:
             raise UserStoryServiceError(
                 400, ErrorCode.ErrValidation.value, "Content cannot be empty"
             )
@@ -1878,20 +1904,20 @@ class UserStoryService:
         self.db.add(comment)
         await self._flush()
 
-        if req.attachment_ids:
+        if attachment_ids:
             drafts = list(
                 (
                     await self.db.execute(
                         select(CommentAttachment).where(
-                            CommentAttachment.id.in_(req.attachment_ids),
+                            CommentAttachment.id.in_(attachment_ids),
                             CommentAttachment.comment_id.is_(None),
                             CommentAttachment.user_story_id == user_story_id,
                             CommentAttachment.uploaded_by == user_id,
-                        )
+                        ).with_for_update()
                     )
                 ).scalars()
             )
-            if len(drafts) != len(set(req.attachment_ids)):
+            if len(drafts) != len(attachment_ids):
                 await self.db.rollback()
                 raise UserStoryServiceError(
                     400, ErrorCode.ErrBadRequest.value,
@@ -2316,6 +2342,11 @@ class UserStoryService:
                 400, ErrorCode.ErrValidation.value, "Content cannot be empty"
             )
 
+        from src.comments.service import CommentService
+        try:
+            await CommentService(self.db).link_edit_attachments(comment, req.content, user_id)
+        except HTTPException as exc:
+            raise UserStoryServiceError(exc.status_code, ErrorCode.ErrBadRequest.value, str(exc.detail)) from exc
         comment.content = sanitized_content
         comment.updated_at = datetime.now(timezone.utc)
         await self._commit()
