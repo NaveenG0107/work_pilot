@@ -17,6 +17,7 @@ from uuid6 import uuid7
 from src.audit.models import AuditLog
 from src.auth.models import User
 from src.comments.models import Comments, CommentAttachment
+from src.comments.attachment_refs import attachment_ids_from_content
 from src.comments.schemas import (
     CommentAttachmentResponse,
     CommentedUserData,
@@ -95,6 +96,29 @@ def content_with_attachment_images(
 class CommentService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def link_edit_attachments(self, comment, content, user_id):
+        await self.db.execute(select(Project.id).where(Project.id == comment.project_id).with_for_update())
+        linked = list((await self.db.execute(select(CommentAttachment).where(
+            CommentAttachment.comment_id == str(comment.id)
+        ))).scalars())
+        incoming = set(attachment_ids_from_content(content)) - {str(a.id) for a in linked}
+        maximum = get_settings().attachment_max_files_count
+        if len(linked) + len(incoming) > maximum:
+            raise HTTPException(400, f"Maximum of {maximum} attachments are allowed per comment.")
+        if not incoming:
+            return
+        drafts = list((await self.db.execute(select(CommentAttachment).where(
+            CommentAttachment.id.in_(incoming),
+            CommentAttachment.comment_id.is_(None),
+            CommentAttachment.uploaded_by == user_id,
+            CommentAttachment.task_id == comment.task_id,
+            CommentAttachment.user_story_id == comment.user_story_id,
+        ).with_for_update())).scalars())
+        if len(drafts) != len(incoming):
+            raise HTTPException(400, "Invalid comment attachment references")
+        for attachment in drafts:
+            attachment.comment_id = str(comment.id)
 
     async def resolve_task_id(
         self,
@@ -339,9 +363,7 @@ class CommentService:
         # 6. Sanitize and validate content
         sanitized_content = sanitize_html(payload.content)
         if not sanitized_content:
-            requested_attachment_ids = [
-                str(value) for value in payload.attachment_ids
-            ]
+            requested_attachment_ids = attachment_ids_from_content(payload.content, payload.attachment_ids)
             attachment_only_query = select(func.count()).select_from(
                 CommentAttachment
             ).where(
@@ -353,10 +375,9 @@ class CommentService:
                 if task_id
                 else CommentAttachment.user_story_id == user_story_id
             )
-            if requested_attachment_ids:
-                attachment_only_query = attachment_only_query.where(
-                    CommentAttachment.id.in_(requested_attachment_ids)
-                )
+            attachment_only_query = attachment_only_query.where(
+                CommentAttachment.id.in_(requested_attachment_ids)
+            )
             draft_count = int(
                 (await self.db.execute(attachment_only_query)).scalar_one()
             )
@@ -384,7 +405,11 @@ class CommentService:
         )
         self.db.add(comment)
 
-        attachment_ids = [str(value) for value in payload.attachment_ids]
+        attachment_ids = attachment_ids_from_content(payload.content, payload.attachment_ids)
+        maximum = get_settings().attachment_max_files_count
+        if len(attachment_ids) > maximum:
+            raise HTTPException(400, f"Maximum of {maximum} attachments are allowed per comment.")
+        await self.db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
         draft_query = select(CommentAttachment).where(
             CommentAttachment.comment_id.is_(None),
             CommentAttachment.uploaded_by == user_id,
@@ -394,17 +419,7 @@ class CommentService:
             if task_id
             else CommentAttachment.user_story_id == user_story_id
         )
-        if attachment_ids:
-            draft_query = draft_query.where(
-                CommentAttachment.id.in_(attachment_ids)
-            )
-        else:
-            # Some clients upload drafts and omit their IDs from the comment
-            # payload. Claim that user's pending drafts for this task so the
-            # successfully uploaded files are not invisible in the comment.
-            draft_query = draft_query.order_by(
-                CommentAttachment.uploaded_at.asc()
-            ).limit(get_settings().attachment_max_files_count)
+        draft_query = draft_query.where(CommentAttachment.id.in_(attachment_ids)).with_for_update()
 
         draft_attachments = list(
             (await self.db.execute(draft_query)).scalars()
@@ -1135,6 +1150,7 @@ class CommentService:
             )
 
         # 5. Sanitize HTML and validate content
+        await self.link_edit_attachments(comment, payload.content, user_id)
         sanitized_content = sanitize_html(payload.content)
         if not sanitized_content:
             raise HTTPException(
@@ -1516,28 +1532,22 @@ class CommentService:
                 detail="You do not have permission to access this project",
             )
 
-        if comment_id is not None:
-            existing_count = int(
-                (
-                    await self.db.execute(
-                        select(func.count())
-                        .select_from(CommentAttachment)
-                        .where(CommentAttachment.comment_id == comment_id)
-                    )
-                ).scalar_one()
+        # Serialize count + insert, including separate requests for one draft.
+        await self.db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+        conditions = [CommentAttachment.comment_id == comment_id]
+        if comment_id is None:
+            conditions.extend([
+                CommentAttachment.uploaded_by == user_id,
+                CommentAttachment.task_id == task_id,
+                CommentAttachment.user_story_id == user_story_id,
+            ])
+        existing_count = int((await self.db.execute(
+            select(func.count()).select_from(CommentAttachment).where(*conditions)
+        )).scalar_one())
+        if existing_count + len(files) > max_files:
+            raise HTTPException(
+                400, f"Maximum of {max_files} attachments are allowed per comment."
             )
-            if existing_count + len(files) > max_files:
-                logger.warning(
-                    "Comment %s attachment limit exceeded: existing=%d incoming=%d max=%d",
-                    comment_id,
-                    existing_count,
-                    len(files),
-                    max_files,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Maximum of {max_files} attachments are allowed per comment.",
-                )
 
         # 5. Read and validate the whole batch before writing anything to S3.
         validated_files: list[tuple[UploadFile, str, bytes]] = []
