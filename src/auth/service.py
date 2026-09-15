@@ -1256,6 +1256,7 @@ class AuthService:
         username: Optional[str] = None,
         avatar_url: Optional[str] = None,
         timezone: Optional[str] = None,
+        cover_img_url: Optional[str] = None,
     ):
         try:
             user = await self._get_user_by_id(user_id)
@@ -1301,6 +1302,9 @@ class AuthService:
             if avatar_url is not None:
                 updates["avatar_url"] = avatar_url
 
+            if cover_img_url is not None:
+                updates["cover_img_url"] = cover_img_url
+
             if timezone is not None:
                 updates["timezone"] = timezone
 
@@ -1325,6 +1329,7 @@ class AuthService:
                 success=True,
             ), None
         except Exception as e:
+            await self.db.rollback()
             return None, error_response(
                 ErrorCode.ErrInternalServerError,
                 str(e) or "An unexpected error occurred while updating profile",

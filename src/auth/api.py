@@ -29,12 +29,14 @@ from src.auth.schema import (
     SignInRequest,
     SignUpRequest,
     UserProfile,
+    MobileUserProfile,
+    MobileUpdateUserSuccessResponse,
     UserTaskInsightsResponse,
     UpdateUserSuccessResponse,
     UpdateUserRequest,
     VerifyEmailRequest,
 )
-from src.auth.deps import get_current_user
+from src.auth.deps import get_current_user, is_mobile_client
 from src.auth.service import AuthService
 from src.database import get_db, get_redis
 from src.utils.core import (
@@ -127,6 +129,26 @@ class AvatarUploadError(Exception):
 
 
 async def upload_avatar(avatar: UploadFile) -> tuple[str, str]:
+    return await upload_profile_image(avatar, "avatars")
+
+
+async def cleanup_profile_uploads(keys: list[str]):
+    for key in keys:
+        try:
+            await asyncio.to_thread(delete_s3_object, key)
+        except Exception:
+            pass  # Preserve the original API error if storage cleanup fails.
+    keys.clear()
+
+
+def profile_for_client(user, mobile: bool):
+    profile = UserProfileFromModel(user)
+    if mobile:
+        return MobileUserProfile(**profile.model_dump(), cover_img_url=user.cover_img_url)
+    return profile
+
+
+async def upload_profile_image(avatar: UploadFile, folder: str) -> tuple[str, str]:
     max_size_mb = int(get_settings().s3_max_file_size_mb or 5)
     file_bytes = await avatar.read(max_size_mb * 1024 * 1024 + 1)
     if len(file_bytes) > max_size_mb * 1024 * 1024:
@@ -153,7 +175,7 @@ async def upload_avatar(avatar: UploadFile) -> tuple[str, str]:
             "Invalid file type. Only PNG, JPG/JPEG, and WEBP images are accepted.",
         )
 
-    storage_key = f"users/avatars/{uuid.uuid4()}.{extension}"
+    storage_key = f"users/{folder}/{uuid.uuid4()}.{extension}"
     try:
         avatar_url = await asyncio.to_thread(
             upload_s3_object,
@@ -767,18 +789,20 @@ async def get_user_insights(current_user: dict = Depends(get_current_user), serv
 # Update User
 # ============================================================
 
-@router.patch("/update", response_model=UpdateUserSuccessResponse)
+@router.patch("/update", response_model=UpdateUserSuccessResponse | MobileUpdateUserSuccessResponse)
 async def update_user(
     full_name: str | None = Form(default=None),
     username: str | None = Form(default=None),
     timezone: str | None = Form(default=None),
     avatar: UploadFile | None = File(default=None),
+    cover_img: UploadFile | None = File(default=None),
+    mobile: bool = Depends(is_mobile_client),
     current_user: dict = Depends(get_current_user),
     service: AuthService = Depends(get_auth_service),
 ):
     """Update authenticated user's profile."""
 
-    uploaded_key: str | None = None
+    uploaded_keys: list[str] = []
     try:
         user_id = current_user.get("user_id")
 
@@ -799,8 +823,15 @@ async def update_user(
             )
 
         avatar_url = None
+        cover_img_url = None
+        if cover_img is not None and not mobile:
+            return auth_failure(ErrorCode.ErrValidation, "Cover images require X-Client-Type: mobile", 400)
         if avatar is not None:
             avatar_url, uploaded_key = await upload_avatar(avatar)
+            uploaded_keys.append(uploaded_key)
+        if cover_img is not None:
+            cover_img_url, uploaded_key = await upload_profile_image(cover_img, "covers")
+            uploaded_keys.append(uploaded_key)
 
         _, err = await service.update_user(
             user_id=user_uuid,
@@ -808,17 +839,28 @@ async def update_user(
             username=username,
             avatar_url=avatar_url,
             timezone=timezone,
+            cover_img_url=cover_img_url,
         )
 
         if err:
-            if uploaded_key:
-                await asyncio.to_thread(delete_s3_object, uploaded_key)
+            await cleanup_profile_uploads(uploaded_keys)
             return auth_failure(
                 err.code,
                 err.message,
                 status_code=err.status_code,
             )
 
+        # The database now owns these uploads. A later response error must not
+        # delete files whose URLs have already been committed.
+        uploaded_keys.clear()
+        if mobile:
+            user, err = await service.get_user(user_uuid)
+            if err:
+                return auth_failure(err.code, err.message, err.status_code)
+            return MobileUpdateUserSuccessResponse(
+                success=True, status_code=200, message="Updated profile successfully",
+                data=profile_for_client(user, True),
+            )
         return {
             "success": True,
             "status_code": 200,
@@ -826,13 +868,10 @@ async def update_user(
             "data": {"userID": str(user_uuid)},
         }
     except AvatarUploadError as exc:
+        await cleanup_profile_uploads(uploaded_keys)
         return auth_failure(exc.code, exc.message, exc.status_code)
     except Exception as e:
-        if uploaded_key:
-            try:
-                await asyncio.to_thread(delete_s3_object, uploaded_key)
-            except Exception:
-                pass
+        await cleanup_profile_uploads(uploaded_keys)
         return auth_failure(
             ErrorCode.ErrInternalServerError,
             str(e) or "An unexpected error occurred while updating user profile",
@@ -845,7 +884,7 @@ async def update_user(
 # ============================================================
 
 @router.get("/me")
-async def get_user(current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service)):
+async def get_user(current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service), mobile: bool = Depends(is_mobile_client)):
     """Return the profile of the authenticated user."""
 
     try:
@@ -880,7 +919,7 @@ async def get_user(current_user: dict = Depends(get_current_user), service: Auth
             message="User detail received successfully",
             status_code=200,
             success=True,
-            data=UserProfileFromModel(user),
+            data=profile_for_client(user, mobile),
         )
     except Exception as e:
         return error_response(
@@ -895,7 +934,7 @@ async def get_user(current_user: dict = Depends(get_current_user), service: Auth
 # ============================================================
 
 @router.get("/{user_id}")
-async def get_user_by_id(user_id: str, current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service)):
+async def get_user_by_id(user_id: str, current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service), mobile: bool = Depends(is_mobile_client)):
     """Get user details within the authenticated user's organization."""
 
     try:
@@ -931,7 +970,7 @@ async def get_user_by_id(user_id: str, current_user: dict = Depends(get_current_
             message="User detail received successfully",
             status_code=200,
             success=True,
-            data=UserProfileFromModel(result),
+            data=profile_for_client(result, mobile),
         )
     except Exception as e:
         return error_response(
