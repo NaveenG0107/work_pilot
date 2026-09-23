@@ -543,7 +543,10 @@ class ProjectService:
                 full_name=user.full_name,
                 role=role.name,
                 avatar_url=user.avatar_url or None,
-                color=user.color if include_context else "",
+                # Detail responses intentionally omit organization/project
+                # context, but a member's profile color is always part of the
+                # response contract.
+                color=user.color or "",
                 organization_name=org_name,
                 project_key=project_key,
             )
@@ -840,18 +843,44 @@ class ProjectService:
             )
         ).first()
         if not row:
-            project_exists = (
+            project = (
                 await self.db.execute(
-                    select(Project.id).where(
+                    select(Project).where(
                         Project.id == project_id,
                         Project.organization_id == organization_id,
                         Project.deleted_at.is_(None),
                     )
                 )
             ).scalar_one_or_none()
-            if project_exists is None:
+            if project is None:
                 raise ProjectServiceError(
                     404, "RESOURCE_NOT_FOUND", "Project not found"
+                )
+
+            # A project creator and an organization administrator can access
+            # every project even when legacy/imported data lacks their
+            # project_members row. Return their organization role instead of
+            # incorrectly reporting the project as inaccessible.
+            role = None
+            if user.role_id:
+                role = (
+                    await self.db.execute(
+                        select(Role).where(
+                            Role.id == user.role_id,
+                            Role.deleted_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+            if role and (
+                str(project.created_by) == str(user_id)
+                or role.name in {"org_admin", "super_admin"}
+            ):
+                return UserProjectRoleResponse(
+                    project_id=project_id,
+                    project_name=project.name,
+                    project_key=project.slug,
+                    role_id=str(role.id),
+                    role=role.name,
                 )
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Project member not found")
         member, project, role = row

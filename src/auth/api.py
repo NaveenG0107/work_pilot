@@ -791,6 +791,7 @@ async def get_user_insights(current_user: dict = Depends(get_current_user), serv
 
 @router.patch("/update", response_model=UpdateUserSuccessResponse | MobileUpdateUserSuccessResponse)
 async def update_user(
+    request: Request,
     full_name: str | None = Form(default=None),
     username: str | None = Form(default=None),
     timezone: str | None = Form(default=None),
@@ -804,6 +805,19 @@ async def update_user(
 
     uploaded_keys: list[str] = []
     try:
+        # FastAPI silently ignores unknown multipart fields. Reject them so a
+        # typo such as ``cover_image`` cannot return a false success response.
+        form = await request.form()
+        unknown_fields = set(form.keys()) - {
+            "full_name", "username", "timezone", "avatar", "cover_img",
+        }
+        if unknown_fields:
+            return auth_failure(
+                ErrorCode.ErrValidation,
+                "Invalid request payload.",
+                400,
+            )
+
         user_id = current_user.get("user_id")
 
         if not user_id:

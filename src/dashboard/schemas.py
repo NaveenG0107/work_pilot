@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional, Union
 from uuid import UUID
 from pydantic import BaseModel, Field
@@ -50,6 +50,23 @@ class TeamWorkload(BaseModel):
     color: str = Field(default="", description="User profile hex color")
     task_count: int = Field(default=0, description="Total assigned tasks count")
     points: float = Field(default=0.0, description="Total story points assigned")
+
+
+class UpcomingDeadline(BaseModel):
+    """An open project task due within the dashboard's next-48-hours window."""
+
+    id: UUID
+    project_id: UUID
+    project_name: str
+    sprint_id: UUID | None = None
+    sprint_name: str | None = None
+    key: str
+    title: str
+    priority: str
+    due_date: datetime
+    deadline_status: str = Field(
+        description="One of due_today or upcoming"
+    )
 
 
 class DashboardResponse(BaseModel):

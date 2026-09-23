@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.favorite.schema import (
     FAVORITE_TYPES,
     AddFavoriteRequest,
@@ -54,8 +54,10 @@ router = APIRouter(
 )
 
 
-def get_favorite_service(db: AsyncSession = Depends(get_db)) -> FavoriteService:
-    return FavoriteService(db)
+def get_favorite_service(
+    db: AsyncSession = Depends(get_db), redis=Depends(get_redis)
+) -> FavoriteService:
+    return FavoriteService(db, redis)
 
 
 def field_label(field: object) -> str:

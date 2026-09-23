@@ -9,7 +9,7 @@ from typing import List, Tuple
 from sqlalchemy import String, and_, case, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from fastapi import HTTPException, UploadFile
 
@@ -18,6 +18,7 @@ from src.auth.models import User
 from src.comments.models import Comments, CommentAttachment
 from src.custom_status.models import CustomStatus
 from src.favorite.models import Favorite
+from src.label.models import Label
 from src.organization.models import Role
 from src.project.models import Project, ProjectMember
 from src.sprint.models import Sprint
@@ -57,6 +58,7 @@ from src.user_story.schema import (
     user_summary_from_user,
 )
 from src.utils.core import ErrorCode
+from src.utils.performance_cache import canonical_hash, cache_get_json, cache_set_json, project_version
 
 logger = get_logger(__name__)
 
@@ -185,8 +187,9 @@ def _sanitize_html(raw: str | None) -> str:
 
 
 class UserStoryService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis=None):
         self.db = db
+        self.redis = redis
 
     @staticmethod
     def _parent_comment_response(comment):
@@ -272,7 +275,7 @@ class UserStoryService:
         user = (
             await self.db.execute(
                 select(User)
-                .options(selectinload(User.role))
+                .options(selectinload(User.role).selectinload(Role.permissions))
                 .where(User.id == user_id, User.deleted_at.is_(None))
             )
         ).scalar_one_or_none()
@@ -342,20 +345,26 @@ class UserStoryService:
 
         member_role = await self._member_role(user_id, project_id)
         if member_role is not None:
-            for perm in getattr(member_role, "permissions", []):
-                if perm.resource == resource and perm.action == action:
-                    return True
             if _has_default_permission(member_role.name, resource, action):
                 return True
+            try:
+                for perm in getattr(member_role, "permissions", []) or []:
+                    if perm.resource == resource and perm.action == action:
+                        return True
+            except Exception:
+                pass
 
         project = await self._project(project_id)
         if user.organization_id and str(user.organization_id) == str(project.organization_id):
             if user_role_name == "org_admin":
-                for perm in getattr(user.role, "permissions", []) or []:
-                    if perm.resource == resource and perm.action == action:
-                        return True
                 if _has_default_permission(user_role_name, resource, action):
                     return True
+                try:
+                    for perm in getattr(user.role, "permissions", []) or []:
+                        if perm.resource == resource and perm.action == action:
+                            return True
+                except Exception:
+                    pass
 
         return False
 
@@ -641,6 +650,31 @@ class UserStoryService:
                 )
             ).scalars()
         )
+
+    async def _tasks_by_stories(self, story_ids: list[str]) -> dict[str, list[Task]]:
+        tasks_by_story: dict[str, list[Task]] = {str(story_id): [] for story_id in story_ids}
+        # Bound the IN clause even when callers request a very large story page.
+        for start in range(0, len(story_ids), 500):
+            tasks = (
+                await self.db.execute(
+                    select(Task)
+                    .options(
+                        selectinload(Task.assignee).selectinload(User.role),
+                        selectinload(Task.reporter),
+                        selectinload(Task.project),
+                        selectinload(Task.sprint),
+                        selectinload(Task.labels),
+                    )
+                    .where(
+                        Task.user_story_id.in_(story_ids[start:start + 500]),
+                        Task.deleted_at.is_(None),
+                    )
+                    .order_by(Task.created_at.asc())
+                )
+            ).scalars().all()
+            for task in tasks:
+                tasks_by_story[str(task.user_story_id)].append(task)
+        return tasks_by_story
 
     def _story_color(self, story_status_id: str | None, status_name: str,
                      statuses: list[UserStoryStatus], color_map: dict[str, str]) -> str:
@@ -1228,6 +1262,29 @@ class UserStoryService:
                 "You do not have permission to view user stories in this project",
             )
 
+        version = await project_version(self.redis, project_id)
+        cache_key = None
+        if version is not None:
+            cache_key = (
+                f"wp:user-stories:v{version}:{project_id}:{user_id}:"
+                f"{canonical_hash(filter_.model_dump(mode='json'))}"
+            )
+            cached = await cache_get_json(self.redis, cache_key)
+            if cached is not None:
+                responses = [UserStoryResponse.model_validate(item) for item in cached["data"]]
+                pagination = PaginationResponse.model_validate(cached["meta"])
+                await self._audit(
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    action="viewed",
+                    resource_type="user_story",
+                    resource_id=project_id,
+                    details="",
+                    audit_type=AuditLogType.AUDIT,
+                )
+                return responses, pagination
+
         page = max(1, filter_.page)
         page_size = max(1, filter_.page_size)
         offset = (page - 1) * page_size
@@ -1338,12 +1395,13 @@ class UserStoryService:
         fav_story_map = await self._get_favorite_story_map(user_id)
         fav_task_map = await self._get_favorite_task_map(user_id)
 
+        tasks_by_story = await self._tasks_by_stories([story.id for story in stories])
         responses = []
         for story in stories:
             stat = stats.get(str(story.id), {"total": 0, "completed": 0})
             total_tasks, completed_tasks = stat["total"], stat["completed"]
             progress = (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0
-            tasks = await self._tasks_by_story(story.id)
+            tasks = tasks_by_story[str(story.id)]
             task_responses = await self._task_summaries(tasks, color_map, is_final_map, fav_task_map)
             responses.append(
                 self._story_response(
@@ -1365,7 +1423,16 @@ class UserStoryService:
         )
 
         logger.info("Service: Successfully fetched %d user stories (total=%d)", len(responses), total)
-        return responses, self.pagination(page, page_size, total)
+        pagination = self.pagination(page, page_size, total)
+        await cache_set_json(
+            self.redis,
+            cache_key,
+            {
+                "data": [item.model_dump(mode="json", by_alias=True) for item in responses],
+                "meta": pagination.model_dump(mode="json"),
+            },
+        )
+        return responses, pagination
 
     async def reorder(
         self, req: ReorderUserStoriesRequest, project_id: str, user_id: str,

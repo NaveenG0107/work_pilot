@@ -21,6 +21,7 @@ from src.task.models import (
     normalize_task_status,
 )
 from src.user_story.models import UserStory
+from src.utils.performance_cache import bump_project_version
 
 
 class FavoriteServiceError(Exception):
@@ -32,8 +33,9 @@ class FavoriteServiceError(Exception):
 
 
 class FavoriteService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis=None):
         self.db = db
+        self.redis = redis
 
     async def _task_or_404(self, item_id: str) -> Task:
         task = (
@@ -256,6 +258,8 @@ class FavoriteService:
                 500, "INTERNAL_SERVER_ERROR", "Failed to add item to favorites"
             ) from exc
 
+        await bump_project_version(self.redis, project_id)
+
         return FavoriteResponse(
             id=str(favorite.id),
             user_id=user_id,
@@ -282,6 +286,8 @@ class FavoriteService:
         item_id: str,
     ) -> RemoveFavoriteResponse:
         favorite = await self._favorite_or_404(user_id, item_type, item_id)
+        item = favorite.task if item_type == "task" else favorite.user_story
+        project_id = str(item.project_id) if item and item.project_id else None
         favorite.deleted_at = datetime.now(timezone.utc)
         try:
             await self.db.commit()
@@ -290,6 +296,7 @@ class FavoriteService:
             raise FavoriteServiceError(
                 500, "INTERNAL_SERVER_ERROR", "Failed to remove item from favorites"
             ) from exc
+        await bump_project_version(self.redis, project_id)
         return RemoveFavoriteResponse(id=str(favorite.id))
 
     @staticmethod

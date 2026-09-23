@@ -12,10 +12,11 @@ from src.dashboard.schemas import (
     DashboardOverview,
     DashboardResponse,
     TeamWorkload,
+    UpcomingDeadline,
     WeeklyProgress,
 )
 from src.dashboard.service import DashboardService
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.response import error, success
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Dashboard"])
 
 
-def get_dashboard_service(db: AsyncSession = Depends(get_db)) -> DashboardService:
-    return DashboardService(db)
+def get_dashboard_service(db: AsyncSession = Depends(get_db), redis=Depends(get_redis)) -> DashboardService:
+    return DashboardService(db, redis)
 
 
 def validate_uuid(value: str, param_name: str = "ID") -> str:
@@ -34,6 +35,46 @@ def validate_uuid(value: str, param_name: str = "ID") -> str:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid {param_name}",
+        )
+
+
+@router.get("/{project_id}/upcoming-deadlines", status_code=status.HTTP_200_OK)
+async def get_upcoming_deadlines(
+    project_id: str = Path(..., description="Project ID (UUID)"),
+    limit: int = Query(7, ge=1, le=50, description="Maximum tasks to return"),
+    current_user: dict = Depends(get_current_user),
+    service: DashboardService = Depends(get_dashboard_service),
+):
+    """Retrieve this project's open tasks due in the next 48 hours."""
+    user_id = current_user.get("user_id")
+    organization_id = current_user.get("organization_id")
+    if not user_id or not organization_id:
+        return error(
+            "Authentication required",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="UNAUTHORIZED",
+        )
+
+    try:
+        valid_project_id = validate_uuid(project_id, "project ID")
+        deadlines = await service.get_upcoming_deadlines(
+            user_id=user_id,
+            organization_id=organization_id,
+            project_id=valid_project_id,
+            limit=limit,
+        )
+        return success(
+            message="Upcoming deadlines retrieved successfully",
+            data=deadlines,
+            status_code=status.HTTP_200_OK,
+        )
+    except HTTPException as exc:
+        return error(exc.detail, status_code=exc.status_code, code=getattr(exc, "code", None))
+    except Exception as exc:
+        logger.exception("Unexpected error in get_upcoming_deadlines: %s", exc)
+        return error(
+            "Something went wrong. Please try again later.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 

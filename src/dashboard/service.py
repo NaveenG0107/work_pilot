@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +18,7 @@ from src.dashboard.schemas import (
     SprintBurndownData,
     SprintBurndownPoint,
     TeamWorkload,
+    UpcomingDeadline,
     WeeklyProgress,
 )
 from src.middleware.rbac import has_default_permission
@@ -25,13 +26,15 @@ from src.organization.models import Role
 from src.project.models import Project, ProjectMember
 from src.sprint.models import Sprint
 from src.task.models import Task
+from src.utils.performance_cache import cache_get_json, cache_set_json, project_version
 
 logger = logging.getLogger(__name__)
 
 
 class DashboardService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis=None):
         self.db = db
+        self.redis = redis
 
     async def _check_permission(
         self, user: User, project_id: str, resource: str, action: str
@@ -70,6 +73,96 @@ class DashboardService:
                 return True
 
         return False
+
+    async def get_upcoming_deadlines(
+        self,
+        user_id: str,
+        organization_id: str,
+        *,
+        project_id: str,
+        limit: int = 7,
+    ) -> list[UpcomingDeadline]:
+        """Return the exact open tasks counted by dashboard ``due_soon``."""
+        user = (
+            await self.db.execute(
+                select(User)
+                .where(User.id == user_id, User.deleted_at.is_(None))
+                .options(selectinload(User.role).selectinload(Role.permissions))
+            )
+        ).scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        if user.role and user.role.name == "super_admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Super admins are not allowed to perform organization-level activities",
+            )
+
+        project = (
+            await self.db.execute(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                    Project.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if not await self._check_permission(user, project_id, "projects", "view"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view dashboard in this project",
+            )
+
+        now = datetime.now(timezone.utc)
+        forty_eight_hours_later = now + timedelta(hours=48)
+        conditions = [
+            Task.project_id == project_id,
+            Task.deleted_at.is_(None),
+            Task.due_date >= now,
+            Task.due_date <= forty_eight_hours_later,
+            CustomStatus.is_final.is_(False),
+            CustomStatus.deleted_at.is_(None),
+        ]
+
+        rows = (
+            await self.db.execute(
+                select(Task, Project, Sprint)
+                .join(Project, Project.id == Task.project_id)
+                .outerjoin(Sprint, and_(
+                    Sprint.id == Task.sprint_id,
+                    Sprint.deleted_at.is_(None),
+                ))
+                .join(CustomStatus, CustomStatus.id == Task.status_id)
+                .where(*conditions)
+                .order_by(Task.due_date.asc(), Task.created_at.asc())
+                .limit(limit)
+            )
+        ).all()
+
+        deadlines: list[UpcomingDeadline] = []
+        for task, project, sprint in rows:
+            due_date = task.due_date
+            if due_date.date() == now.date():
+                deadline_status = "due_today"
+            else:
+                deadline_status = "upcoming"
+            deadlines.append(
+                UpcomingDeadline(
+                    id=task.id,
+                    project_id=project.id,
+                    project_name=project.name,
+                    sprint_id=sprint.id if sprint else None,
+                    sprint_name=sprint.name if sprint else None,
+                    key=task.key,
+                    title=task.title,
+                    priority=task.priority,
+                    due_date=due_date,
+                    deadline_status=deadline_status,
+                )
+            )
+        return deadlines
 
     async def get_overview(
         self,
@@ -139,85 +232,36 @@ class DashboardService:
         now = datetime.now(timezone.utc)
         forty_eight_hours_later = now + timedelta(hours=48)
 
-        # 4. Total tasks
-        total_stmt = (
-            select(func.count(Task.id))
-            .where(
-                Task.project_id == project_id,
-                Task.deleted_at.is_(None),
+        # Count the shared task scope once. The outer join keeps tasks with a
+        # missing/deleted status in the total, but not in status-based metrics.
+        metrics_stmt = (
+            select(
+                func.count(Task.id),
+                func.count(Task.id).filter(CustomStatus.is_final.is_(True)),
+                func.count(Task.id).filter(CustomStatus.is_final.is_(False)),
+                func.count(Task.id).filter(
+                    CustomStatus.is_final.is_(False), Task.due_date < now,
+                ),
+                func.count(Task.id).filter(
+                    CustomStatus.is_final.is_(False),
+                    Task.due_date >= now,
+                    Task.due_date <= forty_eight_hours_later,
+                ),
             )
-        )
-        if sprint_id:
-            total_stmt = total_stmt.where(Task.sprint_id == sprint_id)
-        total_res = await self.db.execute(total_stmt)
-        total_tasks = total_res.scalar() or 0
-
-        # 5. Completed tasks (custom_statuses.is_final = True)
-        completed_stmt = (
-            select(func.count(Task.id))
-            .join(CustomStatus, CustomStatus.id == Task.status_id)
-            .where(
-                Task.project_id == project_id,
-                CustomStatus.is_final.is_(True),
-                Task.deleted_at.is_(None),
+            .outerjoin(CustomStatus, and_(
+                CustomStatus.id == Task.status_id,
                 CustomStatus.deleted_at.is_(None),
-            )
-        )
-        if sprint_id:
-            completed_stmt = completed_stmt.where(Task.sprint_id == sprint_id)
-        completed_res = await self.db.execute(completed_stmt)
-        completed_tasks = completed_res.scalar() or 0
-
-        # 6. Pending tasks (custom_statuses.is_final = False)
-        pending_stmt = (
-            select(func.count(Task.id))
-            .join(CustomStatus, CustomStatus.id == Task.status_id)
+            ))
             .where(
                 Task.project_id == project_id,
-                CustomStatus.is_final.is_(False),
                 Task.deleted_at.is_(None),
-                CustomStatus.deleted_at.is_(None),
             )
         )
         if sprint_id:
-            pending_stmt = pending_stmt.where(Task.sprint_id == sprint_id)
-        pending_res = await self.db.execute(pending_stmt)
-        pending_tasks = pending_res.scalar() or 0
-
-        # 7. Overdue tasks (due_date < now and is_final = False)
-        overdue_stmt = (
-            select(func.count(Task.id))
-            .join(CustomStatus, CustomStatus.id == Task.status_id)
-            .where(
-                Task.project_id == project_id,
-                Task.due_date < now,
-                CustomStatus.is_final.is_(False),
-                Task.deleted_at.is_(None),
-                CustomStatus.deleted_at.is_(None),
-            )
-        )
-        if sprint_id:
-            overdue_stmt = overdue_stmt.where(Task.sprint_id == sprint_id)
-        overdue_res = await self.db.execute(overdue_stmt)
-        overdue_tasks = overdue_res.scalar() or 0
-
-        # 8. Due soon tasks (due_date between now and now + 48h and is_final = False)
-        due_soon_stmt = (
-            select(func.count(Task.id))
-            .join(CustomStatus, CustomStatus.id == Task.status_id)
-            .where(
-                Task.project_id == project_id,
-                Task.due_date >= now,
-                Task.due_date <= forty_eight_hours_later,
-                CustomStatus.is_final.is_(False),
-                Task.deleted_at.is_(None),
-                CustomStatus.deleted_at.is_(None),
-            )
-        )
-        if sprint_id:
-            due_soon_stmt = due_soon_stmt.where(Task.sprint_id == sprint_id)
-        due_soon_res = await self.db.execute(due_soon_stmt)
-        due_soon_tasks = due_soon_res.scalar() or 0
+            metrics_stmt = metrics_stmt.where(Task.sprint_id == sprint_id)
+        total_tasks, completed_tasks, pending_tasks, overdue_tasks, due_soon_tasks = (
+            await self.db.execute(metrics_stmt)
+        ).one()
 
         logger.info(
             "Dashboard overview fetched successfully for project %s: total=%d, completed=%d, pending=%d, overdue=%d, due_soon=%d",
@@ -849,6 +893,19 @@ class DashboardService:
         # 1. Fetch overview (handles user auth, project validation, and permissions check)
         overview = await self.get_overview(project_id, user_id, sprint_id)
 
+        version = await project_version(self.redis, project_id)
+        cache_key = (
+            f"wp:dashboard:v{version}:{project_id}:{user_id}:{sprint_id or 'all'}"
+            if version is not None else None
+        )
+        cached = await cache_get_json(self.redis, cache_key)
+        if cached is not None:
+            result = DashboardResponse.model_validate(cached)
+            # Overview was deliberately re-read to preserve current authorization
+            # behavior and time-dependent overdue/due-soon values.
+            result.overview = overview
+            return result
+
         # 2. Fetch task status counts
         task_status = await self.get_task_status(project_id, user_id, sprint_id)
 
@@ -863,11 +920,13 @@ class DashboardService:
             project_id,
         )
 
-        return DashboardResponse(
+        result = DashboardResponse(
             overview=overview,
             task_status=task_status,
             team_workload=team_workload,
             sprint_burndown=burndown_response.sprint_burndown,
         )
+        await cache_set_json(self.redis, cache_key, result.model_dump(mode="json"))
+        return result
 
 
