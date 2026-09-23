@@ -1,3 +1,4 @@
+import re
 import math
 from datetime import datetime, timezone
 
@@ -24,6 +25,147 @@ from src.user_story.models import UserStory
 
 
 logger = get_logger(__name__)
+
+UUID_REGEX = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
+def clean_val(val: str, id_map: dict | None = None) -> str:
+    val = val.strip()
+    m = re.match(r"^(.+?)\s*\([0-9a-f-]{36}\)$", val, re.I)
+    if m:
+        val = m.group(1).strip()
+    if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+        val = val[1:-1].strip()
+    if id_map and val in id_map:
+        val = id_map[val]
+    return val
+
+
+def format_audit_details(
+    details: str | None,
+    user_map: dict | None = None,
+    story_map: dict | None = None,
+    sprint_map: dict | None = None,
+) -> str | None:
+    if not details:
+        return details
+
+    def resolve_story(v: str) -> str:
+        c = clean_val(v)
+        if story_map and c in story_map:
+            st = story_map[c]
+            return st.get("title") if isinstance(st, dict) else str(st)
+        if UUID_REGEX.match(c):
+            return "user story"
+        return c
+
+    def resolve_sprint(v: str) -> str:
+        c = clean_val(v)
+        if sprint_map and c in sprint_map:
+            sp = sprint_map[c]
+            return sp.get("name") if isinstance(sp, dict) else str(sp)
+        if UUID_REGEX.match(c):
+            return "sprint"
+        return c
+
+    def resolve_user(v: str) -> str:
+        c = clean_val(v)
+        if user_map and c in user_map:
+            u = user_map[c]
+            if hasattr(u, "full_name") and u.full_name:
+                return u.full_name
+            if isinstance(u, dict):
+                return u.get("full_name") or u.get("name") or u.get("username") or c
+            if isinstance(u, str):
+                return u
+        if UUID_REGEX.match(c):
+            return "user"
+        return c
+
+    def _sub_story(m):
+        f_val, t_val = m.group(1).strip(), m.group(2).strip()
+        f_is_nil = f_val.lower() in ("nil", "none", "null")
+        t_is_nil = t_val.lower() in ("nil", "none", "null")
+        if f_is_nil and not t_is_nil:
+            name = resolve_story(t_val)
+            return f"assigned to user story '{name}'"
+        elif not f_is_nil and t_is_nil:
+            name = resolve_story(f_val)
+            return f"removed from user story '{name}'"
+        elif not f_is_nil and not t_is_nil:
+            name_f = resolve_story(f_val)
+            name_t = resolve_story(t_val)
+            return f"user story changed from '{name_f}' to '{name_t}'"
+        return m.group(0)
+
+    details = re.sub(
+        r"user story changed from\s+(.+?)\s+to\s+([^,]+)",
+        _sub_story,
+        details,
+        flags=re.IGNORECASE,
+    )
+
+    def _sub_sprint(m):
+        f_val, t_val = m.group(1).strip(), m.group(2).strip()
+        f_is_nil = f_val.lower() in ("nil", "none", "null")
+        t_is_nil = t_val.lower() in ("nil", "none", "null")
+        if f_is_nil and not t_is_nil:
+            name = resolve_sprint(t_val)
+            return f"assigned to sprint '{name}'"
+        elif not f_is_nil and t_is_nil:
+            name = resolve_sprint(f_val)
+            return f"removed from sprint '{name}'"
+        elif not f_is_nil and not t_is_nil:
+            name_f = resolve_sprint(f_val)
+            name_t = resolve_sprint(t_val)
+            return f"sprint changed from '{name_f}' to '{name_t}'"
+        return m.group(0)
+
+    details = re.sub(
+        r"sprint changed from\s+(.+?)\s+to\s+([^,]+)",
+        _sub_sprint,
+        details,
+        flags=re.IGNORECASE,
+    )
+
+    def _sub_assignee(m):
+        f_val, t_val = m.group(1).strip(), m.group(2).strip()
+        f_is_nil = f_val.lower() in ("nil", "none", "null")
+        t_is_nil = t_val.lower() in ("nil", "none", "null")
+        if f_is_nil and not t_is_nil:
+            name = resolve_user(t_val)
+            return f"assigned to '{name}'"
+        elif not f_is_nil and t_is_nil:
+            name = resolve_user(f_val)
+            return f"unassigned from '{name}'"
+        elif not f_is_nil and not t_is_nil:
+            name_f = resolve_user(f_val)
+            name_t = resolve_user(t_val)
+            return f"assignee changed from '{name_f}' to '{name_t}'"
+        return m.group(0)
+
+    details = re.sub(
+        r"assignee changed from\s+(.+?)\s+to\s+([^,]+)",
+        _sub_assignee,
+        details,
+        flags=re.IGNORECASE,
+    )
+
+    details = re.sub(
+        r"\b(actual hours|estimated hours|story points) changed from (?:nil|none|null) to ([^,]+)",
+        r"\1 set to \2",
+        details,
+        flags=re.IGNORECASE,
+    )
+
+    details = re.sub(r"\s*\([0-9a-f-]{36}\)", "", details, flags=re.IGNORECASE)
+
+    return details
+
+
 
 
 class AuditService:
@@ -297,59 +439,83 @@ class AuditService:
 
         for audit in audits:
             if audit.user_id:
-                user_ids.add(audit.user_id)
+                user_ids.add(str(audit.user_id))
 
             if audit.task_id:
-                task_ids.add(audit.task_id)
+                task_ids.add(str(audit.task_id))
 
             if audit.user_story_id:
-                story_ids.add(audit.user_story_id)
+                story_ids.add(str(audit.user_story_id))
 
             if audit.project_id:
-                project_ids.add(audit.project_id)
+                project_ids.add(str(audit.project_id))
 
             if audit.sprint_id:
-                sprint_ids.add(audit.sprint_id)
+                sprint_ids.add(str(audit.sprint_id))
 
-            resource_id = audit.resource_id
+            resource_id = str(audit.resource_id) if audit.resource_id else None
 
-            if not resource_id:
-                continue
+            if resource_id:
+                resource_type = (audit.resource_type or "").lower()
 
-            resource_type = (audit.resource_type or "").lower()
+                if resource_type in {
+                    "task",
+                    "task_attachment",
+                }:
+                    task_ids.add(resource_id)
 
-            if resource_type in {
-                "task",
-                "task_attachment",
-            }:
-                task_ids.add(resource_id)
+                elif resource_type in {
+                    "user_story",
+                    "userstory",
+                    "user_story_attachment",
+                }:
+                    story_ids.add(resource_id)
 
-            elif resource_type in {
-                "user_story",
-                "userstory",
-                "user_story_attachment",
-            }:
-                story_ids.add(resource_id)
+                elif resource_type in {
+                    "project",
+                    "project_member",
+                }:
+                    project_ids.add(resource_id)
 
-            elif resource_type in {
-                "project",
-                "project_member",
-            }:
-                project_ids.add(resource_id)
+                elif resource_type in {"sprint", "sprints"}:
+                    sprint_ids.add(resource_id)
 
-            elif resource_type == "sprint":
-                sprint_ids.add(resource_id)
+            if audit.details:
+                for sm in re.finditer(r"user story changed from\s+(.+?)\s+to\s+([^,]+)", audit.details, re.I):
+                    for uid in UUID_REGEX.findall(sm.group(0)):
+                        story_ids.add(uid)
+                for spm in re.finditer(r"sprint changed from\s+(.+?)\s+to\s+([^,]+)", audit.details, re.I):
+                    for uid in UUID_REGEX.findall(spm.group(0)):
+                        sprint_ids.add(uid)
+                for am in re.finditer(r"assignee changed from\s+(.+?)\s+to\s+([^,]+)", audit.details, re.I):
+                    for uid in UUID_REGEX.findall(am.group(0)):
+                        user_ids.add(uid)
+                if "sprint" in audit.details.lower():
+                    for uid in UUID_REGEX.findall(audit.details):
+                        sprint_ids.add(uid)
 
         task_map = await self._get_task_map(task_ids)
+        for t in task_map.values():
+            if t.get("user_story_id"):
+                story_ids.add(t["user_story_id"])
+
         story_map = await self._get_story_map(story_ids)
         project_map = await self._get_project_map(project_ids)
+
+        for t in task_map.values():
+            if t.get("sprint_id"):
+                sprint_ids.add(t["sprint_id"])
+        for s in story_map.values():
+            if s.get("sprint_id"):
+                sprint_ids.add(s["sprint_id"])
+
         sprint_map = await self._get_sprint_map(sprint_ids)
         user_map = await self._get_user_map(user_ids)
 
         responses = []
 
         for audit in audits:
-            resource_id = audit.resource_id
+            resource_id = str(audit.resource_id) if audit.resource_id else None
 
             audit_type = audit.type
 
@@ -364,10 +530,14 @@ class AuditService:
             task_key = None
             task_name = None
             user_story_name = None
+            user_story_key = None
             sprint_name = None
+            sprint_id = None
+            task_id = str(audit.task_id) if audit.task_id else None
+            user_story_id = str(audit.user_story_id) if audit.user_story_id else None
 
             project_name = (
-                project_map.get(audit.project_id) if audit.project_id else None
+                project_map.get(str(audit.project_id)) if audit.project_id else None
             )
 
             if not project_name and resource_id:
@@ -377,71 +547,101 @@ class AuditService:
 
             if resource_id:
                 task = task_map.get(resource_id)
+                if task and not task_id:
+                    task_id = resource_id
 
             if task is None and audit.task_id:
-                task = task_map.get(audit.task_id)
+                task = task_map.get(str(audit.task_id))
 
             if task:
                 title = task["title"]
                 task_name = task["title"]
                 task_key = task["key"]
+                if not task_id:
+                    task_id = str(audit.task_id) if audit.task_id else resource_id
+                if not sprint_id and task.get("sprint_id"):
+                    sprint_id = task["sprint_id"]
+                if not user_story_id and task.get("user_story_id"):
+                    user_story_id = task["user_story_id"]
 
             story = None
 
-            if not task:
-                if resource_id:
-                    story = story_map.get(resource_id)
+            if resource_id:
+                story = story_map.get(resource_id)
+                if story and not user_story_id:
+                    user_story_id = resource_id
 
-                if story is None and audit.user_story_id:
-                    story = story_map.get(audit.user_story_id)
+            if story is None and user_story_id:
+                story = story_map.get(user_story_id)
 
-                if story:
+            if story:
+                user_story_name = story["title"]
+                user_story_key = story.get("key")
+                if not title:
                     title = story["title"]
-                    user_story_name = story["title"]
+                if not sprint_id and story.get("sprint_id"):
+                    sprint_id = story["sprint_id"]
 
             if not title:
                 if resource_id and resource_id in project_map:
                     title = project_map[resource_id]
 
                 elif audit.project_id:
-                    title = project_map.get(audit.project_id)
+                    title = project_map.get(str(audit.project_id))
 
             if audit.sprint_id:
-                sprint_name = sprint_map.get(audit.sprint_id)
+                sprint_id = str(audit.sprint_id)
 
-            if resource_id and resource_id in sprint_map:
+            if not sprint_id and (audit.resource_type or "").lower() in {"sprint", "sprints"} and resource_id:
+                sprint_id = resource_id
+
+            if sprint_id:
+                sprint_name = sprint_map.get(sprint_id)
+
+            if not sprint_name and resource_id and resource_id in sprint_map:
                 sprint_name = sprint_map[resource_id]
+                if not sprint_id:
+                    sprint_id = resource_id
 
-                if not title:
-                    title = sprint_name
+            if not title and (audit.resource_type or "").lower() in {"sprint", "sprints"}:
+                title = sprint_name
 
             # Go omits blank optional strings through `omitempty`.
             details = audit.details or None
 
             if (
-                audit.resource_type.lower() == "comment"
-                and "deleted" in audit.action.lower()
+                (audit.resource_type or "").lower() == "comment"
+                and "deleted" in (audit.action or "").lower()
             ):
                 details = "Comment deleted"
+            elif details:
+                details = format_audit_details(
+                    details,
+                    user_map=user_map,
+                    story_map=story_map,
+                    sprint_map=sprint_map,
+                )
 
             responses.append(
                 AuditLogResponse(
                     id=str(audit.id),
-                    project_id=audit.project_id,
+                    project_id=str(audit.project_id) if audit.project_id else None,
                     project_name=project_name,
-                    organization_id=(audit.organization_id),
-                    user=user_map.get(audit.user_id),
+                    organization_id=str(audit.organization_id) if audit.organization_id else None,
+                    user=user_map.get(str(audit.user_id)) if audit.user_id else None,
                     action=audit.action,
-                    resource_type=(audit.resource_type),
-                    resource_id=(audit.resource_id or None),
+                    resource_type=audit.resource_type,
+                    resource_id=resource_id,
                     details=details,
                     created_at=audit.created_at,
                     task_key=task_key,
-                    task_id=audit.task_id,
-                    user_story_id=(audit.user_story_id),
+                    task_id=task_id,
+                    user_story_id=user_story_id,
+                    user_story_key=user_story_key,
                     title=title,
                     task_name=task_name,
-                    user_story_name=(user_story_name),
+                    user_story_name=user_story_name,
+                    sprint_id=sprint_id,
                     sprint_name=sprint_name,
                     type=audit_type,
                 )
@@ -463,6 +663,8 @@ class AuditService:
                     Task.id,
                     Task.title,
                     Task.key,
+                    Task.sprint_id,
+                    Task.user_story_id,
                 ).where(Task.id.in_(ids))
             )
         ).all()
@@ -471,6 +673,8 @@ class AuditService:
             str(row.id): {
                 "title": row.title,
                 "key": row.key,
+                "sprint_id": str(row.sprint_id) if row.sprint_id else None,
+                "user_story_id": str(row.user_story_id) if row.user_story_id else None,
             }
             for row in rows
         }
@@ -488,6 +692,8 @@ class AuditService:
                 select(
                     UserStory.id,
                     UserStory.title,
+                    UserStory.key,
+                    UserStory.sprint_id,
                 ).where(UserStory.id.in_(ids))
             )
         ).all()
@@ -495,6 +701,8 @@ class AuditService:
         return {
             str(row.id): {
                 "title": row.title,
+                "key": row.key,
+                "sprint_id": str(row.sprint_id) if row.sprint_id else None,
             }
             for row in rows
         }

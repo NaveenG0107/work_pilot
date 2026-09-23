@@ -138,6 +138,15 @@ class CommentService:
                 detail="Organization context required",
             )
 
+        try:
+            UUID(identifier)
+            identifier_condition = or_(
+                Task.id == identifier,
+                func.upper(Task.key) == identifier.upper(),
+            )
+        except (ValueError, TypeError, AttributeError):
+            identifier_condition = func.upper(Task.key) == identifier.upper()
+
         task_id = (
             await self.db.execute(
                 select(Task.id)
@@ -146,10 +155,7 @@ class CommentService:
                     Task.deleted_at.is_(None),
                     Project.deleted_at.is_(None),
                     Project.organization_id == str(organization_id),
-                    or_(
-                        Task.id == identifier,
-                        func.upper(Task.key) == identifier.upper(),
-                    ),
+                    identifier_condition,
                 )
             )
         ).scalars().first()

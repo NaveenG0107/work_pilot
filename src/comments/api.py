@@ -46,9 +46,6 @@ async def create_task_comment(
     Creates a new comment for the specified task.
     To create a reply, provide the parent_comment_id of an existing comment.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
 
@@ -59,6 +56,9 @@ async def create_task_comment(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.create_comment(
             user_id=user_id,
             organization_id=organization_id,
@@ -96,9 +96,6 @@ async def get_task_comments(
     """
     Get paginated top-level comments for a task along with their replies count.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
 
@@ -109,6 +106,9 @@ async def get_task_comments(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         items, meta = await service.get_comments_by_task_id(
             task_id=valid_task_id,
             user_id=user_id,
@@ -147,9 +147,6 @@ async def get_task_comment_by_id(
     """
     Get a task comment by ID along with its parent, attachments, and replies count.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -161,6 +158,9 @@ async def get_task_comment_by_id(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.get_comment_by_id(
             comment_id=valid_comment_id,
             user_id=user_id,
@@ -199,9 +199,6 @@ async def get_task_comment_replies(
     """
     Get all replies for a parent comment in a task.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_parent_id = validate_uuid(parent_comment_id, "parent_comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -213,6 +210,9 @@ async def get_task_comment_replies(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         items, meta = await service.get_comments_by_parent_id(
             parent_comment_id=valid_parent_id,
             user_id=user_id,
@@ -253,9 +253,6 @@ async def update_task_comment(
     """
     Update an existing task comment.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -267,6 +264,9 @@ async def update_task_comment(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.update_comment(
             comment_id=valid_comment_id,
             user_id=user_id,
@@ -304,9 +304,6 @@ async def delete_task_comment(
     """
     Delete a task comment.
     """
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -318,6 +315,9 @@ async def delete_task_comment(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.delete_comment(
             comment_id=valid_comment_id,
             user_id=user_id,
@@ -487,9 +487,6 @@ async def upload_comment_attachments(
     Upload one or more attachments associated with a comment.
     """
     logger.info("Received request to upload attachment(s) for comment %s on task %s", comment_id, task_id)
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -517,6 +514,9 @@ async def upload_comment_attachments(
         )
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.upload_comment_attachments(
             comment_id=valid_comment_id,
             task_id=valid_task_id,
@@ -556,9 +556,6 @@ async def get_comment_attachments(
     Retrieve all attachments associated with a comment.
     """
     logger.info("Received request to get attachments for comment %s on task %s", comment_id, task_id)
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
@@ -572,6 +569,9 @@ async def get_comment_attachments(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         res = await service.get_comment_attachments(
             comment_id=valid_comment_id,
             task_id=valid_task_id,
@@ -611,9 +611,6 @@ async def download_comment_attachment(
     Download a comment attachment file stream.
     """
     logger.info("Received request to download attachment %s on comment %s (task: %s)", attachment_id, comment_id, task_id)
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     valid_attachment_id = validate_uuid(attachment_id, "attachment_id")
     user_id = current_user.get("user_id")
@@ -628,6 +625,9 @@ async def download_comment_attachment(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         stream, filename, mime_type, size = await service.download_comment_attachment(
             attachment_id=valid_attachment_id,
             task_id=valid_task_id,
@@ -688,9 +688,6 @@ async def delete_comment_attachment(
     Delete comment attachment if authorized.
     """
     logger.info("Received request to delete attachment %s on comment %s (task: %s)", attachment_id, comment_id, task_id)
-    valid_task_id = await service.resolve_task_id(
-        task_id, current_user.get("organization_id")
-    )
     valid_comment_id = validate_uuid(comment_id, "comment_id")
     valid_attachment_id = validate_uuid(attachment_id, "attachment_id")
     user_id = current_user.get("user_id")
@@ -705,6 +702,9 @@ async def delete_comment_attachment(
         return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
 
     try:
+        valid_task_id = await service.resolve_task_id(
+            task_id, organization_id
+        )
         await service.delete_comment_attachment(
             attachment_id=valid_attachment_id,
             task_id=valid_task_id,

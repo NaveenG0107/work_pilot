@@ -1042,10 +1042,14 @@ class ProjectService:
                     .isoformat(timespec="seconds")
                     .replace("+00:00", "Z")
                 ),
+                task_id=item.task_id,
                 task_key=item.task_key,
                 title=item.title,
                 task_name=item.task_name,
+                user_story_id=item.user_story_id,
+                user_story_key=item.user_story_key,
                 user_story_name=item.user_story_name,
+                sprint_id=item.sprint_id,
                 sprint_name=item.sprint_name,
             )
             for item in audit_responses

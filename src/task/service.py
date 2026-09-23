@@ -718,6 +718,7 @@ class TaskService:
         resource_type: str = "task",
         resource_id: str | None = None,
         task_id: str | None = None,
+        sprint_id: str | None = None,
         details: str = "",
         audit_type: str = AuditLogType.ACTIVITY,
     ) -> None:
@@ -728,6 +729,7 @@ class TaskService:
             organization_id=organization_id,
             project_id=project_id,
             task_id=task_id,
+            sprint_id=sprint_id,
             resource_id=resource_id,
             details=details,
             audit_type=audit_type,
@@ -827,6 +829,7 @@ class TaskService:
             organization_id=organization_id,
             project_id=project_id,
             task_id=str(task.id),
+            sprint_id=str(task.sprint_id) if task.sprint_id else None,
             resource_id=str(task.id),
             action="created",
             details=f"The task '{task.title}' was created by {actor.username}",
@@ -1220,10 +1223,58 @@ class TaskService:
         if body.explicitly_set("assignee_id"):
             target = None if body.assignee_id is None or _is_nil(body.assignee_id) else str(body.assignee_id)
             if target != task.assignee_id:
-                changes.append(f"assignee changed from {task.assignee_id or 'nil'} to {target or 'nil'}")
+                old_assignee_name = None
+                if task.assignee_id:
+                    old_u = (
+                        await self.db.execute(
+                            select(User.full_name, User.username).where(User.id == task.assignee_id)
+                        )
+                    ).one_or_none()
+                    if old_u:
+                        old_assignee_name = old_u.full_name or old_u.username
+                new_assignee_name = None
+                if target:
+                    new_u = (
+                        await self.db.execute(
+                            select(User.full_name, User.username).where(User.id == target)
+                        )
+                    ).one_or_none()
+                    if new_u:
+                        new_assignee_name = new_u.full_name or new_u.username
+
+                if not task.assignee_id and target:
+                    changes.append(f"assigned to '{new_assignee_name or 'user'}'")
+                elif task.assignee_id and not target:
+                    changes.append(f"unassigned from '{old_assignee_name or 'user'}'")
+                else:
+                    changes.append(
+                        f"assignee changed from '{old_assignee_name or 'user'}' to '{new_assignee_name or 'user'}'"
+                    )
                 task.assignee_id = target
         if sprint_changing:
-            changes.append(f"sprint changed from {task.sprint_id or 'nil'} to {target_sprint_id or 'nil'}")
+            old_sprint_name = None
+            if task.sprint_id:
+                old_sp = (
+                    await self.db.execute(select(Sprint.name).where(Sprint.id == task.sprint_id))
+                ).scalar_one_or_none()
+                if old_sp:
+                    old_sprint_name = old_sp
+            new_sprint_name = None
+            if target_sprint_id:
+                new_sp = (
+                    await self.db.execute(select(Sprint.name).where(Sprint.id == target_sprint_id))
+                ).scalar_one_or_none()
+                if new_sp:
+                    new_sprint_name = new_sp
+
+            if not task.sprint_id and target_sprint_id:
+                changes.append(f"assigned to sprint '{new_sprint_name or 'Sprint'}'")
+            elif task.sprint_id and not target_sprint_id:
+                changes.append(f"removed from sprint '{old_sprint_name or 'Sprint'}'")
+            else:
+                changes.append(
+                    f"sprint changed from '{old_sprint_name or 'Sprint'}' to '{new_sprint_name or 'Sprint'}'"
+                )
             task.sprint_id = target_sprint_id
         if body.explicitly_set("user_story_id"):
             target_story = (
@@ -1232,12 +1283,39 @@ class TaskService:
                 else str(body.user_story_id)
             )
             if target_story != task.user_story_id:
-                changes.append(
-                    f"user story changed from {task.user_story_id or 'nil'} to {target_story or 'nil'}"
-                )
+                old_story_name = None
+                if task.user_story_id:
+                    old_st = (
+                        await self.db.execute(
+                            select(UserStory.title).where(UserStory.id == task.user_story_id)
+                        )
+                    ).scalar_one_or_none()
+                    if old_st:
+                        old_story_name = old_st
+                new_story_name = None
+                if target_story:
+                    new_st = (
+                        await self.db.execute(
+                            select(UserStory.title).where(UserStory.id == target_story)
+                        )
+                    ).scalar_one_or_none()
+                    if new_st:
+                        new_story_name = new_st
+
+                if not task.user_story_id and target_story:
+                    changes.append(f"assigned to user story '{new_story_name or 'user story'}'")
+                elif task.user_story_id and not target_story:
+                    changes.append(f"removed from user story '{old_story_name or 'user story'}'")
+                else:
+                    changes.append(
+                        f"user story changed from '{old_story_name or 'user story'}' to '{new_story_name or 'user story'}'"
+                    )
                 task.user_story_id = target_story
         if body.story_points is not None and body.story_points != task.story_points:
-            changes.append(f"story points changed from {task.story_points} to {body.story_points}")
+            if task.story_points is None:
+                changes.append(f"story points set to {body.story_points}")
+            else:
+                changes.append(f"story points changed from {task.story_points} to {body.story_points}")
             task.story_points = body.story_points
         if body.explicitly_set("due_date"):
             target_due = body.due_date
@@ -1288,6 +1366,7 @@ class TaskService:
             organization_id=organization_id,
             project_id=project_id,
             task_id=task_id,
+            sprint_id=str(task.sprint_id) if task.sprint_id else None,
             resource_id=task_id,
             action="updated",
             details=details,

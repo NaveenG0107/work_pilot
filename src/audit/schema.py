@@ -65,11 +65,13 @@ class AuditLogResponse(BaseModel):
     task_id: str | None = Field(default=None, exclude_if=omit_empty)
 
     user_story_id: str | None = Field(default=None, exclude_if=omit_empty)
+    user_story_key: str | None = Field(default=None, exclude_if=omit_empty)
 
     title: str | None = Field(default=None, exclude_if=omit_empty)
 
     task_name: str | None = Field(default=None, exclude_if=omit_empty)
     user_story_name: str | None = Field(default=None, exclude_if=omit_empty)
+    sprint_id: str | None = Field(default=None, exclude_if=omit_empty)
     sprint_name: str | None = Field(default=None, exclude_if=omit_empty)
 
     type: str | None = Field(default=None, exclude_if=omit_empty)

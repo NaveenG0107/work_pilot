@@ -804,7 +804,8 @@ class UserStoryService:
     async def _audit(self, *, user_id: str, organization_id: str, project_id: str,
                      action: str, resource_type: str, resource_id: str,
                      details: str, audit_type: str = AuditLogType.ACTIVITY,
-                     user_story_id: str | None = None) -> None:
+                     user_story_id: str | None = None,
+                     sprint_id: str | None = None) -> None:
         try:
             self.db.add(
                 AuditLog(
@@ -812,6 +813,7 @@ class UserStoryService:
                     organization_id=organization_id,
                     project_id=project_id,
                     user_story_id=user_story_id,
+                    sprint_id=sprint_id,
                     action=action,
                     resource_type=resource_type,
                     resource_id=resource_id,
@@ -970,6 +972,7 @@ class UserStoryService:
             organization_id=organization_id,
             project_id=project_id,
             user_story_id=str(story.id),
+            sprint_id=str(story.sprint_id) if story.sprint_id else None,
             action="created",
             resource_type="user_story",
             resource_id=str(story.id),
@@ -1109,7 +1112,15 @@ class UserStoryService:
         assignee_id = req.assignee_id
         if assignee_id is None and "assignee_id" in payload and payload["assignee_id"] is None:
             if existing.assignee_id:
-                changes.append(f"assignee changed from {existing.assignee_id} to nil")
+                old_assignee_name = None
+                old_u = (
+                    await self.db.execute(
+                        select(User.full_name, User.username).where(User.id == existing.assignee_id)
+                    )
+                ).one_or_none()
+                if old_u:
+                    old_assignee_name = old_u.full_name or old_u.username
+                changes.append(f"unassigned from '{old_assignee_name or 'user'}'")
             updates["assignee_id"] = None
         elif assignee_id:
             assignee = await self._user(assignee_id)
@@ -1135,10 +1146,24 @@ class UserStoryService:
                     "Assignee must be a member of the project",
                 )
 
-            old_assignee = existing.assignee_id or "nil"
+            old_assignee = existing.assignee_id
             new_assignee = assignee_id
             if old_assignee != new_assignee:
-                changes.append(f"assignee changed from {old_assignee} to {new_assignee}")
+                new_assignee_name = assignee.full_name or assignee.username or assignee.email
+                if not old_assignee:
+                    changes.append(f"assigned to '{new_assignee_name}'")
+                else:
+                    old_assignee_name = None
+                    old_u = (
+                        await self.db.execute(
+                            select(User.full_name, User.username).where(User.id == old_assignee)
+                        )
+                    ).one_or_none()
+                    if old_u:
+                        old_assignee_name = old_u.full_name or old_u.username
+                    changes.append(
+                        f"assignee changed from '{old_assignee_name or 'user'}' to '{new_assignee_name}'"
+                    )
             updates["assignee_id"] = assignee_id
 
         if "is_closed" in fields_to_update:
@@ -1150,7 +1175,10 @@ class UserStoryService:
         sprint_id = req.sprint_id
         if sprint_id is None and "sprint_id" in payload and payload["sprint_id"] is None:
             if existing.sprint_id:
-                changes.append(f"sprint changed from {existing.sprint_id} to nil")
+                old_sp_name = (
+                    await self.db.execute(select(Sprint.name).where(Sprint.id == existing.sprint_id))
+                ).scalar_one_or_none()
+                changes.append(f"removed from sprint '{old_sp_name or 'Sprint'}'")
             updates["sprint_id"] = None
         elif sprint_id:
             in_project = await self._sprint_in_project(sprint_id, project_id)
@@ -1160,10 +1188,23 @@ class UserStoryService:
                     "Sprint must belong to the same project",
                 )
 
-            old_sprint = existing.sprint_id or "nil"
+            old_sprint = existing.sprint_id
             new_sprint = sprint_id
             if old_sprint != new_sprint:
-                changes.append(f"sprint changed from {old_sprint} to {new_sprint}")
+                old_sp_name = None
+                if existing.sprint_id:
+                    old_sp_name = (
+                        await self.db.execute(select(Sprint.name).where(Sprint.id == existing.sprint_id))
+                    ).scalar_one_or_none()
+                new_sp_name = (
+                    await self.db.execute(select(Sprint.name).where(Sprint.id == sprint_id))
+                ).scalar_one_or_none()
+                if not old_sprint:
+                    changes.append(f"assigned to sprint '{new_sp_name or 'Sprint'}'")
+                else:
+                    changes.append(
+                        f"sprint changed from '{old_sp_name or 'Sprint'}' to '{new_sp_name or 'Sprint'}'"
+                    )
             updates["sprint_id"] = sprint_id
 
         if updates:
@@ -1191,6 +1232,7 @@ class UserStoryService:
             organization_id=organization_id,
             project_id=project_id,
             user_story_id=str(updated_story.id),
+            sprint_id=str(updated_story.sprint_id) if updated_story.sprint_id else None,
             action="updated",
             resource_type="user_story",
             resource_id=str(updated_story.id),
