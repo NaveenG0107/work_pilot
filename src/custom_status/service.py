@@ -5,7 +5,7 @@ from typing import Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from uuid6 import uuid7
@@ -514,6 +514,21 @@ class CustomStatusService:
                 custom_status.is_final = payload.is_final
                 updated = True
 
+        if payload.is_default is not None and payload.is_default != custom_status.is_default:
+            if payload.is_default:
+                await self.db.execute(
+                    update(CustomStatus)
+                    .where(
+                        CustomStatus.project_id == project_id,
+                        CustomStatus.id != custom_status.id,
+                        CustomStatus.deleted_at.is_(None),
+                    )
+                    .values(is_default=False)
+                )
+            changes.append(f"is_default changed from {custom_status.is_default} to {payload.is_default}")
+            custom_status.is_default = bool(payload.is_default)
+            updated = True
+
         now = datetime.now(timezone.utc)
         if updated:
             custom_status.updated_at = now
@@ -656,12 +671,42 @@ class CustomStatusService:
                 detail="Status not found",
             )
 
+        if custom_status.is_default:
+            logger.warning("Attempt to delete default custom status ID=%s in project %s", status_id, project_id)
+            exc = HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A default status cannot be deleted",
+            )
+            exc.code = "BUSINESS_RULE_VIOLATION"
+            raise exc
+
+        statuses_stmt = (
+            select(CustomStatus).where(
+                CustomStatus.project_id == project_id,
+                CustomStatus.deleted_at.is_(None),
+            )
+        )
+        statuses_res = await self.db.execute(statuses_stmt)
+        statuses = list(statuses_res.scalars().all())
+
+        if len(statuses) <= 1:
+            logger.warning("Attempt to delete only custom status ID=%s in project %s", status_id, project_id)
+            exc = HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The project's only status cannot be deleted",
+            )
+            exc.code = "BUSINESS_RULE_VIOLATION"
+            raise exc
+
         # 5. Validation: status cannot be deleted while assigned to active tasks
         task_count_stmt = (
             select(func.count(Task.id))
             .where(
                 Task.project_id == project_id,
-                Task.status == custom_status.name,
+                or_(
+                    Task.status == custom_status.name,
+                    Task.status_id == custom_status.id,
+                ),
                 Task.deleted_at.is_(None),
             )
         )
@@ -674,16 +719,18 @@ class CustomStatusService:
                 project_id,
                 task_count,
             )
-            raise HTTPException(
+            exc = HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="A status cannot be deleted while it is assigned to existing Tasks",
             )
+            exc.code = "BUSINESS_RULE_VIOLATION"
+            raise exc
 
         status_name = custom_status.name
         now = datetime.now(timezone.utc)
 
-        # 6. Delete the custom status
-        await self.db.delete(custom_status)
+        # 6. Delete the custom status (soft delete matching user_story_status)
+        custom_status.deleted_at = now
         await self.db.flush()
 
         # 7. Reorder remaining statuses to be strictly sequential (0 to N-1)
@@ -693,7 +740,11 @@ class CustomStatusService:
                 CustomStatus.project_id == project_id,
                 CustomStatus.deleted_at.is_(None),
             )
-            .order_by(CustomStatus.display_order.asc())
+            .order_by(
+                CustomStatus.display_order.asc(),
+                CustomStatus.created_at.asc(),
+                CustomStatus.id.asc(),
+            )
         )
         remaining_res = await self.db.execute(remaining_stmt)
         remaining_statuses = remaining_res.scalars().all()

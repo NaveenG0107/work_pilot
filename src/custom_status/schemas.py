@@ -42,6 +42,7 @@ class UpdateCustomStatusRequest(BaseModel):
     color: Optional[str] = Field(None)
     display_order: Optional[int] = Field(None, ge=0)
     is_final: Optional[bool] = Field(None)
+    is_default: Optional[bool] = Field(None, description="Whether status is the default status for the project")
 
     @field_validator("name")
     @classmethod

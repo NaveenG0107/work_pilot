@@ -151,11 +151,13 @@ class DashboardService:
             deadlines.append(
                 UpcomingDeadline(
                     id=task.id,
+                    task_id=task.id,
                     project_id=project.id,
                     project_name=project.name,
                     sprint_id=sprint.id if sprint else None,
                     sprint_name=sprint.name if sprint else None,
                     key=task.key,
+                    task_key=task.key,
                     title=task.title,
                     priority=task.priority,
                     due_date=due_date,

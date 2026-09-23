@@ -258,8 +258,12 @@ class ProjectActivityResponse(BaseModel):
     resource_id: str | None = Field(default=None, exclude_if=omit_empty)
     details: str | None = Field(default=None, exclude_if=omit_empty)
     timestamp: str
+    task_id: str | None = Field(default=None, exclude_if=omit_empty)
     task_key: str | None = Field(default=None, exclude_if=omit_empty)
     title: str | None = Field(default=None, exclude_if=omit_empty)
     task_name: str | None = Field(default=None, exclude_if=omit_empty)
+    user_story_id: str | None = Field(default=None, exclude_if=omit_empty)
+    user_story_key: str | None = Field(default=None, exclude_if=omit_empty)
     user_story_name: str | None = Field(default=None, exclude_if=omit_empty)
+    sprint_id: str | None = Field(default=None, exclude_if=omit_empty)
     sprint_name: str | None = Field(default=None, exclude_if=omit_empty)

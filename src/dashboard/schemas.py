@@ -56,11 +56,13 @@ class UpcomingDeadline(BaseModel):
     """An open project task due within the dashboard's next-48-hours window."""
 
     id: UUID
+    task_id: UUID | None = None
     project_id: UUID
     project_name: str
     sprint_id: UUID | None = None
     sprint_name: str | None = None
     key: str
+    task_key: str | None = None
     title: str
     priority: str
     due_date: datetime
