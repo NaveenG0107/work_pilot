@@ -53,6 +53,7 @@ class UpdateUserStoryStatusRequest(BaseModel):
     display_order: Optional[int] = Field(default=None, ge=0)
     is_closed: Optional[bool] = None
     is_final: Optional[bool] = None
+    is_default: Optional[bool] = None
 
     @field_validator("name")
     @classmethod

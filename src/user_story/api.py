@@ -97,7 +97,7 @@ async def create_user_story(
         )
 
     except Exception as exc:
-        logger.warning("Error creating user story: %s", exc)
+        logger.exception("Error creating user story: %s", exc)
         return failure(exc)
 
 
@@ -169,7 +169,7 @@ async def get_user_stories(
         )
 
     except Exception as exc:
-        logger.warning("Error fetching user stories: %s", exc)
+        logger.exception("Error fetching user stories: %s", exc)
         return failure(exc)
 
 

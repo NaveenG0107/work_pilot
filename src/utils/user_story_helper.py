@@ -6,7 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.user_story.service import UserStoryService, UserStoryServiceError
 from src.utils.core import (
     GoJSONResponse as JSONResponse,
@@ -77,8 +77,10 @@ def validation_message(exc: RequestValidationError, method: str) -> str:
     return "Invalid request payload."
 
 
-def get_user_story_service(db: AsyncSession = Depends(get_db)) -> UserStoryService:
-    return UserStoryService(db)
+def get_user_story_service(
+    db: AsyncSession = Depends(get_db), redis=Depends(get_redis)
+) -> UserStoryService:
+    return UserStoryService(db, redis)
 
 
 def success(

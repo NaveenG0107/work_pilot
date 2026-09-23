@@ -142,6 +142,8 @@ class UpdateUserRequest(BaseModel):
     cover_img_url: str | None = None
     timezone: str | None = None
 
+    model_config = ConfigDict(extra="forbid")
+
 
 class OrganizationSummary(BaseModel):
     id: UUID

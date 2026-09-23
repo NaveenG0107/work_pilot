@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from uuid6 import uuid7
@@ -296,6 +296,23 @@ class UserStoryStatusService:
         if request.is_final is not None and request.is_final != status_model.is_final:
             status_model.is_final = bool(request.is_final)
             status_model.is_closed = bool(request.is_final)
+            updated = True
+
+        if request.is_default is not None and request.is_default != status_model.is_default:
+            # A status explicitly changed to non-default must persist as false.
+            # If a status is promoted to default, clear the prior project default
+            # so a project cannot expose multiple defaults.
+            if request.is_default:
+                await self.db.execute(
+                    update(UserStoryStatus)
+                    .where(
+                        UserStoryStatus.project_id == str(project.id),
+                        UserStoryStatus.id != status_model.id,
+                        UserStoryStatus.deleted_at.is_(None),
+                    )
+                    .values(is_default=False)
+                )
+            status_model.is_default = bool(request.is_default)
             updated = True
 
         if updated:
