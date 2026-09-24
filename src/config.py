@@ -31,3 +31,18 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(
 
 if not JWT_SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY is not configured")
+
+
+# Email provider config (Brevo primary, Resend fallback).
+# Leave empty until credentials are provisioned.
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+BREVO_FROM_EMAIL = os.getenv("BREVO_FROM_EMAIL", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "")
+
+# CORS configuration
+CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
+if CORS_ORIGINS_RAW.strip() == "*":
+    CORS_ORIGINS = ["*"]
+else:
+    CORS_ORIGINS = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip()]

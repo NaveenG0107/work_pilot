@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator  # type: ignore
 
 
 class CountryResponse(BaseModel):
@@ -8,9 +8,9 @@ class CountryResponse(BaseModel):
     name: str
     iso2: str
     iso3: str
-    phone_code: str | None = None
+    phone_code: str = ""
     timezone: list[str]
-    flag_emoji: str | None = None
+    flag_emoji: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -23,6 +23,10 @@ class CountryResponse(BaseModel):
         # These fields are non-pointer strings in the Go response model.
         return value or ""
 
+    @field_validator("updated_at", mode="before")
+    @classmethod
+    def serialize_null_time_like_go(cls, value: datetime | None) -> datetime:
+        return value or datetime.min.replace(tzinfo=timezone.utc)
 
 class CountriesResponse(BaseModel):
     success: bool
@@ -33,13 +37,17 @@ class CountriesResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    version: str
     timestamp: str
+    version: str
 
 
 class HealthDependencies(BaseModel):
     database: str
+    redis: str
 
 
-class FullHealthResponse(HealthResponse):
+class FullHealthResponse(BaseModel):
     dependencies: HealthDependencies
+    status: str
+    timestamp: str
+    version: str

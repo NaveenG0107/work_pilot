@@ -2,6 +2,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import inspect, text, UUID
 
 from alembic import context
 
@@ -34,6 +35,9 @@ database_url = os.getenv("DATABASE_URL")
 if not database_url:
     raise ValueError("DATABASE_URL is not configured")
 
+if not os.path.exists("/.dockerenv") and "@host.docker.internal" in database_url:
+    database_url = database_url.replace("@host.docker.internal", "@localhost")
+
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.
@@ -54,6 +58,13 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def include_object(object, name, type_, reflected, compare_to):
+    # Functional expression indexes (to_tsvector) cannot be compared accurately by Alembic
+    if type_ == "index" and name and name.endswith("_fts"):
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -72,6 +83,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -92,8 +104,32 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # The retired consolidated initial migration reused an original ID.
+        # Do not interpret its UUID schema as the original VARCHAR schema and
+        # replay migrations that have already been incorporated into it.
+        inspector = inspect(connection)
+        if inspector.has_table("alembic_version"):
+            revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+            if revisions == ["a72c1d9e4f10"] and inspector.has_table("users"):
+                columns = inspector.get_columns("users")
+                consolidated = any(c["name"] == "id" and isinstance(c["type"], UUID) for c in columns)
+                requested = context.get_revision_argument()
+                cli_command = getattr(getattr(config, "cmd_opts", None), "cmd", (None,))[0]
+                corrective_stamp = (
+                    requested == "ab93e7d10f24"
+                    and getattr(cli_command, "__name__", None) == "stamp"
+                )
+                if consolidated and not corrective_stamp:
+                    raise RuntimeError(
+                        "Revision a72c1d9e4f10 belongs to the retired consolidated history. "
+                        "Validate that schema against the former initial migration, then run "
+                        "alembic stamp ab93e7d10f24 before alembic upgrade head."
+                    )
+        connection.rollback()
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

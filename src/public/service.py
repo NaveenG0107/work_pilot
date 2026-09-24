@@ -1,13 +1,14 @@
+from asyncio import Lock
 from datetime import timedelta
-from threading import RLock
 from time import monotonic
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.config import get_logger
 from src.public.models import Country
-from src.public.schemas import CountryResponse
+from src.public.schema import CountryResponse
 
 logger = get_logger(__name__)
 
@@ -16,31 +17,31 @@ class CountryCache:
     def __init__(self, ttl: timedelta = timedelta(hours=24)):
         self.ttl_seconds = ttl.total_seconds()
         self.countries: tuple[CountryResponse, ...] = ()
-        self.fetched_at = 0.0
-        self.lock = RLock()
+        self.fetched_at: float | None = None
+        self.lock = Lock()
 
     def is_fresh(self) -> bool:
-        return bool(self.countries) and (
+        return self.fetched_at is not None and (
             monotonic() - self.fetched_at < self.ttl_seconds
         )
 
 
 class PublicService:
-    def __init__(self, db: Session, country_cache: CountryCache):
+    def __init__(self, db: AsyncSession, country_cache: CountryCache):
         self.db = db
         self.country_cache = country_cache
 
-    def get_countries(
+    async def get_countries(
         self,
         name: str | None = None,
     ) -> list[CountryResponse]:
         try:
-            with self.country_cache.lock:
+            async with self.country_cache.lock:
                 if self.country_cache.is_fresh():
                     countries = list(self.country_cache.countries)
                 else:
                     stmt = select(Country).order_by(Country.name.asc())
-                    result = self.db.execute(stmt)
+                    result = await self.db.execute(stmt)
                     rows = result.scalars().all()
                     countries = [
                         CountryResponse.model_validate(country) for country in rows
@@ -78,14 +79,14 @@ class PublicService:
 
             raise RuntimeError("Failed to process countries") from exc
 
-    def get_country_by_id(
+    async def get_country_by_id(
         self,
         country_id: str,
     ) -> CountryResponse:
         try:
             stmt = select(Country).where(Country.id == country_id)
 
-            result = self.db.execute(stmt)
+            result = await self.db.execute(stmt)
 
             country = result.scalar_one_or_none()
 
