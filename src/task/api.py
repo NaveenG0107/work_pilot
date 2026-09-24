@@ -166,9 +166,9 @@ def auth_context(request: Request) -> tuple[str, str, str]:
         )
     if organization_id is None:
         raise TaskServiceError(
-            500,
-            "UNAUTHORIZED",
-            "Internal server error: missing organization context",
+            403,
+            "ORGANIZATION_REQUIRED",
+            "Organization is required",
         )
     return parse_uuid(str(user_id)), parse_uuid(str(organization_id)), str(role)
 

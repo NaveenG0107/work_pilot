@@ -25,6 +25,11 @@ from src.utils.core import GoJSONResponse as JSONResponse, authenticate_request,
 logger = get_logger(__name__)
 
 
+class OrganizationRequiredError(Exception):
+    """Raised when the request is authenticated but has no organization."""
+    pass
+
+
 _ACTIVITY_TYPES = ["view", "activity"]
 
 
@@ -147,7 +152,7 @@ def get_auth_context(
         raise ValueError("Authenticated user is required")
 
     if not organization_id:
-        raise ValueError("Organization is required")
+        raise OrganizationRequiredError("Organization is required")
 
     return str(user_id), str(organization_id)
 
@@ -234,6 +239,24 @@ async def get_audit_logs(
             message=("Activity received successfully"),
             data=audits,
             meta=pagination,
+        )
+
+    except OrganizationRequiredError as exc:
+        logger.warning(
+            "Audit request missing organization: %s",
+            exc,
+        )
+
+        return JSONResponse(
+            status_code=(status.HTTP_403_FORBIDDEN),
+            content={
+                "success": False,
+                "error": {
+                    "code": "ORGANIZATION_REQUIRED",
+                    "status_code": 403,
+                    "message": str(exc),
+                },
+            },
         )
 
     except ValueError as exc:
