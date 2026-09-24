@@ -53,7 +53,7 @@ async def create_task_comment(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -103,7 +103,7 @@ async def get_task_comments(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -155,7 +155,7 @@ async def get_task_comment_by_id(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -207,7 +207,7 @@ async def get_task_comment_replies(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -261,7 +261,7 @@ async def update_task_comment(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -312,7 +312,7 @@ async def delete_task_comment(
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
     if not organization_id:
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -497,7 +497,7 @@ async def upload_comment_attachments(
 
     if not organization_id:
         logger.error("Organization context required for uploading attachment")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     all_uploaded: list[UploadFile] = []
     if file:
@@ -566,7 +566,7 @@ async def get_comment_attachments(
 
     if not organization_id:
         logger.error("Organization context required for retrieving comment attachments")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -622,7 +622,7 @@ async def download_comment_attachment(
 
     if not organization_id:
         logger.error("Organization context required for downloading attachment")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(
@@ -699,7 +699,7 @@ async def delete_comment_attachment(
 
     if not organization_id:
         logger.error("Organization context required for deleting attachment")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         valid_task_id = await service.resolve_task_id(

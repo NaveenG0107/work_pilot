@@ -54,7 +54,7 @@ async def create_custom_status(
 
     if not organization_id:
         logger.error("Organization context required for creating custom status")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         res = await service.create_status(
@@ -104,7 +104,7 @@ async def get_custom_statuses(
 
     if not organization_id:
         logger.error("Organization context required for retrieving custom statuses")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         res = await service.get_statuses(
@@ -156,7 +156,7 @@ async def update_custom_status(
 
     if not organization_id:
         logger.error("Organization context required for updating custom status")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         res = await service.update_status(
@@ -209,7 +209,7 @@ async def delete_custom_status(
 
     if not organization_id:
         logger.error("Organization context required for deleting custom status")
-        return error("Organization context required", status_code=status.HTTP_403_FORBIDDEN, code="FORBIDDEN")
+        return error("Organization is required", status_code=status.HTTP_403_FORBIDDEN, code="ORGANIZATION_REQUIRED")
 
     try:
         await service.delete_status(

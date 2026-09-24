@@ -956,9 +956,9 @@ async def get_user_by_id(user_id: str, current_user: dict = Depends(get_current_
 
         if not organization_id:
             return error_response(
-                ErrorCode.ErrForbidden,
-                "Internal server error: missing organization context",
-                status_code=500,
+                "ORGANIZATION_REQUIRED",
+                "Organization is required",
+                status_code=403,
             )
 
         try:

@@ -48,11 +48,17 @@ async def get_upcoming_deadlines(
     """Retrieve this project's open tasks due in the next 48 hours."""
     user_id = current_user.get("user_id")
     organization_id = current_user.get("organization_id")
-    if not user_id or not organization_id:
+    if not user_id:
         return error(
             "Authentication required",
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="UNAUTHORIZED",
+        )
+    if not organization_id:
+        return error(
+            "Organization is required",
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="ORGANIZATION_REQUIRED",
         )
 
     try:

@@ -72,9 +72,13 @@ async def global_search(
     try:
         user_id = getattr(request.state, "user_id", None)
         organization_id = getattr(request.state, "organization_id", None)
-        if not user_id or not organization_id:
+        if not user_id:
             raise SearchServiceError(
                 401, "UNAUTHORIZED", "Authentication required"
+            )
+        if not organization_id:
+            raise SearchServiceError(
+                403, "ORGANIZATION_REQUIRED", "Organization is required"
             )
         result = await service.global_search(
             str(user_id), str(organization_id), q
