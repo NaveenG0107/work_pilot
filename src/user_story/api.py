@@ -237,7 +237,7 @@ async def update_user_story(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -265,7 +265,7 @@ async def update_user_story_status(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -292,7 +292,7 @@ async def delete_user_story(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -319,7 +319,7 @@ async def add_user_story_favorite(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
 
         logger.info("Adding user story id=%s to favorites for user_id=%s", user_story_id, user_id)
@@ -345,7 +345,7 @@ async def remove_user_story_favorite(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
 
         logger.info("Removing user story id=%s from favorites for user_id=%s", user_story_id, user_id)
@@ -534,7 +534,7 @@ async def create_user_story_comment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -575,7 +575,7 @@ async def upload_user_story_draft_comment_attachments(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         files = await _comment_attachment_files(request)
         if not files:
             raise UserStoryServiceError(400, "BAD_REQUEST", "Missing file(s) in request payload (use form-data keys 'file' or 'files')")
@@ -599,7 +599,7 @@ async def download_user_story_draft_comment_attachment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         attachment_id = validated_uuid(attachment_id)
         stream, filename, mime_type, size = await service.download_draft_comment_attachment(
             attachment_id, user_story_id, project_id, request.state.user_id,
@@ -629,7 +629,7 @@ async def delete_user_story_draft_comment_attachment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         attachment_id = validated_uuid(attachment_id)
         await service.delete_draft_comment_attachment(
             attachment_id, user_story_id, project_id, request.state.user_id,
@@ -652,7 +652,7 @@ async def upload_user_story_comment_attachments(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         comment_id = validated_uuid(comment_id)
         files = await _comment_attachment_files(request)
         if not files:
@@ -677,7 +677,7 @@ async def get_user_story_comment_attachments(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         comment_id = validated_uuid(comment_id)
         attachments = await service.get_comment_attachments(
             comment_id, user_story_id, project_id, request.state.user_id,
@@ -699,7 +699,7 @@ async def get_user_story_comments(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
 
@@ -727,7 +727,7 @@ async def get_user_story_comment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         comment_id = validated_uuid(comment_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
@@ -758,7 +758,7 @@ async def get_user_story_comment_replies(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         parent_comment_id = validated_uuid(parent_comment_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
@@ -788,7 +788,7 @@ async def update_user_story_comment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         comment_id = validated_uuid(comment_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id
@@ -817,7 +817,7 @@ async def delete_user_story_comment(
 ):
     try:
         project_id = validated_uuid(project_id)
-        user_story_id = validated_uuid(user_story_id)
+        user_story_id = validated_story_identifier(user_story_id)
         comment_id = validated_uuid(comment_id)
         user_id = request.state.user_id
         org_id = request.state.organization_id

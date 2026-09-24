@@ -180,6 +180,13 @@ def parse_uuid(value: str) -> str:
         raise TaskServiceError(400, "BAD_REQUEST", "Invalid ID format") from exc
 
 
+def validated_task_identifier(value: str) -> str:
+    identifier = str(value or "").strip()
+    if not identifier:
+        raise TaskServiceError(400, "BAD_REQUEST", "Task ID or Task Key is required")
+    return identifier
+
+
 def dump(value: Any) -> Any:
     if isinstance(value, list):
         return [dump(item) for item in value]
@@ -425,11 +432,7 @@ async def get_task_by_id(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = task_id.strip()
-        if not task_id:
-            raise TaskServiceError(
-                400, "BAD_REQUEST", "Task ID or Task Key is required"
-            )
+        task_id = validated_task_identifier(task_id)
         task = await service.get(
             project_id, task_id, user_id, organization_id, role
         )
@@ -454,7 +457,7 @@ async def update_task(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         updated_id = await service.update(
             project_id, task_id, body, user_id, organization_id, role
         )
@@ -480,7 +483,7 @@ async def restore_task(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         await service.restore(project_id, task_id, user_id, organization_id, role)
         return success_response("Successfully Restored Task")
     except Exception as exc:
@@ -503,7 +506,7 @@ async def clone_task(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         task = await service.clone(
             project_id, task_id, body, user_id, organization_id, role
         )
@@ -527,7 +530,7 @@ async def assign_to_me(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         task = await service.assign_to_me(
             project_id, task_id, user_id, organization_id, role
         )
@@ -557,7 +560,7 @@ async def attach_label_to_task(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         label_id = parse_uuid(label_id)
         await service.attach_label(
             project_id, task_id, label_id, user_id, organization_id, role
@@ -583,7 +586,7 @@ async def remove_label_from_task(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         label_id = parse_uuid(label_id)
         removed_id = await service.remove_label(
             project_id, task_id, label_id, user_id, organization_id, role
@@ -611,7 +614,7 @@ async def add_task_favorite(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         favorite = await service.favorite(
             project_id, task_id, user_id, organization_id, role
         )
@@ -640,7 +643,7 @@ async def remove_task_favorite(
     try:
         user_id, organization_id, role = auth_context(request)
         project_id = parse_uuid(project_id)
-        task_id = parse_uuid(task_id)
+        task_id = validated_task_identifier(task_id)
         result = await service.unfavorite(
             project_id, task_id, user_id, organization_id, role
         )
@@ -702,6 +705,7 @@ async def upload_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = validated_task_identifier(task_id)
         try:
             form = await request.form()
         except Exception as exc:
@@ -773,6 +777,7 @@ async def get_attachments(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = validated_task_identifier(task_id)
         attachments = await service.get_attachments(project_id, task_id, user_id)
         return success_response(
             "Attachments retrieved successfully", dump(attachments)
@@ -796,6 +801,7 @@ async def download_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = validated_task_identifier(task_id)
         attachment_id = parse_uuid(attachment_id)
         content, filename, mime_type, size = await service.download_attachment(
             project_id, task_id, attachment_id, user_id
@@ -834,6 +840,7 @@ async def delete_attachment(
     try:
         user_id, _, _ = auth_context(request)
         project_id = parse_uuid(project_id)
+        task_id = validated_task_identifier(task_id)
         attachment_id = parse_uuid(attachment_id)
         await service.delete_attachment(project_id, task_id, attachment_id, user_id)
         return success_response("Attachment deleted successfully")

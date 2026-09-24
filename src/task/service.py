@@ -1094,6 +1094,7 @@ class TaskService:
             )
         is_pm_or_admin = await self._has_permission(project, actor, "projects", "modify")
         task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         original_story_id = task.user_story_id
 
         if body.title is not None and not 3 <= len(body.title) <= 200:
@@ -1599,6 +1600,7 @@ class TaskService:
         )
         try:
             task = await self._task(task_id, project_id, include_deleted=True)
+            task_id = str(task.id)
         except TaskServiceError as exc:
             if exc.status_code == 404:
                 raise TaskServiceError(
@@ -1719,11 +1721,8 @@ class TaskService:
         organization_id: str,
         role: str = "",
     ) -> TaskResponse:
-        task = await self._task(task_id)
-        if task.project_id != project_id:
-            raise TaskServiceError(
-                403, "FORBIDDEN", "Task does not belong to the specified project"
-            )
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         project, actor = await self._check_authorization(
             project_id, user_id, "You do not have permission to view tasks in this project"
         )
@@ -1786,6 +1785,7 @@ class TaskService:
                 "You do not have permission to modify task labels in this project",
             )
         task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         label = await self._label(project_id, label_id)
         if label_id in {str(item.id) for item in task.labels}:
             return
@@ -1826,6 +1826,7 @@ class TaskService:
                 "You do not have permission to modify task labels in this project",
             )
         task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         label = await self._label(project_id, label_id)
         attached = next((item for item in task.labels if str(item.id) == label_id), None)
         if attached is None:
@@ -1863,6 +1864,7 @@ class TaskService:
         role: str = "",
     ) -> FavoriteResponse:
         task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         existing = (
             await self.db.execute(
                 select(Favorite.id).where(
@@ -1918,7 +1920,8 @@ class TaskService:
         organization_id: str,
         role: str = "",
     ) -> RemoveFavoriteResponse:
-        await self._task(task_id, project_id)
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         favorite = (
             await self.db.execute(
                 select(Favorite).where(

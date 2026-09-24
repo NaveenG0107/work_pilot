@@ -1060,6 +1060,7 @@ class UserStoryService:
             )
 
         existing = await self._story(user_story_id, project_id)
+        user_story_id = str(existing.id)
 
         changed_by = user.username or user.full_name or user.email or str(user_id)
         changes: list[str] = []
@@ -1265,6 +1266,7 @@ class UserStoryService:
             )
 
         existing = await self._story(user_story_id, project_id)
+        user_story_id = str(existing.id)
 
         await self.db.execute(
             UserStory.__table__.update()
@@ -1530,7 +1532,8 @@ class UserStoryService:
                 "You do not have permission to update user stories in this project",
             )
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
         status = await self._status_by_id(req.status_id, project_id)
 
         await self.db.execute(
@@ -1570,6 +1573,7 @@ class UserStoryService:
         logger.info("Service: Adding user_story_id=%s to favorites for user_id=%s", user_story_id, user_id)
 
         story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         existing = (
             await self.db.execute(
@@ -1621,7 +1625,8 @@ class UserStoryService:
     ) -> RemoveFavoriteResponse:
         logger.info("Service: Removing user_story_id=%s from favorites for user_id=%s", user_story_id, user_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         fav = (
             await self.db.execute(
@@ -1956,6 +1961,7 @@ class UserStoryService:
         logger.info("Service: Creating comment for user_story_id=%s by user_id=%s", user_story_id, user_id)
 
         story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         has_comment = await self.check_permission(user_id, project_id, "comments", "comment")
         has_add = await self.check_permission(user_id, project_id, "comments", "add")
@@ -2075,7 +2081,8 @@ class UserStoryService:
         user_id: str, organization_id: str, comment_id: str | None = None,
     ):
         """Use the shared comments attachment implementation for user stories."""
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
         if comment_id:
             comment = (
                 await self.db.execute(
@@ -2112,7 +2119,8 @@ class UserStoryService:
     async def get_comment_attachments(
         self, comment_id: str, user_story_id: str, project_id: str, user_id: str,
     ) -> List[dict]:
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
         if not await self.check_permission(user_id, project_id, "comments", "view"):
             raise UserStoryServiceError(403, ErrorCode.ErrForbidden.value, "You do not have permission to view comments in this project")
         comment = (
@@ -2142,7 +2150,8 @@ class UserStoryService:
     async def download_draft_comment_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
     ):
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
         attachment = (
             await self.db.execute(
                 select(CommentAttachment).where(
@@ -2161,7 +2170,8 @@ class UserStoryService:
     async def delete_draft_comment_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
     ) -> None:
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
         attachment = (
             await self.db.execute(
                 select(CommentAttachment).where(
@@ -2188,7 +2198,8 @@ class UserStoryService:
     ) -> Tuple[List[CommentResponse], PaginationResponse]:
         logger.info("Service: Fetching comments for user_story_id=%s, page=%d", user_story_id, page)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         has_perm = await self.check_permission(user_id, project_id, "comments", "view")
         if not has_perm:
@@ -2284,7 +2295,8 @@ class UserStoryService:
     ) -> CommentResponse:
         logger.info("Service: Fetching comment_id=%s for user_story_id=%s", comment_id, user_story_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         comment = (
             await self.db.execute(
@@ -2344,7 +2356,8 @@ class UserStoryService:
     ) -> Tuple[List[CommentResponse], PaginationResponse]:
         logger.info("Service: Fetching replies for parent_comment_id=%s, user_story_id=%s", parent_comment_id, user_story_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         offset = (max(1, page) - 1) * max(1, page_size)
         total = (
@@ -2418,7 +2431,8 @@ class UserStoryService:
     ) -> CommentResponse:
         logger.info("Service: Updating comment_id=%s for user_story_id=%s by user_id=%s", comment_id, user_story_id, user_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         comment = (
             await self.db.execute(
@@ -2485,7 +2499,8 @@ class UserStoryService:
     ) -> None:
         logger.info("Service: Deleting comment_id=%s from user_story_id=%s by user_id=%s", comment_id, user_story_id, user_id)
 
-        await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id)
+        user_story_id = str(story.id)
 
         comment = (
             await self.db.execute(
