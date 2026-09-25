@@ -16,7 +16,13 @@ class Label(Base):
     __table_args__ = (
         Index("idx_labels_deleted_at", "deleted_at"),
         Index("idx_labels_project_id", "project_id"),
-        Index("idx_project_label_name", "project_id", "name", unique=True),
+        Index(
+            "idx_project_label_name",
+            "project_id",
+            "name",
+            unique=True,
+            postgresql_where=Column("deleted_at").is_(None),
+        ),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

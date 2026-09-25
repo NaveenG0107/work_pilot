@@ -1,7 +1,7 @@
 import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.auth.models import User
 from src.config import get_logger
@@ -67,7 +67,7 @@ class WorkItemService:
             User.id == user_id,
             User.deleted_at.is_(None)
         ).options(
-            selectinload(User.role).selectinload(Role.permissions)
+            joinedload(User.role).selectinload(Role.permissions)
         )
 
         user = (await self.db.execute(user_query)).scalar_one_or_none()
@@ -131,11 +131,11 @@ class WorkItemService:
                 UserStory.serial_number == numeric_id,
                 UserStory.deleted_at.is_(None)
             ).options(
-                selectinload(UserStory.project),
-                selectinload(UserStory.sprint),
-                selectinload(UserStory.assignee).selectinload(User.role),
-                selectinload(UserStory.reporter).selectinload(User.role),
-                selectinload(UserStory.status)
+                joinedload(UserStory.project),
+                joinedload(UserStory.sprint),
+                joinedload(UserStory.assignee).joinedload(User.role),
+                joinedload(UserStory.reporter).joinedload(User.role),
+                joinedload(UserStory.status)
             )
             story = (await self.db.execute(story_query)).scalar_one_or_none()
 
@@ -145,11 +145,11 @@ class WorkItemService:
                     Task.serial_number == numeric_id,
                     Task.deleted_at.is_(None)
                 ).options(
-                    selectinload(Task.project),
-                    selectinload(Task.sprint),
-                    selectinload(Task.user_story),
-                    selectinload(Task.assignee).selectinload(User.role),
-                    selectinload(Task.reporter).selectinload(User.role),
+                    joinedload(Task.project),
+                    joinedload(Task.sprint),
+                    joinedload(Task.user_story),
+                    joinedload(Task.assignee).joinedload(User.role),
+                    joinedload(Task.reporter).joinedload(User.role),
                     selectinload(Task.labels)
                 )
                 task = (await self.db.execute(task_query)).scalar_one_or_none()
@@ -161,11 +161,11 @@ class WorkItemService:
                     UserStory.deleted_at.is_(None),
                     (UserStory.key.ilike(upper_key)) | (UserStory.key.ilike(param_str))
                 ).options(
-                    selectinload(UserStory.project),
-                    selectinload(UserStory.sprint),
-                    selectinload(UserStory.assignee).selectinload(User.role),
-                    selectinload(UserStory.reporter).selectinload(User.role),
-                    selectinload(UserStory.status)
+                    joinedload(UserStory.project),
+                    joinedload(UserStory.sprint),
+                    joinedload(UserStory.assignee).joinedload(User.role),
+                    joinedload(UserStory.reporter).joinedload(User.role),
+                    joinedload(UserStory.status)
                 )
                 story = (await self.db.execute(story_query)).scalar_one_or_none()
             else:
@@ -174,11 +174,11 @@ class WorkItemService:
                     Task.deleted_at.is_(None),
                     (Task.key.ilike(upper_key)) | (Task.key.ilike(param_str))
                 ).options(
-                    selectinload(Task.project),
-                    selectinload(Task.sprint),
-                    selectinload(Task.user_story),
-                    selectinload(Task.assignee).selectinload(User.role),
-                    selectinload(Task.reporter).selectinload(User.role),
+                    joinedload(Task.project),
+                    joinedload(Task.sprint),
+                    joinedload(Task.user_story),
+                    joinedload(Task.assignee).joinedload(User.role),
+                    joinedload(Task.reporter).joinedload(User.role),
                     selectinload(Task.labels)
                 )
                 task = (await self.db.execute(task_query)).scalar_one_or_none()
@@ -305,11 +305,11 @@ class WorkItemService:
             Task.deleted_at.is_(None),
             Task.key.ilike(key.strip())
         ).options(
-            selectinload(Task.project),
-            selectinload(Task.sprint),
-            selectinload(Task.user_story),
-            selectinload(Task.assignee).selectinload(User.role),
-            selectinload(Task.reporter).selectinload(User.role),
+            joinedload(Task.project),
+            joinedload(Task.sprint),
+            joinedload(Task.user_story),
+            joinedload(Task.assignee).joinedload(User.role),
+            joinedload(Task.reporter).joinedload(User.role),
             selectinload(Task.labels)
         )
         task = (await self.db.execute(task_query)).scalar_one_or_none()
@@ -357,11 +357,11 @@ class WorkItemService:
             UserStory.deleted_at.is_(None),
             UserStory.key.ilike(key.strip())
         ).options(
-            selectinload(UserStory.project),
-            selectinload(UserStory.sprint),
-            selectinload(UserStory.assignee).selectinload(User.role),
-            selectinload(UserStory.reporter).selectinload(User.role),
-            selectinload(UserStory.status)
+            joinedload(UserStory.project),
+            joinedload(UserStory.sprint),
+            joinedload(UserStory.assignee).joinedload(User.role),
+            joinedload(UserStory.reporter).joinedload(User.role),
+            joinedload(UserStory.status)
         )
         story = (await self.db.execute(story_query)).scalar_one_or_none()
         if not story:

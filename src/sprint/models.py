@@ -13,6 +13,7 @@ class Sprint(Base):
         Index("idx_sprints_project_id", "project_id"),
         Index("idx_sprints_deleted_at", "deleted_at"),
         Index("idx_sprints_fts", text("to_tsvector('english', coalesce(name, '') || ' ' || coalesce(goal, ''))"), postgresql_using="gin"),
+        Index("idx_sprints_proj_created_at", "project_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

@@ -10,7 +10,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.task.schema import (
     TASK_PRIORITIES,
     TASK_TYPES,
@@ -57,8 +57,11 @@ router = APIRouter(
 )
 
 
-def get_task_service(db: AsyncSession = Depends(get_db)) -> TaskService:
-    return TaskService(db)
+def get_task_service(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> TaskService:
+    return TaskService(db, redis)
 
 
 def field_label(field: object) -> str:

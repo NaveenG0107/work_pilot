@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from uuid6 import uuid7
 
 from src.audit.models import AuditLog
@@ -40,7 +40,7 @@ class LabelService:
                 ProjectMember.user_id == user.id,
                 ProjectMember.deleted_at.is_(None),
             )
-            .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
+            .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
         result = await self.db.execute(stmt)
         member = result.scalar_one_or_none()
@@ -80,7 +80,7 @@ class LabelService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -108,77 +108,55 @@ class LabelService:
         name = payload.name.strip().lower()
         color = payload.color.strip()
 
-        # 3. Uniqueness & Soft-Delete Check
+        # 3. Uniqueness Check (among active records)
         stmt = select(Label).where(
             Label.project_id == project_id,
             func.lower(Label.name) == name,
+            Label.deleted_at.is_(None),
         )
         res = await self.db.execute(stmt)
-        existing_label = res.scalar_one_or_none()
+        if res.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Label name already exists in this project",
+            )
 
         now = datetime.now(timezone.utc)
         project_name = project.name or project_id
         user_name = user.full_name or user.username or user_id
 
-        if existing_label:
-            if existing_label.deleted_at is None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Label name already exists in this project",
-                )
+        # 4. Create new label
+        label = Label(
+            id=str(uuid7()),
+            project_id=project_id,
+            name=name,
+            color=color,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(label)
 
-            # Restore the soft-deleted label and update fields
-            existing_label.deleted_at = None
-            existing_label.color = color
-            existing_label.updated_at = now
-            label = existing_label
-
-            audit_log = AuditLog(
-                id=str(uuid7()),
-                user_id=user_id,
-                organization_id=str(project.organization_id),
-                project_id=project_id,
-                action="restored",
-                resource_type="label",
-                resource_id=label.id,
-                details=f"Label '{label.name}' restored for project '{project_name}' by {user_name}",
-                type="activity",
-                created_at=now,
-            )
-            self.db.add(audit_log)
-        else:
-            # 4. Create new label
-            label = Label(
-                id=str(uuid7()),
-                project_id=project_id,
-                name=name,
-                color=color,
-                created_at=now,
-                updated_at=now,
-            )
-            self.db.add(label)
-
-            # 5. Audit Logging
-            audit_log = AuditLog(
-                id=str(uuid7()),
-                user_id=user_id,
-                organization_id=str(project.organization_id),
-                project_id=project_id,
-                action="created",
-                resource_type="label",
-                resource_id=label.id,
-                details=f"Label '{label.name}' created for project '{project_name}' by {user_name}",
-                type="activity",
-                created_at=now,
-            )
-            self.db.add(audit_log)
+        # 5. Audit Logging
+        audit_log = AuditLog(
+            id=str(uuid7()),
+            user_id=user_id,
+            organization_id=str(project.organization_id),
+            project_id=project_id,
+            action="created",
+            resource_type="label",
+            resource_id=label.id,
+            details=f"Label '{label.name}' created for project '{project_name}' by {user_name}",
+            type="activity",
+            created_at=now,
+        )
+        self.db.add(audit_log)
 
         try:
             await self.db.commit()
             await self.db.refresh(label)
         except Exception as exc:
             await self.db.rollback()
-            logger.error("Failed to commit create/restore label: %s", exc)
+            logger.error("Failed to commit create label: %s", exc)
             raise exc
 
         return LabelResponse.model_validate(label)
@@ -198,7 +176,7 @@ class LabelService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()

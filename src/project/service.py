@@ -1093,7 +1093,7 @@ class ProjectService:
         user = (
             await self.db.execute(
                 select(User)
-                .options(selectinload(User.role))
+                .options(joinedload(User.role))
                 .where(
                     User.id == target_id,
                     User.organization_id == organization_id,

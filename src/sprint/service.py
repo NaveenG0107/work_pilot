@@ -7,7 +7,7 @@ from math import ceil
 from sqlalchemy import select, update, func, text, delete
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLog, AuditLogType
 from src.auth.models import User
@@ -177,8 +177,8 @@ class SprintService:
                 User.deleted_at.is_(None),
             )
             .options(
-                selectinload(User.organization),
-                selectinload(User.role).selectinload(
+                joinedload(User.organization),
+                joinedload(User.role).selectinload(
                     Role.permissions
                 ),
             )
@@ -238,7 +238,7 @@ class SprintService:
                 ProjectMember.deleted_at.is_(None),
             )
             .options(
-                selectinload(
+                joinedload(
                     ProjectMember.role
                 ).selectinload(
                     Role.permissions
@@ -1921,49 +1921,24 @@ class SprintService:
 
             snapshots = snapshot_result.scalars().all()
 
-            # 5. Calculate total story points dynamically
-            total_result = await self.db.execute(
+            # 5. Calculate total and remaining story points dynamically in a single query
+            points_result = await self.db.execute(
                 text(
                     """
-                    SELECT COALESCE(SUM(story_points), 0)
-                    FROM tasks
-                    WHERE sprint_id = :sprint_id
-                    AND deleted_at IS NULL
+                    SELECT
+                        COALESCE(SUM(t.story_points), 0) AS total_story_points,
+                        COALESCE(SUM(CASE WHEN cs.is_final = false THEN t.story_points ELSE 0 END), 0) AS remaining_story_points
+                    FROM tasks t
+                    LEFT JOIN custom_statuses cs ON cs.id = t.status_id AND cs.deleted_at IS NULL
+                    WHERE t.sprint_id = :sprint_id
+                      AND t.deleted_at IS NULL
                     """
                 ),
-                {
-                    "sprint_id": sprint_id,
-                },
+                {"sprint_id": sprint_id},
             )
-
-            total_story_points = int(
-                total_result.scalar() or 0
-            )
-
-            # 6. Calculate remaining story points dynamically
-            remaining_result = await self.db.execute(
-                text(
-                    """
-                    SELECT COALESCE(SUM(story_points), 0)
-                    FROM tasks
-                    WHERE sprint_id = :sprint_id
-                    AND deleted_at IS NULL
-                    AND status_id IN (
-                        SELECT id
-                        FROM custom_statuses
-                        WHERE is_final = false
-                            AND deleted_at IS NULL
-                    )
-                    """
-                ),
-                {
-                    "sprint_id": sprint_id,
-                },
-            )
-
-            remaining_points_now = int(
-                remaining_result.scalar() or 0
-            )
+            points_row = points_result.mappings().one()
+            total_story_points = int(points_row["total_story_points"] or 0)
+            remaining_points_now = int(points_row["remaining_story_points"] or 0)
 
             # 7. Map snapshots by YYYY-MM-DD
             snapshot_map = {

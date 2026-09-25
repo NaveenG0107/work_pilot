@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from uuid6 import uuid7
 
 from src.audit.models import AuditLog
@@ -181,7 +181,7 @@ class CommentService:
                 ProjectMember.user_id == user.id,
                 ProjectMember.deleted_at.is_(None),
             )
-            .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
+            .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
         result = await self.db.execute(stmt)
         member = result.scalar_one_or_none()
@@ -290,7 +290,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -511,7 +511,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -532,8 +532,8 @@ class CommentService:
             select(Comments)
             .where(Comments.id == comment_id, Comments.deleted_at.is_(None))
             .options(
-                selectinload(Comments.user),
-                selectinload(Comments.parent_comment).selectinload(Comments.user),
+                joinedload(Comments.user),
+                joinedload(Comments.parent_comment).joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
         )
@@ -680,7 +680,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -773,8 +773,8 @@ class CommentService:
                 Comments.deleted_at.is_(None),
             )
             .options(
-                selectinload(Comments.user),
-                selectinload(Comments.parent_comment).selectinload(Comments.user),
+                joinedload(Comments.user),
+                joinedload(Comments.parent_comment).joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
             .order_by(Comments.created_at.asc())
@@ -903,7 +903,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -965,7 +965,7 @@ class CommentService:
                 Comments.deleted_at.is_(None),
             )
             .options(
-                selectinload(Comments.user),
+                joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
             .order_by(Comments.created_at.desc())
@@ -1085,7 +1085,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1263,7 +1263,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1451,7 +1451,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1700,7 +1700,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1826,7 +1826,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1969,7 +1969,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()

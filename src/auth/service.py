@@ -7,7 +7,7 @@ from typing import Any, Optional, Union
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.auth.models import User, RefreshToken
 from src.auth.schema import AuthTokensResponse
@@ -68,8 +68,8 @@ class AuthService:
             select(User)
             .where(User.email == email)
             .options(
-                selectinload(User.organization),
-                selectinload(User.role).selectinload(Role.permissions),
+                joinedload(User.organization),
+                joinedload(User.role).selectinload(Role.permissions),
             )
         )
         user = result.scalar_one_or_none()
@@ -108,8 +108,8 @@ class AuthService:
             select(User)
             .where(User.id == str(user_id))
             .options(
-                selectinload(User.organization),
-                selectinload(User.role).selectinload(Role.permissions),
+                joinedload(User.organization),
+                joinedload(User.role).selectinload(Role.permissions),
             )
         )
         user = result.scalar_one_or_none()
