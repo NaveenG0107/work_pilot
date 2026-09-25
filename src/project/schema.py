@@ -24,6 +24,7 @@ def validate_uuid(value: str | None) -> str | None:
 
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=3, max_length=150)
+    slug: str | None = Field(default=None, min_length=3, max_length=150)
     description: str = ""
 
 
