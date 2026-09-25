@@ -18,6 +18,8 @@ class Project(Base):
         Index("idx_projects_deleted_at", "deleted_at"),
         Index("idx_projects_org_name", "organization_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_org_slug", "organization_id", "slug", unique=True, postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_projects_org_status", "organization_id", "status", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_projects_org_created_at", "organization_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_fts", text("to_tsvector('english', coalesce(name, '') || ' ' || coalesce(description, '') || ' ' || coalesce(slug, ''))"), postgresql_using="gin"),
     )
 
@@ -44,6 +46,9 @@ class ProjectMember(Base):
     __table_args__ = (
         Index("idx_project_members_deleted_at", "deleted_at"),
         Index("idx_project_members_role_id", "role_id"),
+        Index("idx_project_members_project_id", "project_id"),
+        Index("idx_project_members_user_id", "user_id"),
+        Index("idx_project_members_proj_user", "project_id", "user_id", unique=True, postgresql_where=text("deleted_at IS NULL")),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

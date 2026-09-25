@@ -10,6 +10,9 @@ _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 _PROJECT_PATHS = (
     re.compile(rf"^/api/v1/projects/(?P<id>{_UUID})(?:/|$)"),
     re.compile(rf"^/api/v1/project/(?P<id>{_UUID})(?:/|$)"),
+    re.compile(rf"^/api/v1/project/update/(?P<id>{_UUID})(?:/|$)"),
+    re.compile(rf"^/api/v1/project/(?P<id>{_UUID})/(?:restore|reopen)(?:/|$)"),
+    re.compile(rf"^/api/v1/project/(?:restore|reopen)/(?P<id>{_UUID})(?:/|$)"),
     re.compile(rf"^/api/v1/(?P<id>{_UUID})/(?:labels|user-story-statuses)(?:/|$)"),
 )
 
