@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import List, Tuple
 
 from sqlalchemy import String, and_, case, func, or_, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -58,7 +58,13 @@ from src.user_story.schema import (
     user_summary_from_user,
 )
 from src.utils.core import ErrorCode
-from src.utils.performance_cache import canonical_hash, cache_get_json, cache_set_json, project_version
+from src.utils.performance_cache import (
+    bump_project_version,
+    cache_get_json,
+    cache_set_json,
+    canonical_hash,
+    project_version,
+)
 
 logger = get_logger(__name__)
 
@@ -229,7 +235,11 @@ class UserStoryService:
     async def _commit(self) -> None:
         try:
             await self.db.commit()
-        except SQLAlchemyError as exc:
+        except IntegrityError as exc:
+            await self.db.rollback()
+            logger.warning("Database commit integrity error: %s", exc)
+            raise UserStoryServiceError(409, ErrorCode.ErrConflict.value, "Conflict with existing data") from exc
+        except Exception as exc:
             logger.error("Database commit failed: %s", exc)
             await self.db.rollback()
             raise
@@ -237,7 +247,11 @@ class UserStoryService:
     async def _flush(self) -> None:
         try:
             await self.db.flush()
-        except SQLAlchemyError as exc:
+        except IntegrityError as exc:
+            await self.db.rollback()
+            logger.warning("Database flush integrity error: %s", exc)
+            raise UserStoryServiceError(409, ErrorCode.ErrConflict.value, "Conflict with existing data") from exc
+        except Exception as exc:
             logger.error("Database flush failed: %s", exc)
             await self.db.rollback()
             raise
@@ -275,7 +289,7 @@ class UserStoryService:
         user = (
             await self.db.execute(
                 select(User)
-                .options(selectinload(User.role).selectinload(Role.permissions))
+                .options(joinedload(User.role).selectinload(Role.permissions))
                 .where(User.id == user_id, User.deleted_at.is_(None))
             )
         ).scalar_one_or_none()
@@ -286,7 +300,7 @@ class UserStoryService:
 
         return user
 
-    async def _story(self, story_id: str, project_id: str) -> UserStory:
+    async def _story(self, story_id: str, project_id: str, load_relations: bool = True) -> UserStory:
         identifier = str(story_id).strip()
         try:
             uuid_identifier = str(UUID(identifier))
@@ -294,23 +308,21 @@ class UserStoryService:
             identifier_condition = func.lower(UserStory.key) == identifier.lower()
         else:
             identifier_condition = UserStory.id == uuid_identifier
-        story = (
-            await self.db.execute(
-                select(UserStory)
-                .options(
-                    selectinload(UserStory.project),
-                    selectinload(UserStory.sprint),
-                    selectinload(UserStory.status),
-                    selectinload(UserStory.assignee).selectinload(User.role),
-                    selectinload(UserStory.reporter).selectinload(User.role),
-                )
-                .where(
-                    identifier_condition,
-                    UserStory.project_id == project_id,
-                    UserStory.deleted_at.is_(None),
-                )
+
+        stmt = select(UserStory).where(
+            identifier_condition,
+            UserStory.project_id == project_id,
+            UserStory.deleted_at.is_(None),
+        )
+        if load_relations:
+            stmt = stmt.options(
+                joinedload(UserStory.project),
+                joinedload(UserStory.sprint),
+                joinedload(UserStory.status),
+                joinedload(UserStory.assignee).joinedload(User.role),
+                joinedload(UserStory.reporter).joinedload(User.role),
             )
-        ).scalar_one_or_none()
+        story = (await self.db.execute(stmt)).scalar_one_or_none()
 
         if not story:
             logger.warning("User story not found: story_id=%s, project_id=%s", story_id, project_id)
@@ -322,7 +334,7 @@ class UserStoryService:
         member = (
             await self.db.execute(
                 select(ProjectMember)
-                .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
+                .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
                 .where(
                     ProjectMember.user_id == user_id,
                     ProjectMember.project_id == project_id,
@@ -336,14 +348,26 @@ class UserStoryService:
 
         return None
 
-    async def check_permission(self, user_id: str, project_id: str, resource: str, action: str) -> bool:
-        user = await self._user(user_id)
+    async def check_permission(
+        self,
+        user_id: str,
+        project_id: str,
+        resource: str,
+        action: str,
+        user: User | None = None,
+        project: Project | None = None,
+        member_role: Role | None = None,
+    ) -> bool:
+        if user is None:
+            user = await self._user(user_id)
 
         user_role_name = getattr(getattr(user, "role", None), "name", None)
         if user_role_name == "super_admin":
             return False
 
-        member_role = await self._member_role(user_id, project_id)
+        if member_role is None:
+            member_role = await self._member_role(user_id, project_id)
+
         if member_role is not None:
             if _has_default_permission(member_role.name, resource, action):
                 return True
@@ -354,7 +378,9 @@ class UserStoryService:
             except Exception:
                 pass
 
-        project = await self._project(project_id)
+        if project is None:
+            project = await self._project(project_id)
+
         if user.organization_id and str(user.organization_id) == str(project.organization_id):
             if user_role_name == "org_admin":
                 if _has_default_permission(user_role_name, resource, action):
@@ -381,7 +407,9 @@ class UserStoryService:
                 "Super admins are not allowed to perform organization-level activities",
             )
 
-        authorized = await self.check_permission(user_id, project_id, "user_stories", "view")
+        authorized = await self.check_permission(
+            user_id, project_id, "user_stories", "view", user=user, project=project
+        )
 
         return project, user, authorized
 
@@ -471,7 +499,18 @@ class UserStoryService:
 
         return str(default.id), default.name
 
-    async def _story_task_stats(self, project_id: str) -> dict[str, dict]:
+    async def _story_task_stats(self, project_id: str, story_ids: list[str] | None = None) -> dict[str, dict]:
+        if story_ids is not None and not story_ids:
+            return {}
+
+        conditions = [
+            Task.project_id == project_id,
+            Task.user_story_id.is_not(None),
+            Task.deleted_at.is_(None),
+        ]
+        if story_ids:
+            conditions.append(Task.user_story_id.in_(story_ids))
+
         rows = (
             await self.db.execute(
                 select(
@@ -487,11 +526,7 @@ class UserStoryService:
                     CustomStatus.id == Task.status_id,
                     CustomStatus.deleted_at.is_(None),
                 ))
-                .where(
-                    Task.project_id == project_id,
-                    Task.user_story_id.is_not(None),
-                    Task.deleted_at.is_(None),
-                )
+                .where(*conditions)
                 .group_by(Task.user_story_id)
             )
         ).all()
@@ -536,27 +571,20 @@ class UserStoryService:
         if total > 0:
             is_closed = completed == total
         else:
-            story = (
+            status = (
                 await self.db.execute(
-                    select(UserStory.id, UserStory.status_id).where(
+                    select(UserStoryStatus.is_closed, UserStoryStatus.is_final)
+                    .join(UserStory, UserStory.status_id == UserStoryStatus.id)
+                    .where(
                         UserStory.id == user_story_id,
                         UserStory.deleted_at.is_(None),
+                        UserStoryStatus.deleted_at.is_(None),
                     )
                 )
             ).first()
 
-            if story:
-                status = (
-                    await self.db.execute(
-                        select(UserStoryStatus.is_closed, UserStoryStatus.is_final).where(
-                            UserStoryStatus.id == story.status_id,
-                            UserStoryStatus.deleted_at.is_(None),
-                        )
-                    )
-                ).first()
-
-                if status:
-                    is_closed = bool(status.is_closed or status.is_final)
+            if status:
+                is_closed = bool(status.is_closed or status.is_final)
 
         await self.db.execute(
             UserStory.__table__.update()
@@ -564,37 +592,41 @@ class UserStoryService:
             .values(is_closed=is_closed, updated_at=datetime.now(timezone.utc))
         )
 
-    async def _get_favorite_story_map(self, user_id: str) -> dict[str, bool]:
+    async def _get_favorite_story_map(self, user_id: str, story_ids: list[str] | None = None) -> dict[str, bool]:
         if not user_id:
             return {}
+        if story_ids is not None and not story_ids:
+            return {}
 
-        rows = (
-            await self.db.execute(
-                select(Favorite.user_story_id).where(
-                    Favorite.user_id == user_id,
-                    Favorite.item_type == "user_story",
-                    Favorite.user_story_id.is_not(None),
-                    Favorite.deleted_at.is_(None),
-                )
-            )
-        ).all()
+        stmt = select(Favorite.user_story_id).where(
+            Favorite.user_id == user_id,
+            Favorite.item_type == "user_story",
+            Favorite.user_story_id.is_not(None),
+            Favorite.deleted_at.is_(None),
+        )
+        if story_ids:
+            stmt = stmt.where(Favorite.user_story_id.in_(story_ids))
+
+        rows = (await self.db.execute(stmt)).all()
 
         return {str(row.user_story_id): True for row in rows}
 
-    async def _get_favorite_task_map(self, user_id: str) -> dict[str, bool]:
+    async def _get_favorite_task_map(self, user_id: str, task_ids: list[str] | None = None) -> dict[str, bool]:
         if not user_id:
             return {}
+        if task_ids is not None and not task_ids:
+            return {}
 
-        rows = (
-            await self.db.execute(
-                select(Favorite.task_id).where(
-                    Favorite.user_id == user_id,
-                    Favorite.item_type == "task",
-                    Favorite.task_id.is_not(None),
-                    Favorite.deleted_at.is_(None),
-                )
-            )
-        ).all()
+        stmt = select(Favorite.task_id).where(
+            Favorite.user_id == user_id,
+            Favorite.item_type == "task",
+            Favorite.task_id.is_not(None),
+            Favorite.deleted_at.is_(None),
+        )
+        if task_ids:
+            stmt = stmt.where(Favorite.task_id.in_(task_ids))
+
+        rows = (await self.db.execute(stmt)).all()
 
         return {str(row.task_id): True for row in rows}
 
@@ -636,10 +668,10 @@ class UserStoryService:
                 await self.db.execute(
                     select(Task)
                     .options(
-                        selectinload(Task.assignee).selectinload(User.role),
-                        selectinload(Task.reporter),
-                        selectinload(Task.project),
-                        selectinload(Task.sprint),
+                        joinedload(Task.assignee).joinedload(User.role),
+                        joinedload(Task.reporter),
+                        joinedload(Task.project),
+                        joinedload(Task.sprint),
                         selectinload(Task.labels),
                     )
                     .where(
@@ -653,16 +685,18 @@ class UserStoryService:
 
     async def _tasks_by_stories(self, story_ids: list[str]) -> dict[str, list[Task]]:
         tasks_by_story: dict[str, list[Task]] = {str(story_id): [] for story_id in story_ids}
+        if not story_ids:
+            return tasks_by_story
         # Bound the IN clause even when callers request a very large story page.
         for start in range(0, len(story_ids), 500):
             tasks = (
                 await self.db.execute(
                     select(Task)
                     .options(
-                        selectinload(Task.assignee).selectinload(User.role),
-                        selectinload(Task.reporter),
-                        selectinload(Task.project),
-                        selectinload(Task.sprint),
+                        joinedload(Task.assignee).joinedload(User.role),
+                        joinedload(Task.reporter),
+                        joinedload(Task.project),
+                        joinedload(Task.sprint),
                         selectinload(Task.labels),
                     )
                     .where(
@@ -786,14 +820,15 @@ class UserStoryService:
         statuses = await self._statuses_by_project(project_id)
         color_map = await self._status_color_map(project_id)
         is_final_map = await self._status_is_final_map(project_id)
-        stats = await self._story_task_stats(project_id)
-        stat = stats.get(str(story.id), {"total": 0, "completed": 0})
-        total, completed = stat["total"], stat["completed"]
+
+        tasks = await self._tasks_by_story(story.id)
+        total = len(tasks)
+        completed = sum(1 for t in tasks if is_final_map.get(normalize_task_status(t.status), False))
         progress = (completed / total * 100.0) if total > 0 else 0.0
 
-        is_fav = (await self._get_favorite_story_map(user_id)).get(str(story.id), False)
-        tasks = await self._tasks_by_story(story.id)
-        fav_task_map = await self._get_favorite_task_map(user_id)
+        is_fav = (await self._get_favorite_story_map(user_id, story_ids=[str(story.id)])).get(str(story.id), False)
+        task_ids = [str(t.id) for t in tasks]
+        fav_task_map = await self._get_favorite_task_map(user_id, task_ids=task_ids)
         task_responses = await self._task_summaries(tasks, color_map, is_final_map, fav_task_map)
 
         return self._story_response(
@@ -836,7 +871,17 @@ class UserStoryService:
         reporter_id: str,
         organization_id: str,
     ) -> UserStoryResponse:
-        logger.info("Service: Creating user story in project_id=%s by reporter_id=%s", project_id, reporter_id)
+        logger.info(
+            "Service: Creating user story in project_id=%s by reporter_id=%s",
+            project_id,
+            reporter_id,
+            extra={
+                "project_id": project_id,
+                "reporter_id": reporter_id,
+                "organization_id": organization_id,
+                "operation": "create_user_story",
+            },
+        )
 
         project, user, authorized = await self._check_authorization(project_id, reporter_id)
         if not authorized:
@@ -846,7 +891,9 @@ class UserStoryService:
                 "You do not have permission to view user stories in this project",
             )
 
-        has_add = await self.check_permission(reporter_id, project_id, "user_stories", "add")
+        has_add = await self.check_permission(
+            reporter_id, project_id, "user_stories", "add", user=user, project=project
+        )
         if not has_add:
             logger.warning("Service: Permission denied adding user story for user_id=%s in project_id=%s", reporter_id, project_id)
             raise UserStoryServiceError(
@@ -898,13 +945,17 @@ class UserStoryService:
             select(Project.id).where(Project.id == project_id).with_for_update()
         )
 
-        max_order = (
+        row = (
             await self.db.execute(
-                select(func.coalesce(func.max(UserStory.backlog_order), 0)).where(
-                    UserStory.project_id == project_id
-                )
+                select(
+                    func.coalesce(func.max(UserStory.backlog_order), 0),
+                    func.coalesce(func.max(UserStory.sequence_number), 0),
+                ).where(UserStory.project_id == project_id)
             )
-        ).scalar_one() or 0
+        ).first()
+
+        max_order = int(row[0] if row else 0)
+        sequence_number = int(row[1] if row else 0) + 1
 
         status_id, status_name = await self.resolve_status_id_and_name(
             project_id=project_id,
@@ -912,16 +963,8 @@ class UserStoryService:
             status_name=req.status,
         )
 
-        sequence_number = int(
-            (
-                await self.db.execute(
-                    select(
-                        func.coalesce(func.max(UserStory.sequence_number), 0)
-                    ).where(UserStory.project_id == project_id)
-                )
-            ).scalar_one()
-            or 0
-        ) + 1
+        status_rec = await self._status_by_id(status_id, project_id)
+        initial_is_closed = bool(status_rec.is_closed or status_rec.is_final) if status_rec else False
 
         story = UserStory(
             project_id=project_id,
@@ -937,6 +980,7 @@ class UserStoryService:
             backlog_order=int(max_order) + 1,
             assignee_id=req.assignee_id if req.assignee_id else None,
             reporter_id=reporter_id,
+            is_closed=initial_is_closed,
         )
 
         draft_attachments = []
@@ -961,8 +1005,8 @@ class UserStoryService:
         if draft_attachments:
             await self._flush()
 
-        await self._recalculate_is_closed(story.id)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
         created_story = await self._story(story.id, project_id)
         response = await self._build_single_story(created_story, reporter_id, project_id)
@@ -980,7 +1024,17 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully created user story story_id=%s in project_id=%s", story.id, project_id)
+        logger.info(
+            "Service: Successfully created user story story_id=%s in project_id=%s",
+            story.id,
+            project_id,
+            extra={
+                "story_id": str(story.id),
+                "project_id": project_id,
+                "reporter_id": reporter_id,
+                "operation": "create_user_story",
+            },
+        )
         return response
 
     async def _is_project_member(self, project_id: str, user_id: str) -> bool:
@@ -1012,7 +1066,18 @@ class UserStoryService:
     async def get_by_id(
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str
     ) -> UserStoryResponse:
-        logger.info("Service: Fetching user story_id=%s in project_id=%s", user_story_id, project_id)
+        logger.info(
+            "Service: Fetching user story_id=%s in project_id=%s",
+            user_story_id,
+            project_id,
+            extra={
+                "user_story_id": user_story_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "organization_id": organization_id,
+                "operation": "get_by_id",
+            },
+        )
 
         _, user, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
@@ -1021,6 +1086,26 @@ class UserStoryService:
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to view user stories in this project",
             )
+
+        # Check Redis cache first (failure-tolerant)
+        version = await project_version(self.redis, project_id)
+        cache_key = None
+        if version is not None:
+            cache_key = f"wp:user-story:{project_id}:{user_story_id}:{user_id}:{version}"
+            cached = await cache_get_json(self.redis, cache_key)
+            if cached is not None:
+                await self._audit(
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    user_story_id=cached.get("id"),
+                    action="viewed",
+                    resource_type="user_story",
+                    resource_id=cached.get("id"),
+                    details=f"User Story '{cached.get('title')}' viewed by {user.username}",
+                    audit_type=AuditLogType.VIEW,
+                )
+                return UserStoryResponse.model_validate(cached)
 
         story = await self._story(user_story_id, project_id)
         response = await self._build_single_story(story, user_id, project_id)
@@ -1037,6 +1122,9 @@ class UserStoryService:
             audit_type=AuditLogType.VIEW,
         )
 
+        if cache_key is not None:
+            await cache_set_json(self.redis, cache_key, response.model_dump(mode="json", by_alias=True))
+
         return response
 
     async def update(
@@ -1047,19 +1135,29 @@ class UserStoryService:
         user_id: str,
         organization_id: str,
     ) -> UserStoryResponse:
-        logger.info("Service: Updating user story_id=%s in project_id=%s by user_id=%s", user_story_id, project_id, user_id)
+        logger.info(
+            "Service: Updating user story_id=%s in project_id=%s by user_id=%s",
+            user_story_id, project_id, user_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "user_id": user_id},
+        )
 
-        _, user, _ = await self._check_authorization(project_id, user_id)
+        project, user, _ = await self._check_authorization(project_id, user_id)
 
-        authorized_update = await self.check_permission(user_id, project_id, "user_stories", "modify")
+        authorized_update = await self.check_permission(
+            user_id, project_id, "user_stories", "modify", user=user, project=project
+        )
         if not authorized_update:
-            logger.warning("Service: Permission denied updating user story for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied updating user story for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id, "user_story_id": user_story_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to update user stories in this project",
             )
 
-        existing = await self._story(user_story_id, project_id)
+        existing = await self._story(user_story_id, project_id, load_relations=True)
         user_story_id = str(existing.id)
 
         changed_by = user.username or user.full_name or user.email or str(user_id)
@@ -1114,13 +1212,16 @@ class UserStoryService:
         if assignee_id is None and "assignee_id" in payload and payload["assignee_id"] is None:
             if existing.assignee_id:
                 old_assignee_name = None
-                old_u = (
-                    await self.db.execute(
-                        select(User.full_name, User.username).where(User.id == existing.assignee_id)
-                    )
-                ).one_or_none()
-                if old_u:
-                    old_assignee_name = old_u.full_name or old_u.username
+                if existing.assignee:
+                    old_assignee_name = existing.assignee.full_name or existing.assignee.username
+                else:
+                    old_u = (
+                        await self.db.execute(
+                            select(User.full_name, User.username).where(User.id == existing.assignee_id)
+                        )
+                    ).one_or_none()
+                    if old_u:
+                        old_assignee_name = old_u.full_name or old_u.username
                 changes.append(f"unassigned from '{old_assignee_name or 'user'}'")
             updates["assignee_id"] = None
         elif assignee_id:
@@ -1155,13 +1256,16 @@ class UserStoryService:
                     changes.append(f"assigned to '{new_assignee_name}'")
                 else:
                     old_assignee_name = None
-                    old_u = (
-                        await self.db.execute(
-                            select(User.full_name, User.username).where(User.id == old_assignee)
-                        )
-                    ).one_or_none()
-                    if old_u:
-                        old_assignee_name = old_u.full_name or old_u.username
+                    if existing.assignee and str(existing.assignee.id) == str(old_assignee):
+                        old_assignee_name = existing.assignee.full_name or existing.assignee.username
+                    else:
+                        old_u = (
+                            await self.db.execute(
+                                select(User.full_name, User.username).where(User.id == old_assignee)
+                            )
+                        ).one_or_none()
+                        if old_u:
+                            old_assignee_name = old_u.full_name or old_u.username
                     changes.append(
                         f"assignee changed from '{old_assignee_name or 'user'}' to '{new_assignee_name}'"
                     )
@@ -1176,9 +1280,11 @@ class UserStoryService:
         sprint_id = req.sprint_id
         if sprint_id is None and "sprint_id" in payload and payload["sprint_id"] is None:
             if existing.sprint_id:
-                old_sp_name = (
-                    await self.db.execute(select(Sprint.name).where(Sprint.id == existing.sprint_id))
-                ).scalar_one_or_none()
+                old_sp_name = existing.sprint.name if existing.sprint else None
+                if not old_sp_name:
+                    old_sp_name = (
+                        await self.db.execute(select(Sprint.name).where(Sprint.id == existing.sprint_id))
+                    ).scalar_one_or_none()
                 changes.append(f"removed from sprint '{old_sp_name or 'Sprint'}'")
             updates["sprint_id"] = None
         elif sprint_id:
@@ -1192,8 +1298,8 @@ class UserStoryService:
             old_sprint = existing.sprint_id
             new_sprint = sprint_id
             if old_sprint != new_sprint:
-                old_sp_name = None
-                if existing.sprint_id:
+                old_sp_name = existing.sprint.name if (existing.sprint and str(existing.sprint_id) == str(old_sprint)) else None
+                if not old_sp_name and existing.sprint_id:
                     old_sp_name = (
                         await self.db.execute(select(Sprint.name).where(Sprint.id == existing.sprint_id))
                     ).scalar_one_or_none()
@@ -1217,8 +1323,10 @@ class UserStoryService:
             )
             await self._flush()
 
-        await self._recalculate_is_closed(user_story_id)
+        if "status_id" in updates or "is_closed" in updates:
+            await self._recalculate_is_closed(user_story_id)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
         updated_story = await self._story(user_story_id, project_id)
         response = await self._build_single_story(updated_story, user_id, project_id)
@@ -1241,31 +1349,49 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully updated user story_id=%s", user_story_id)
+        logger.info(
+            "Service: Successfully updated user story_id=%s",
+            user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id},
+        )
         return response
 
     async def delete(
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str
     ) -> None:
-        logger.info("Service: Deleting user story_id=%s in project_id=%s by user_id=%s", user_story_id, project_id, user_id)
+        logger.info(
+            "Service: Deleting user story_id=%s in project_id=%s by user_id=%s",
+            user_story_id, project_id, user_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "user_id": user_id},
+        )
 
-        _, user, authorized = await self._check_authorization(project_id, user_id)
+        project, user, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
-            logger.warning("Service: Permission denied deleting user story for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied deleting user story for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to delete user stories in this project",
             )
 
-        has_delete = await self.check_permission(user_id, project_id, "user_stories", "delete")
+        has_delete = await self.check_permission(
+            user_id, project_id, "user_stories", "delete", user=user, project=project
+        )
         if not has_delete:
-            logger.warning("Service: Permission denied deleting user story for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied deleting user story for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to delete user stories in this project",
             )
 
-        existing = await self._story(user_story_id, project_id)
+        existing = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(existing.id)
 
         await self.db.execute(
@@ -1277,6 +1403,7 @@ class UserStoryService:
             .values(deleted_at=datetime.now(timezone.utc))
         )
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
         await self._audit(
             user_id=user_id,
@@ -1290,17 +1417,29 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully soft-deleted user story_id=%s", user_story_id)
+        logger.info(
+            "Service: Successfully soft-deleted user story_id=%s",
+            user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id},
+        )
 
     async def list(
         self, project_id: str, user_id: str, organization_id: str,
         filter_: UserStoryFilter
     ) -> tuple[list[UserStoryResponse], PaginationResponse]:
-        logger.info("Service: Listing user stories in project_id=%s for user_id=%s", project_id, user_id)
+        logger.info(
+            "Service: Listing user stories in project_id=%s for user_id=%s",
+            project_id, user_id,
+            extra={"project_id": project_id, "user_id": user_id},
+        )
 
-        _, _, authorized = await self._check_authorization(project_id, user_id)
+        project, user, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
-            logger.warning("Service: Permission denied listing user stories for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied listing user stories for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to view user stories in this project",
@@ -1417,8 +1556,8 @@ class UserStoryService:
                         selectinload(UserStory.project),
                         selectinload(UserStory.sprint),
                         selectinload(UserStory.status),
-                        selectinload(UserStory.assignee).selectinload(User.role),
-                        selectinload(UserStory.reporter).selectinload(User.role),
+                        selectinload(UserStory.assignee).joinedload(User.role),
+                        selectinload(UserStory.reporter).joinedload(User.role),
                     )
                     .where(*conditions)
                     .order_by(
@@ -1432,20 +1571,23 @@ class UserStoryService:
             ).scalars()
         )
 
-        stats = await self._story_task_stats(project_id)
+        story_ids = [story.id for story in stories]
+        stats = await self._story_task_stats(project_id, story_ids=story_ids)
         statuses = await self._statuses_by_project(project_id)
         color_map = await self._status_color_map(project_id)
         is_final_map = await self._status_is_final_map(project_id)
-        fav_story_map = await self._get_favorite_story_map(user_id)
-        fav_task_map = await self._get_favorite_task_map(user_id)
+        fav_story_map = await self._get_favorite_story_map(user_id, story_ids=story_ids)
 
-        tasks_by_story = await self._tasks_by_stories([story.id for story in stories])
+        tasks_by_story = await self._tasks_by_stories(story_ids)
+        all_task_ids = [task.id for tasks in tasks_by_story.values() for task in tasks]
+        fav_task_map = await self._get_favorite_task_map(user_id, task_ids=all_task_ids)
+
         responses = []
         for story in stories:
             stat = stats.get(str(story.id), {"total": 0, "completed": 0})
             total_tasks, completed_tasks = stat["total"], stat["completed"]
             progress = (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0
-            tasks = tasks_by_story[str(story.id)]
+            tasks = tasks_by_story.get(str(story.id), [])
             task_responses = await self._task_summaries(tasks, color_map, is_final_map, fav_task_map)
             responses.append(
                 self._story_response(
@@ -1466,7 +1608,11 @@ class UserStoryService:
             audit_type=AuditLogType.AUDIT,
         )
 
-        logger.info("Service: Successfully fetched %d user stories (total=%d)", len(responses), total)
+        logger.info(
+            "Service: Successfully fetched %d user stories (total=%d)",
+            len(responses), total,
+            extra={"project_id": project_id, "fetched": len(responses), "total": total},
+        )
         pagination = self.pagination(page, page_size, total)
         await cache_set_json(
             self.redis,
@@ -1482,57 +1628,81 @@ class UserStoryService:
         self, req: ReorderUserStoriesRequest, project_id: str, user_id: str,
         organization_id: str
     ) -> None:
-        logger.info("Service: Reordering %d user stories in project_id=%s", len(req.story_ids), project_id)
+        logger.info(
+            "Service: Reordering %d user stories in project_id=%s",
+            len(req.story_ids), project_id,
+            extra={"project_id": project_id, "count": len(req.story_ids)},
+        )
 
-        _, user, authorized = await self._check_authorization(project_id, user_id)
+        project, user, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
-            logger.warning("Service: Permission denied reordering user stories for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied reordering user stories for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to reorder user stories in this project",
             )
 
-        for idx, story_id in enumerate(req.story_ids):
+        if req.story_ids:
+            order_mapping = {story_id: idx + 1 for idx, story_id in enumerate(req.story_ids)}
+            order_case = case(order_mapping, value=UserStory.id)
             await self.db.execute(
                 UserStory.__table__.update()
                 .where(
-                    UserStory.id == story_id,
+                    UserStory.id.in_(req.story_ids),
                     UserStory.project_id == project_id,
                     UserStory.deleted_at.is_(None),
                 )
-                .values(backlog_order=idx + 1)
+                .values(backlog_order=order_case)
             )
 
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
-        await self._audit(
-            user_id=user_id,
-            organization_id=organization_id,
-            project_id=project_id,
-            action="reordered",
-            resource_type="user_story",
-            resource_id=req.story_ids[0],
-            details=f"User Story was reordered by {user.username}",
-            audit_type=AuditLogType.ACTIVITY,
+        if req.story_ids:
+            await self._audit(
+                user_id=user_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                action="reordered",
+                resource_type="user_story",
+                resource_id=req.story_ids[0],
+                details=f"User Story was reordered by {user.username}",
+                audit_type=AuditLogType.ACTIVITY,
+            )
+
+        logger.info(
+            "Service: Successfully reordered user stories in project_id=%s",
+            project_id,
+            extra={"project_id": project_id, "count": len(req.story_ids)},
         )
-
-        logger.info("Service: Successfully reordered user stories in project_id=%s", project_id)
 
     async def update_status(
         self, req: UpdateUserStoryStatusAssignmentRequest, user_story_id: str,
         project_id: str, user_id: str, organization_id: str
     ) -> UserStoryResponse:
-        logger.info("Service: Updating status_id=%s for user_story_id=%s", req.status_id, user_story_id)
+        logger.info(
+            "Service: Updating status_id=%s for user_story_id=%s",
+            req.status_id, user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "status_id": req.status_id},
+        )
 
-        _, _, authorized = await self._check_authorization(project_id, user_id)
+        project, user, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
-            logger.warning("Service: Permission denied updating user story status for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied updating user story status for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to update user stories in this project",
             )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
         status = await self._status_by_id(req.status_id, project_id)
 
@@ -1548,6 +1718,7 @@ class UserStoryService:
 
         await self._recalculate_is_closed(user_story_id)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
         updated_story = await self._story(user_story_id, project_id)
         response = await self._build_single_story(updated_story, user_id, project_id)
@@ -1564,13 +1735,21 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully updated status for user_story_id=%s to '%s'", user_story_id, status.name)
+        logger.info(
+            "Service: Successfully updated status for user_story_id=%s to '%s'",
+            user_story_id, status.name,
+            extra={"user_story_id": user_story_id, "status_name": status.name},
+        )
         return response
 
     async def add_favorite(
         self, user_id: str, project_id: str, user_story_id: str
     ) -> FavoriteResponse:
-        logger.info("Service: Adding user_story_id=%s to favorites for user_id=%s", user_story_id, user_id)
+        logger.info(
+            "Service: Adding user_story_id=%s to favorites for user_id=%s",
+            user_story_id, user_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "user_id": user_id},
+        )
 
         story = await self._story(user_story_id, project_id)
         user_story_id = str(story.id)
@@ -1587,7 +1766,11 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if existing:
-            logger.warning("Service: User story_id=%s is already favorited by user_id=%s", user_story_id, user_id)
+            logger.warning(
+                "Service: User story_id=%s is already favorited by user_id=%s",
+                user_story_id, user_id,
+                extra={"user_story_id": user_story_id, "user_id": user_id},
+            )
             raise UserStoryServiceError(
                 409, ErrorCode.ErrConflict.value, "Item is already added to favorites"
             )
@@ -1600,9 +1783,14 @@ class UserStoryService:
         )
         self.db.add(fav)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
         await self.db.refresh(fav)
 
-        logger.info("Service: Successfully added favorite_id=%s for user_story_id=%s", fav.id, user_story_id)
+        logger.info(
+            "Service: Successfully added favorite_id=%s for user_story_id=%s",
+            fav.id, user_story_id,
+            extra={"favorite_id": str(fav.id), "user_story_id": user_story_id},
+        )
 
         project_obj = getattr(story, "project", None)
         project_name = getattr(project_obj, "name", None)
@@ -1623,9 +1811,13 @@ class UserStoryService:
     async def remove_favorite(
         self, user_id: str, project_id: str, user_story_id: str
     ) -> RemoveFavoriteResponse:
-        logger.info("Service: Removing user_story_id=%s from favorites for user_id=%s", user_story_id, user_id)
+        logger.info(
+            "Service: Removing user_story_id=%s from favorites for user_id=%s",
+            user_story_id, user_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "user_id": user_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         fav = (
@@ -1640,15 +1832,24 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not fav:
-            logger.warning("Service: Favorite record not found for user_story_id=%s, user_id=%s", user_story_id, user_id)
+            logger.warning(
+                "Service: Favorite record not found for user_story_id=%s, user_id=%s",
+                user_story_id, user_id,
+                extra={"user_story_id": user_story_id, "user_id": user_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Favorite not found"
             )
 
         fav.deleted_at = datetime.now(timezone.utc)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
-        logger.info("Service: Successfully removed favorite for user_story_id=%s", user_story_id)
+        logger.info(
+            "Service: Successfully removed favorite for user_story_id=%s",
+            user_story_id,
+            extra={"user_story_id": user_story_id, "favorite_id": str(fav.id)},
+        )
 
         return RemoveFavoriteResponse(id=str(fav.id))
 
@@ -1656,12 +1857,16 @@ class UserStoryService:
         self, user_story_id: str | None, project_id: str, user_id: str, organization_id: str,
         files: List[UploadFile]
     ) -> List[UserStoryAttachmentResponse]:
-        logger.info("Service: Uploading %d attachment(s) for user_story_id=%s", len(files), user_story_id)
+        logger.info(
+            "Service: Uploading %d attachment(s) for user_story_id=%s",
+            len(files), user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "files_count": len(files)},
+        )
 
         _, _, authorized = await self._check_authorization(project_id, user_id)
         if not authorized:
             raise UserStoryServiceError(403, "FORBIDDEN", "You do not have permission to upload attachments")
-        story = await self._story(user_story_id, project_id) if user_story_id else None
+        story = await self._story(user_story_id, project_id, load_relations=False) if user_story_id else None
         resolved_story_id = str(story.id) if story else None
         max_files = get_settings().attachment_max_files_count
 
@@ -1787,6 +1992,7 @@ class UserStoryService:
                 attachments.append(attachment)
 
             await self._commit()
+            await bump_project_version(self.redis, project_id)
             for attachment in attachments:
                 await self.db.refresh(attachment)
         except UserStoryServiceError:
@@ -1840,16 +2046,24 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully uploaded %d attachment(s) for user_story_id=%s", len(responses), user_story_id)
+        logger.info(
+            "Service: Successfully uploaded %d attachment(s) for user_story_id=%s",
+            len(responses), user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "count": len(responses)},
+        )
 
         return responses
 
     async def get_attachments(
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str
     ) -> List[UserStoryAttachmentResponse]:
-        logger.info("Service: Fetching attachments for user_story_id=%s", user_story_id)
+        logger.info(
+            "Service: Fetching attachments for user_story_id=%s",
+            user_story_id,
+            extra={"user_story_id": user_story_id, "project_id": project_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         resolved_story_id = str(story.id)
 
         attachments = (
@@ -1860,7 +2074,11 @@ class UserStoryService:
             )
         ).scalars().all()
 
-        logger.info("Service: Found %d attachment(s) for user_story_id=%s", len(attachments), user_story_id)
+        logger.info(
+            "Service: Found %d attachment(s) for user_story_id=%s",
+            len(attachments), user_story_id,
+            extra={"user_story_id": user_story_id, "count": len(attachments)},
+        )
 
         return [
             UserStoryAttachmentResponse(
@@ -1880,9 +2098,13 @@ class UserStoryService:
     async def download_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str
     ) -> Tuple[bytes, str, str]:
-        logger.info("Service: Downloading attachment_id=%s for user_story_id=%s", attachment_id, user_story_id)
+        logger.info(
+            "Service: Downloading attachment_id=%s for user_story_id=%s",
+            attachment_id, user_story_id,
+            extra={"attachment_id": attachment_id, "user_story_id": user_story_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         resolved_story_id = str(story.id)
 
         attachment = (
@@ -1895,7 +2117,11 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not attachment:
-            logger.warning("Service: Attachment not found attachment_id=%s", attachment_id)
+            logger.warning(
+                "Service: Attachment not found attachment_id=%s",
+                attachment_id,
+                extra={"attachment_id": attachment_id, "user_story_id": user_story_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Attachment not found"
             )
@@ -1903,16 +2129,24 @@ class UserStoryService:
         stream, _, stored_mime = await asyncio.to_thread(get_s3_object, attachment.storage_path)
         content = await asyncio.to_thread(stream.read)
 
-        logger.info("Service: Successfully read attachment_id=%s ('%s')", attachment_id, attachment.original_filename)
+        logger.info(
+            "Service: Successfully read attachment_id=%s ('%s')",
+            attachment_id, attachment.original_filename,
+            extra={"attachment_id": attachment_id},
+        )
 
         return content, attachment.original_filename, attachment.mime_type or stored_mime
 
     async def delete_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str, organization_id: str
     ) -> None:
-        logger.info("Service: Deleting attachment_id=%s from user_story_id=%s", attachment_id, user_story_id)
+        logger.info(
+            "Service: Deleting attachment_id=%s from user_story_id=%s",
+            attachment_id, user_story_id,
+            extra={"attachment_id": attachment_id, "user_story_id": user_story_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         resolved_story_id = str(story.id)
 
         attachment = (
@@ -1925,7 +2159,11 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not attachment:
-            logger.warning("Service: Attachment not found attachment_id=%s", attachment_id)
+            logger.warning(
+                "Service: Attachment not found attachment_id=%s",
+                attachment_id,
+                extra={"attachment_id": attachment_id, "user_story_id": user_story_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Attachment not found"
             )
@@ -1934,6 +2172,7 @@ class UserStoryService:
 
         await self.db.delete(attachment)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
 
         try:
             await asyncio.to_thread(delete_s3_object, storage_path)
@@ -1952,21 +2191,38 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully deleted attachment_id=%s", attachment_id)
+        logger.info(
+            "Service: Successfully deleted attachment_id=%s",
+            attachment_id,
+            extra={"attachment_id": attachment_id, "user_story_id": user_story_id},
+        )
 
     async def create_comment(
         self, req: CreateCommentRequest, user_story_id: str, project_id: str,
         user_id: str, organization_id: str
     ) -> CommentResponse:
-        logger.info("Service: Creating comment for user_story_id=%s by user_id=%s", user_story_id, user_id)
+        logger.info(
+            "Service: Creating comment for user_story_id=%s by user_id=%s",
+            user_story_id, user_id,
+            extra={"user_story_id": user_story_id, "user_id": user_id, "project_id": project_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        project, user, _ = await self._check_authorization(project_id, user_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
-        has_comment = await self.check_permission(user_id, project_id, "comments", "comment")
-        has_add = await self.check_permission(user_id, project_id, "comments", "add")
+        has_comment = await self.check_permission(
+            user_id, project_id, "comments", "comment", user=user, project=project
+        )
+        has_add = await self.check_permission(
+            user_id, project_id, "comments", "add", user=user, project=project
+        )
         if not (has_comment or has_add):
-            logger.warning("Service: Permission denied adding comment for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied adding comment for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to add comments to this project",
@@ -1984,7 +2240,11 @@ class UserStoryService:
             ).scalar_one_or_none()
 
             if not parent:
-                logger.warning("Service: Parent comment not found parent_comment_id=%s", req.parent_comment_id)
+                logger.warning(
+                    "Service: Parent comment not found parent_comment_id=%s",
+                    req.parent_comment_id,
+                    extra={"parent_comment_id": req.parent_comment_id},
+                )
                 raise UserStoryServiceError(
                     400, ErrorCode.ErrBadRequest.value,
                     "Parent comment belongs to a different user story or project",
@@ -2041,9 +2301,8 @@ class UserStoryService:
             for attachment in drafts:
                 attachment.comment_id = str(comment.id)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
         await self.db.refresh(comment)
-
-        user = await self._user(user_id)
 
         await self._audit(
             user_id=user_id,
@@ -2057,7 +2316,11 @@ class UserStoryService:
             audit_type=AuditLogType.ACTIVITY,
         )
 
-        logger.info("Service: Successfully created comment_id=%s for user_story_id=%s", comment.id, user_story_id)
+        logger.info(
+            "Service: Successfully created comment_id=%s for user_story_id=%s",
+            comment.id, user_story_id,
+            extra={"comment_id": str(comment.id), "user_story_id": user_story_id},
+        )
 
         return CommentResponse(
             id=str(comment.id),
@@ -2070,7 +2333,7 @@ class UserStoryService:
             color=getattr(user, "color", None),
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
-                parent_comment=self._parent_comment_response(comment),
+            parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
@@ -2081,7 +2344,7 @@ class UserStoryService:
         user_id: str, organization_id: str, comment_id: str | None = None,
     ):
         """Use the shared comments attachment implementation for user stories."""
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
         if comment_id:
             comment = (
@@ -2119,7 +2382,7 @@ class UserStoryService:
     async def get_comment_attachments(
         self, comment_id: str, user_story_id: str, project_id: str, user_id: str,
     ) -> List[dict]:
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
         if not await self.check_permission(user_id, project_id, "comments", "view"):
             raise UserStoryServiceError(403, ErrorCode.ErrForbidden.value, "You do not have permission to view comments in this project")
@@ -2150,7 +2413,7 @@ class UserStoryService:
     async def download_draft_comment_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
     ):
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
         attachment = (
             await self.db.execute(
@@ -2170,7 +2433,7 @@ class UserStoryService:
     async def delete_draft_comment_attachment(
         self, attachment_id: str, user_story_id: str, project_id: str, user_id: str,
     ) -> None:
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
         attachment = (
             await self.db.execute(
@@ -2196,14 +2459,22 @@ class UserStoryService:
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str,
         page: int = 1, page_size: int = 10
     ) -> Tuple[List[CommentResponse], PaginationResponse]:
-        logger.info("Service: Fetching comments for user_story_id=%s, page=%d", user_story_id, page)
+        logger.info(
+            "Service: Fetching comments for user_story_id=%s, page=%d",
+            user_story_id, page,
+            extra={"user_story_id": user_story_id, "project_id": project_id, "page": page},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         has_perm = await self.check_permission(user_id, project_id, "comments", "view")
         if not has_perm:
-            logger.warning("Service: Permission denied viewing comments for user_id=%s", user_id)
+            logger.warning(
+                "Service: Permission denied viewing comments for user_id=%s",
+                user_id,
+                extra={"user_id": user_id, "project_id": project_id},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value,
                 "You do not have permission to view comments in this project",
@@ -2286,16 +2557,24 @@ class UserStoryService:
             for c in comments
         ]
 
-        logger.info("Service: Found %d comment(s) (total=%d) for user_story_id=%s", len(responses), total, user_story_id)
+        logger.info(
+            "Service: Found %d comment(s) (total=%d) for user_story_id=%s",
+            len(responses), total, user_story_id,
+            extra={"user_story_id": user_story_id, "fetched": len(responses), "total": total},
+        )
 
         return responses, self.pagination(page, page_size, total)
 
     async def get_comment_by_id(
         self, comment_id: str, user_story_id: str, project_id: str, user_id: str, organization_id: str
     ) -> CommentResponse:
-        logger.info("Service: Fetching comment_id=%s for user_story_id=%s", comment_id, user_story_id)
+        logger.info(
+            "Service: Fetching comment_id=%s for user_story_id=%s",
+            comment_id, user_story_id,
+            extra={"comment_id": comment_id, "user_story_id": user_story_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         comment = (
@@ -2313,7 +2592,11 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not comment:
-            logger.warning("Service: Comment not found comment_id=%s", comment_id)
+            logger.warning(
+                "Service: Comment not found comment_id=%s",
+                comment_id,
+                extra={"comment_id": comment_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Comment not found"
             )
@@ -2326,12 +2609,12 @@ class UserStoryService:
             user_id=str(comment.user_id),
             user_name=comment.user.username if comment.user else None,
             full_name=comment.user.full_name if comment.user else None,
-                email=comment.user.email if comment.user else "",
+            email=comment.user.email if comment.user else "",
             avatar_url=comment.user.avatar_url if comment.user else None,
             color=getattr(comment.user, "color", None) if comment.user else None,
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
-                parent_comment=self._parent_comment_response(comment),
+            parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
@@ -2354,9 +2637,13 @@ class UserStoryService:
         self, parent_comment_id: str, user_story_id: str, project_id: str, user_id: str,
         organization_id: str, page: int = 1, page_size: int = 10
     ) -> Tuple[List[CommentResponse], PaginationResponse]:
-        logger.info("Service: Fetching replies for parent_comment_id=%s, user_story_id=%s", parent_comment_id, user_story_id)
+        logger.info(
+            "Service: Fetching replies for parent_comment_id=%s, user_story_id=%s",
+            parent_comment_id, user_story_id,
+            extra={"parent_comment_id": parent_comment_id, "user_story_id": user_story_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         offset = (max(1, page) - 1) * max(1, page_size)
@@ -2421,7 +2708,11 @@ class UserStoryService:
             for c in comments
         ]
 
-        logger.info("Service: Found %d reply comment(s) (total=%d) for parent_comment_id=%s", len(responses), total, parent_comment_id)
+        logger.info(
+            "Service: Found %d reply comment(s) (total=%d) for parent_comment_id=%s",
+            len(responses), total, parent_comment_id,
+            extra={"parent_comment_id": parent_comment_id, "count": len(responses)},
+        )
 
         return responses, self.pagination(page, page_size, total)
 
@@ -2429,9 +2720,13 @@ class UserStoryService:
         self, req: UpdateCommentRequest, comment_id: str, user_story_id: str,
         project_id: str, user_id: str, organization_id: str
     ) -> CommentResponse:
-        logger.info("Service: Updating comment_id=%s for user_story_id=%s by user_id=%s", comment_id, user_story_id, user_id)
+        logger.info(
+            "Service: Updating comment_id=%s for user_story_id=%s by user_id=%s",
+            comment_id, user_story_id, user_id,
+            extra={"comment_id": comment_id, "user_story_id": user_story_id, "user_id": user_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         comment = (
@@ -2448,13 +2743,21 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not comment:
-            logger.warning("Service: Comment not found comment_id=%s", comment_id)
+            logger.warning(
+                "Service: Comment not found comment_id=%s",
+                comment_id,
+                extra={"comment_id": comment_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Comment not found"
             )
 
         if str(comment.user_id) != str(user_id):
-            logger.warning("Service: User_id=%s attempted to update comment owned by user_id=%s", user_id, comment.user_id)
+            logger.warning(
+                "Service: User_id=%s attempted to update comment owned by user_id=%s",
+                user_id, comment.user_id,
+                extra={"user_id": user_id, "owner_id": str(comment.user_id)},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value, "You can only update your own comments"
             )
@@ -2474,7 +2777,11 @@ class UserStoryService:
         comment.updated_at = datetime.now(timezone.utc)
         await self._commit()
 
-        logger.info("Service: Successfully updated comment_id=%s", comment_id)
+        logger.info(
+            "Service: Successfully updated comment_id=%s",
+            comment_id,
+            extra={"comment_id": comment_id},
+        )
 
         return CommentResponse(
             id=str(comment.id),
@@ -2482,12 +2789,12 @@ class UserStoryService:
             user_id=str(comment.user_id),
             user_name=comment.user.username if comment.user else None,
             full_name=comment.user.full_name if comment.user else None,
-                email=comment.user.email if comment.user else "",
+            email=comment.user.email if comment.user else "",
             avatar_url=comment.user.avatar_url if comment.user else None,
             color=getattr(comment.user, "color", None) if comment.user else None,
             content=comment.content,
             parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
-                parent_comment=self._parent_comment_response(comment),
+            parent_comment=self._parent_comment_response(comment),
             created_at=comment.created_at,
             updated_at=comment.updated_at,
             is_deleted=comment.is_deleted,
@@ -2497,9 +2804,13 @@ class UserStoryService:
         self, comment_id: str, user_story_id: str, project_id: str,
         user_id: str, organization_id: str
     ) -> None:
-        logger.info("Service: Deleting comment_id=%s from user_story_id=%s by user_id=%s", comment_id, user_story_id, user_id)
+        logger.info(
+            "Service: Deleting comment_id=%s from user_story_id=%s by user_id=%s",
+            comment_id, user_story_id, user_id,
+            extra={"comment_id": comment_id, "user_story_id": user_story_id, "user_id": user_id},
+        )
 
-        story = await self._story(user_story_id, project_id)
+        story = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(story.id)
 
         comment = (
@@ -2514,13 +2825,21 @@ class UserStoryService:
         ).scalar_one_or_none()
 
         if not comment:
-            logger.warning("Service: Comment not found comment_id=%s", comment_id)
+            logger.warning(
+                "Service: Comment not found comment_id=%s",
+                comment_id,
+                extra={"comment_id": comment_id},
+            )
             raise UserStoryServiceError(
                 404, ErrorCode.ErrNotFound.value, "Comment not found"
             )
 
         if str(comment.user_id) != str(user_id):
-            logger.warning("Service: User_id=%s attempted to delete comment owned by user_id=%s", user_id, comment.user_id)
+            logger.warning(
+                "Service: User_id=%s attempted to delete comment owned by user_id=%s",
+                user_id, comment.user_id,
+                extra={"user_id": user_id, "owner_id": str(comment.user_id)},
+            )
             raise UserStoryServiceError(
                 403, ErrorCode.ErrForbidden.value, "You can only delete your own comments"
             )
@@ -2529,4 +2848,8 @@ class UserStoryService:
         comment.deleted_at = datetime.now(timezone.utc)
         await self._commit()
 
-        logger.info("Service: Successfully soft-deleted comment_id=%s", comment_id)
+        logger.info(
+            "Service: Successfully soft-deleted comment_id=%s",
+            comment_id,
+            extra={"comment_id": comment_id},
+        )

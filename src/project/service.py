@@ -195,18 +195,19 @@ class ProjectService:
         if not name:
             raise ProjectServiceError(400, "BAD_REQUEST", "Project name cannot be empty")
 
-        # 1. Check project name uniqueness within the organization (soft-deleted projects reserve name)
+        # 1. Check project name uniqueness within the organization among active projects
         existing_name = (
             await self.db.execute(
                 select(Project.id).where(
                     Project.organization_id == organization_id,
                     func.lower(Project.name) == func.lower(name),
+                    Project.deleted_at.is_(None),
                 )
             )
         ).first()
         if existing_name:
             raise ProjectServiceError(
-                409, "CONFLICT", "Project name already exists in this organization"
+                409, "CONFLICT", "Project name already exists"
             )
 
         # 2. Derive or validate slug
@@ -218,12 +219,13 @@ class ProjectService:
         if not slug:
             raise ProjectServiceError(400, "BAD_REQUEST", "Slug cannot be empty")
 
-        # 3. Check project slug uniqueness within the organization (soft-deleted projects reserve slug)
+        # 3. Check project slug uniqueness within the organization among active projects
         existing_slug = (
             await self.db.execute(
                 select(Project.id).where(
                     Project.organization_id == organization_id,
                     Project.slug == slug,
+                    Project.deleted_at.is_(None),
                 )
             )
         ).first()
@@ -323,7 +325,7 @@ class ProjectService:
             )
             if "name" in err_msg or "idx_projects_org_name" in err_msg:
                 raise ProjectServiceError(
-                    409, "CONFLICT", "Project name already exists in this organization"
+                    409, "CONFLICT", "Project name already exists"
                 ) from exc
             if "slug" in err_msg or "idx_projects_org_slug" in err_msg:
                 raise ProjectServiceError(
@@ -356,12 +358,13 @@ class ProjectService:
                         Project.organization_id == organization_id,
                         func.lower(Project.name) == func.lower(name),
                         Project.id != project_id,
+                        Project.deleted_at.is_(None),
                     )
                 )
             ).first()
             if duplicate_name:
                 raise ProjectServiceError(
-                    409, "CONFLICT", "Project name already exists in this organization"
+                    409, "CONFLICT", "Project name already exists"
                 )
 
         if updates.get("slug"):
@@ -374,12 +377,13 @@ class ProjectService:
                         Project.organization_id == organization_id,
                         Project.slug == updates["slug"],
                         Project.id != project_id,
+                        Project.deleted_at.is_(None),
                     )
                 )
             ).first()
             if duplicate:
                 raise ProjectServiceError(
-                    409, "CONFLICT", "Project slug already exists in this organization"
+                    409, "CONFLICT", "Project slug already exists"
                 )
         for key, value in updates.items():
             setattr(project, key, value)
@@ -407,11 +411,11 @@ class ProjectService:
             )
             if "name" in err_msg or "idx_projects_org_name" in err_msg:
                 raise ProjectServiceError(
-                    409, "CONFLICT", "Project name already exists in this organization"
+                    409, "CONFLICT", "Project name already exists"
                 ) from exc
             if "slug" in err_msg or "idx_projects_org_slug" in err_msg:
                 raise ProjectServiceError(
-                    409, "CONFLICT", "Project slug already exists in this organization"
+                    409, "CONFLICT", "Project slug already exists"
                 ) from exc
             raise ProjectServiceError(
                 409, "CONFLICT", "Project already exists"
@@ -1020,6 +1024,25 @@ class ProjectService:
         ).scalar_one_or_none()
         if not project:
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Deleted project not found")
+
+        # Check if an active project with the same name or slug already exists
+        conflict = (
+            await self.db.execute(
+                select(Project.id).where(
+                    Project.organization_id == organization_id,
+                    Project.id != project_id,
+                    Project.deleted_at.is_(None),
+                    or_(
+                        func.lower(Project.name) == func.lower(project.name),
+                        Project.slug == project.slug,
+                    ),
+                )
+            )
+        ).first()
+        if conflict:
+            raise ProjectServiceError(
+                409, "CONFLICT", "Cannot restore project because an active project with the same name or slug already exists"
+            )
 
         project.deleted_at = None
         project.updated_at = datetime.now(timezone.utc)
