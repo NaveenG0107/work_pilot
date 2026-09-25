@@ -19,7 +19,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
 from src.audit.models import AuditLog
 from src.auth.models import RefreshToken, User
@@ -323,7 +323,7 @@ class OrganizationService:
         user_result = await self.db.execute(
             select(User)
             .where(User.id == created_by)
-            .options(selectinload(User.role), selectinload(User.organization))
+            .options(joinedload(User.role), joinedload(User.organization))
         )
         user = user_result.scalar_one_or_none()
         if user is None:
@@ -542,7 +542,7 @@ class OrganizationService:
         result = await self.db.execute(
             select(User)
             .where(User.id == str(user_id))
-            .options(selectinload(User.role), selectinload(User.organization))
+            .options(joinedload(User.role), joinedload(User.organization))
         )
         user = result.scalar_one_or_none()
         if user is None:
@@ -631,7 +631,7 @@ class OrganizationService:
             select(User)
             .outerjoin(Role, (Role.id == User.role_id) & (Role.deleted_at.is_(None)))
             .where(User.organization_id == str(org_id))
-            .options(selectinload(User.organization), selectinload(User.role))
+            .options(joinedload(User.organization), contains_eager(User.role))
         )
         if filter_.full_name:
             query = query.where(User.full_name.ilike(f"%{filter_.full_name.strip()}%"))
@@ -729,7 +729,7 @@ class OrganizationService:
         query = (
             select(User)
             .outerjoin(Role, (Role.id == User.role_id) & (Role.deleted_at.is_(None)))
-            .options(selectinload(User.organization), selectinload(User.role))
+            .options(joinedload(User.organization), contains_eager(User.role))
         )
         if filter_.organization_id is not None:
             query = query.where(User.organization_id == str(filter_.organization_id))
@@ -819,7 +819,7 @@ class OrganizationService:
         inviter_result = await self.db.execute(
             select(User)
             .where(User.id == str(inviter_id))
-            .options(selectinload(User.role))
+            .options(joinedload(User.role))
         )
         inviter = inviter_result.scalar_one_or_none()
         if (inviter is None or inviter.role is None or inviter.role.name != "org_admin"
@@ -997,7 +997,7 @@ class OrganizationService:
         user_result = await self.db.execute(
             select(User)
             .where(User.id == str(user_id))
-            .options(selectinload(User.organization), selectinload(User.role))
+            .options(joinedload(User.organization), joinedload(User.role))
         )
         user = user_result.scalar_one_or_none()
         if user is None:

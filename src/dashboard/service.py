@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.auth.models import User
 from src.custom_status.models import CustomStatus
@@ -53,7 +53,7 @@ class DashboardService:
                 ProjectMember.project_id == project_id,
                 ProjectMember.user_id == user.id,
             )
-            .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
+            .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
         res = await self.db.execute(stmt)
         pm = res.scalar_one_or_none()
@@ -87,7 +87,7 @@ class DashboardService:
             await self.db.execute(
                 select(User)
                 .where(User.id == user_id, User.deleted_at.is_(None))
-                .options(selectinload(User.role).selectinload(Role.permissions))
+                .options(joinedload(User.role).selectinload(Role.permissions))
             )
         ).scalar_one_or_none()
         if not user:
@@ -186,7 +186,7 @@ class DashboardService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -303,7 +303,7 @@ class DashboardService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -503,7 +503,7 @@ class DashboardService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -641,7 +641,7 @@ class DashboardService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -772,7 +772,7 @@ class DashboardService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()

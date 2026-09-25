@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from uuid6 import uuid7
 
 from src.audit.models import AuditLog, AuditLogType
@@ -66,7 +66,7 @@ class UserStoryStatusService:
             User.id == str(user_id),
             User.deleted_at.is_(None)
         ).options(
-            selectinload(User.role).selectinload(Role.permissions)
+            joinedload(User.role).selectinload(Role.permissions)
         )
 
         user = (await self.db.execute(user_query)).scalar_one_or_none()

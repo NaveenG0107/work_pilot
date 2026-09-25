@@ -2,6 +2,10 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from src.config import get_logger
+
+logger = get_logger(__name__)
+
 ERROR_CODES = {
     400: "VALIDATION_ERROR",
     401: "UNAUTHORIZED",
@@ -82,6 +86,9 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception(
+        "Unhandled exception on %s %s", request.method, request.url.path
+    )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={

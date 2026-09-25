@@ -1553,11 +1553,11 @@ class UserStoryService:
                 await self.db.execute(
                     select(UserStory)
                     .options(
-                        selectinload(UserStory.project),
-                        selectinload(UserStory.sprint),
-                        selectinload(UserStory.status),
-                        selectinload(UserStory.assignee).joinedload(User.role),
-                        selectinload(UserStory.reporter).joinedload(User.role),
+                        joinedload(UserStory.project),
+                        joinedload(UserStory.sprint),
+                        joinedload(UserStory.status),
+                        joinedload(UserStory.assignee).joinedload(User.role),
+                        joinedload(UserStory.reporter).joinedload(User.role),
                     )
                     .where(*conditions)
                     .order_by(
@@ -2495,8 +2495,8 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments),
-                         selectinload(Comments.parent_comment).selectinload(Comments.user))
+                .options(joinedload(Comments.user), selectinload(Comments.attachments),
+                         joinedload(Comments.parent_comment).joinedload(Comments.user))
                 .where(
                     Comments.user_story_id == user_story_id,
                     Comments.project_id == project_id,
@@ -2580,8 +2580,8 @@ class UserStoryService:
         comment = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments),
-                         selectinload(Comments.parent_comment).selectinload(Comments.user))
+                .options(joinedload(Comments.user), selectinload(Comments.attachments),
+                         joinedload(Comments.parent_comment).joinedload(Comments.user))
                 .where(
                     Comments.id == comment_id,
                     Comments.user_story_id == user_story_id,
@@ -2661,8 +2661,8 @@ class UserStoryService:
         comments = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user), selectinload(Comments.attachments),
-                         selectinload(Comments.parent_comment).selectinload(Comments.user))
+                .options(joinedload(Comments.user), selectinload(Comments.attachments),
+                         joinedload(Comments.parent_comment).joinedload(Comments.user))
                 .where(
                     Comments.parent_comment_id == parent_comment_id,
                     Comments.user_story_id == user_story_id,
@@ -2732,7 +2732,7 @@ class UserStoryService:
         comment = (
             await self.db.execute(
                 select(Comments)
-                .options(selectinload(Comments.user))
+                .options(joinedload(Comments.user))
                 .where(
                     Comments.id == comment_id,
                     Comments.user_story_id == user_story_id,

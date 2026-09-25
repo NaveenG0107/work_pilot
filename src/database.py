@@ -36,6 +36,10 @@ elif DATABASE_URL.startswith("postgresql://"):
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
+    pool_size=20,
+    max_overflow=10,
+    pool_recycle=1800,
+    pool_timeout=30,
     future=True,
     connect_args={
         "prepare_threshold": None,
@@ -101,5 +105,8 @@ def get_redis():
             _build_redis_url(),
             encoding="utf-8",
             decode_responses=True,
+            max_connections=50,
+            socket_timeout=5.0,
+            socket_connect_timeout=5.0,
         )
     return _REDIS_CLIENT

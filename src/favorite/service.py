@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.database import AsyncSession
 from src.favorite.models import Favorite
@@ -46,8 +46,8 @@ class FavoriteService:
                     selectinload(Task.project),
                     selectinload(Task.sprint),
                     selectinload(Task.user_story),
-                    selectinload(Task.reporter),
-                    selectinload(Task.assignee),
+                    joinedload(Task.reporter),
+                    joinedload(Task.assignee),
                     selectinload(Task.labels),
                 )
             )
@@ -64,9 +64,9 @@ class FavoriteService:
                 .options(
                     selectinload(UserStory.project),
                     selectinload(UserStory.sprint),
-                    selectinload(UserStory.status),
-                    selectinload(UserStory.reporter),
-                    selectinload(UserStory.assignee),
+                    joinedload(UserStory.status),
+                    joinedload(UserStory.reporter),
+                    joinedload(UserStory.assignee),
                 )
             )
         ).scalar_one_or_none()
