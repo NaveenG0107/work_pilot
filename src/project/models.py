@@ -16,7 +16,8 @@ class Project(Base):
     __table_args__ = (
         Index("idx_projects_created_by", "created_by"),
         Index("idx_projects_deleted_at", "deleted_at"),
-        Index("idx_projects_slug", "slug", unique=True, postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_projects_org_name", "organization_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_projects_org_slug", "organization_id", "slug", unique=True, postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_fts", text("to_tsvector('english', coalesce(name, '') || ' ' || coalesce(description, '') || ' ' || coalesce(slug, ''))"), postgresql_using="gin"),
     )
 

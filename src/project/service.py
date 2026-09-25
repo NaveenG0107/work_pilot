@@ -171,25 +171,51 @@ class ProjectService:
 
     async def create(self, body: CreateProjectRequest, user_id: str,
                      organization_id: str) -> str:
-        slug = slugify(body.name) or "project"
-        base_slug = slug
-        suffix = 1
-        while True:
-            exists = (
-                await self.db.execute(
-                    select(Project.id).where(
-                        Project.slug == slug,
-                        Project.organization_id == organization_id,
-                        Project.deleted_at.is_(None),
-                    )
+        name = body.name.strip()
+        if not name:
+            raise ProjectServiceError(400, "BAD_REQUEST", "Project name cannot be empty")
+
+        # 1. Check project name uniqueness within the organization
+        existing_name = (
+            await self.db.execute(
+                select(Project.id).where(
+                    Project.organization_id == organization_id,
+                    func.lower(Project.name) == func.lower(name),
+                    Project.deleted_at.is_(None),
                 )
-            ).first()
-            if not exists:
-                break
-            slug = f"{base_slug}-{suffix}"
-            suffix += 1
+            )
+        ).first()
+        if existing_name:
+            raise ProjectServiceError(
+                409, "CONFLICT", "Project name already exists in this organization"
+            )
+
+        # 2. Derive or validate slug
+        if getattr(body, "slug", None) and body.slug.strip():
+            slug = slugify(body.slug.strip())
+        else:
+            slug = slugify(name) or "project"
+
+        if not slug:
+            raise ProjectServiceError(400, "BAD_REQUEST", "Slug cannot be empty")
+
+        # 3. Check project slug uniqueness within the organization
+        existing_slug = (
+            await self.db.execute(
+                select(Project.id).where(
+                    Project.organization_id == organization_id,
+                    Project.slug == slug,
+                    Project.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        if existing_slug:
+            raise ProjectServiceError(
+                409, "CONFLICT", "Project slug already exists in this organization"
+            )
+
         role = await self._member_role(user_id, organization_id)
-        project = Project(organization_id=organization_id, name=body.name,
+        project = Project(organization_id=organization_id, name=name,
             slug=slug, description=body.description, status="planning", created_by=user_id)
         try:
             self.db.add(project)
@@ -246,6 +272,15 @@ class ProjectService:
             return str(project.id)
         except IntegrityError as exc:
             await self.db.rollback()
+            err_msg = str(exc).lower()
+            if "name" in err_msg:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project name already exists in this organization"
+                ) from exc
+            if "slug" in err_msg:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project slug already exists in this organization"
+                ) from exc
             raise ProjectServiceError(409, "CONFLICT", "Project already exists") from exc
 
     async def update(self, project_id: str, body: UpdateProjectRequest,
@@ -262,6 +297,26 @@ class ProjectService:
                 "BAD_REQUEST",
                 "Invalid status. Allowed values: active, archived, on_hold, completed, cancelled, planning",
             )
+        if updates.get("name"):
+            name = updates["name"].strip()
+            if not name:
+                raise ProjectServiceError(400, "BAD_REQUEST", "Project name cannot be empty")
+            updates["name"] = name
+            duplicate_name = (
+                await self.db.execute(
+                    select(Project.id).where(
+                        Project.organization_id == organization_id,
+                        func.lower(Project.name) == func.lower(name),
+                        Project.id != project_id,
+                        Project.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if duplicate_name:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project name already exists in this organization"
+                )
+
         if updates.get("slug"):
             updates["slug"] = slugify(updates["slug"])
             if not updates["slug"]:
@@ -278,7 +333,7 @@ class ProjectService:
             ).first()
             if duplicate:
                 raise ProjectServiceError(
-                    400, "BAD_REQUEST", "Project slug is already in use"
+                    409, "CONFLICT", "Project slug already exists in this organization"
                 )
         for key, value in updates.items():
             setattr(project, key, value)
@@ -289,6 +344,15 @@ class ProjectService:
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
+            err_msg = str(exc).lower()
+            if "name" in err_msg:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project name already exists in this organization"
+                ) from exc
+            if "slug" in err_msg:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project slug already exists in this organization"
+                ) from exc
             raise ProjectServiceError(
                 409, "CONFLICT", "Project already exists"
             ) from exc
