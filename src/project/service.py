@@ -1,16 +1,23 @@
+import logging
 import math
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from src.audit.models import AuditLog, AuditLogType
 from src.audit.service import AuditService
 from src.auth.models import User
+from src.utils.performance_cache import (
+    bump_project_version,
+    cache_get_json,
+    cache_set_json,
+    project_version,
+)
 
 # Register relationship targets used by the project graph before the first ORM
 # statement. The model files themselves remain unchanged.
@@ -77,9 +84,13 @@ def slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
+logger = logging.getLogger(__name__)
+
+
 class ProjectService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis: Any = None):
         self.db = db
+        self.redis = redis
 
     @staticmethod
     def pagination(page: int, size: int, total: int) -> PaginationResponse:
@@ -93,15 +104,19 @@ class ProjectService:
             has_previous=page > 1,
         )
 
-    async def _project(self, project_id: str, organization_id: str | None = None) -> Project:
+    async def _project(
+        self,
+        project_id: str,
+        organization_id: str | None = None,
+        load_org: bool = False,
+    ) -> Project:
         conditions = [Project.id == project_id, Project.deleted_at.is_(None)]
         if organization_id:
             conditions.append(Project.organization_id == organization_id)
-        project = (
-            await self.db.execute(
-                select(Project).where(*conditions)
-            )
-        ).scalar_one_or_none()
+        stmt = select(Project).where(*conditions)
+        if load_org:
+            stmt = stmt.options(joinedload(Project.organization))
+        project = (await self.db.execute(stmt)).scalar_one_or_none()
         if not project:
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Project not found")
         return project
@@ -117,7 +132,9 @@ class ProjectService:
 
         project = (
             await self.db.execute(
-                select(Project).where(
+                select(Project)
+                .options(joinedload(Project.creator))
+                .where(
                     reference,
                     Project.organization_id == organization_id,
                     Project.deleted_at.is_(None),
@@ -159,15 +176,18 @@ class ProjectService:
             raise ProjectServiceError(400, "VALIDATION_ERROR", "Invalid project role")
         return role
 
-    async def _member_role(self, user_id: str, organization_id: str) -> Role:
+    async def _member_role(self, user_id: str, organization_id: str) -> tuple[Role, str]:
         user = (
             await self.db.execute(
-                select(User).where(User.id == user_id, User.deleted_at.is_(None))
+                select(User)
+                .options(joinedload(User.role))
+                .where(User.id == user_id, User.deleted_at.is_(None))
             )
         ).scalar_one_or_none()
-        if not user or not user.role_id:
+        if not user or not user.role:
             raise ProjectServiceError(400, "VALIDATION_ERROR", "Invalid project role")
-        return await self._role(str(user.role_id), None, organization_id)
+        creator_name = getattr(user, "username", "user") or "user"
+        return user.role, creator_name
 
     async def create(self, body: CreateProjectRequest, user_id: str,
                      organization_id: str) -> str:
@@ -175,13 +195,12 @@ class ProjectService:
         if not name:
             raise ProjectServiceError(400, "BAD_REQUEST", "Project name cannot be empty")
 
-        # 1. Check project name uniqueness within the organization
+        # 1. Check project name uniqueness within the organization (soft-deleted projects reserve name)
         existing_name = (
             await self.db.execute(
                 select(Project.id).where(
                     Project.organization_id == organization_id,
                     func.lower(Project.name) == func.lower(name),
-                    Project.deleted_at.is_(None),
                 )
             )
         ).first()
@@ -199,13 +218,12 @@ class ProjectService:
         if not slug:
             raise ProjectServiceError(400, "BAD_REQUEST", "Slug cannot be empty")
 
-        # 3. Check project slug uniqueness within the organization
+        # 3. Check project slug uniqueness within the organization (soft-deleted projects reserve slug)
         existing_slug = (
             await self.db.execute(
                 select(Project.id).where(
                     Project.organization_id == organization_id,
                     Project.slug == slug,
-                    Project.deleted_at.is_(None),
                 )
             )
         ).first()
@@ -214,70 +232,100 @@ class ProjectService:
                 409, "CONFLICT", "Project slug already exists in this organization"
             )
 
-        role = await self._member_role(user_id, organization_id)
-        project = Project(organization_id=organization_id, name=name,
-            slug=slug, description=body.description, status="planning", created_by=user_id)
+        role, creator_name = await self._member_role(user_id, organization_id)
+        project = Project(
+            organization_id=organization_id,
+            name=name,
+            slug=slug,
+            description=body.description,
+            status="planning",
+            created_by=user_id,
+        )
         try:
             self.db.add(project)
             await self.db.flush()
 
             # 1. Add project creator as member
-            self.db.add(ProjectMember(project_id=project.id, user_id=user_id,
-                role_id=role.id, added_by_id=user_id, joined_at=datetime.now(timezone.utc)))
+            self.db.add(
+                ProjectMember(
+                    project_id=project.id,
+                    user_id=user_id,
+                    role_id=role.id,
+                    added_by_id=user_id,
+                    joined_at=datetime.now(timezone.utc),
+                )
+            )
 
             # 2. Create default custom statuses for tasks
-            for name, color, order, is_default, is_final in DEFAULT_TASK_STATUSES:
-                self.db.add(CustomStatus(
-                    project_id=project.id,
-                    name=name,
-                    color=color,
-                    display_order=order,
-                    is_default=is_default,
-                    is_final=is_final,
-                ))
+            self.db.add_all(
+                [
+                    CustomStatus(
+                        project_id=project.id,
+                        name=s_name,
+                        color=s_color,
+                        display_order=s_order,
+                        is_default=s_default,
+                        is_final=s_final,
+                    )
+                    for s_name, s_color, s_order, s_default, s_final in DEFAULT_TASK_STATUSES
+                ]
+            )
 
             # 3. Create default statuses for user stories
-            for name, color, order, is_default, is_closed, is_final in DEFAULT_USER_STORY_STATUSES:
-                self.db.add(UserStoryStatus(
-                    project_id=project.id,
-                    name=name,
-                    color=color,
-                    display_order=order,
-                    is_default=is_default,
-                    is_closed=is_closed,
-                    is_final=is_final,
-                ))
+            self.db.add_all(
+                [
+                    UserStoryStatus(
+                        project_id=project.id,
+                        name=s_name,
+                        color=s_color,
+                        display_order=s_order,
+                        is_default=s_default,
+                        is_closed=s_closed,
+                        is_final=s_final,
+                    )
+                    for s_name, s_color, s_order, s_default, s_closed, s_final in DEFAULT_USER_STORY_STATUSES
+                ]
+            )
 
             # 4. Log project creation audit event
-            user = (
-                await self.db.execute(
-                    select(User).where(User.id == user_id, User.deleted_at.is_(None))
+            self.db.add(
+                AuditLog(
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    project_id=project.id,
+                    action="created",
+                    resource_type="project",
+                    resource_id=str(project.id),
+                    details=f"The project '{body.name}' was created by {creator_name}",
+                    type=AuditLogType.ACTIVITY,
+                    created_at=datetime.now(timezone.utc),
                 )
-            ).scalar_one_or_none()
-            creator_name = getattr(user, "username", "user") if user else "user"
-
-            self.db.add(AuditLog(
-                user_id=user_id,
-                organization_id=organization_id,
-                project_id=project.id,
-                action="created",
-                resource_type="project",
-                resource_id=str(project.id),
-                details=f"The project '{body.name}' was created by {creator_name}",
-                type=AuditLogType.ACTIVITY,
-                created_at=datetime.now(timezone.utc),
-            ))
+            )
 
             await self.db.commit()
+            await bump_project_version(self.redis, project.id)
+            logger.info(
+                "Project created successfully",
+                extra={
+                    "project_id": str(project.id),
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                    "operation": "create_project",
+                },
+            )
             return str(project.id)
         except IntegrityError as exc:
             await self.db.rollback()
             err_msg = str(exc).lower()
-            if "name" in err_msg:
+            logger.warning(
+                "Project creation conflict",
+                extra={"organization_id": organization_id, "user_id": user_id, "error": str(exc)},
+            )
+            if "name" in err_msg or "idx_projects_org_name" in err_msg:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project name already exists in this organization"
                 ) from exc
-            if "slug" in err_msg:
+            if "slug" in err_msg or "idx_projects_org_slug" in err_msg:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project slug already exists in this organization"
                 ) from exc
@@ -308,7 +356,6 @@ class ProjectService:
                         Project.organization_id == organization_id,
                         func.lower(Project.name) == func.lower(name),
                         Project.id != project_id,
-                        Project.deleted_at.is_(None),
                     )
                 )
             ).first()
@@ -327,7 +374,6 @@ class ProjectService:
                         Project.organization_id == organization_id,
                         Project.slug == updates["slug"],
                         Project.id != project_id,
-                        Project.deleted_at.is_(None),
                     )
                 )
             ).first()
@@ -342,14 +388,28 @@ class ProjectService:
                     project_id, f"Updated project {project.name}")
         try:
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
+            logger.info(
+                "Project updated successfully",
+                extra={
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                    "operation": "update_project",
+                },
+            )
         except IntegrityError as exc:
             await self.db.rollback()
             err_msg = str(exc).lower()
-            if "name" in err_msg:
+            logger.warning(
+                "Project update conflict",
+                extra={"project_id": project_id, "organization_id": organization_id, "error": str(exc)},
+            )
+            if "name" in err_msg or "idx_projects_org_name" in err_msg:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project name already exists in this organization"
                 ) from exc
-            if "slug" in err_msg:
+            if "slug" in err_msg or "idx_projects_org_slug" in err_msg:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project slug already exists in this organization"
                 ) from exc
@@ -411,6 +471,7 @@ class ProjectService:
             (
                 await self.db.execute(
                     select(Project)
+                    .options(joinedload(Project.organization))
                     .where(*conditions)
                     .order_by(order)
                     .offset((page - 1) * page_size)
@@ -433,17 +494,12 @@ class ProjectService:
             return []
 
         project_ids = [project.id for project in projects]
-        organization_ids = {project.organization_id for project in projects}
-
-        organization_names = dict(
-            (
-                await self.db.execute(
-                    select(Organization.id, Organization.name).where(
-                        Organization.id.in_(organization_ids)
-                    )
-                )
-            ).all()
-        )
+        organization_names = {
+            project.organization_id: (
+                project.organization.name if project.organization else None
+            )
+            for project in projects
+        }
 
         task_counts = dict(
             (
@@ -469,29 +525,53 @@ class ProjectService:
                 )
             ).all()
         )
-        sprint_rows = list(
-            (
+        sprints_by_project: dict[str, list[SprintResponse]] = {
+            str(project_id): [] for project_id in project_ids
+        }
+        sprint_counts: dict[Any, int] = {}
+        if include_sprints:
+            sprint_rows = (
                 await self.db.execute(
-                    select(Sprint).where(
+                    select(
+                        Sprint.id,
+                        Sprint.project_id,
+                        Sprint.name,
+                        Sprint.goal,
+                        Sprint.status,
+                        Sprint.start_date,
+                        Sprint.end_date,
+                    ).where(
                         Sprint.project_id.in_(project_ids),
                         Sprint.deleted_at.is_(None),
                     )
                 )
-            ).scalars()
-        )
-        sprints_by_project: dict[str, list[SprintResponse]] = {
-            str(project_id): [] for project_id in project_ids
-        }
-        for sprint in sprint_rows:
-            sprints_by_project[str(sprint.project_id)].append(
-                SprintResponse(
-                    id=str(sprint.id),
-                    name=sprint.name,
-                    goal=sprint.goal,
-                    status=sprint.status,
-                    start_date=sprint.start_date,
-                    end_date=sprint.end_date,
+            ).all()
+            for sprint in sprint_rows:
+                sprints_by_project[str(sprint.project_id)].append(
+                    SprintResponse(
+                        id=str(sprint.id),
+                        name=sprint.name,
+                        goal=sprint.goal,
+                        status=sprint.status,
+                        start_date=sprint.start_date,
+                        end_date=sprint.end_date,
+                    )
                 )
+            sprint_counts = {
+                pid: len(sprints_by_project[str(pid)]) for pid in project_ids
+            }
+        else:
+            sprint_counts = dict(
+                (
+                    await self.db.execute(
+                        select(Sprint.project_id, func.count(Sprint.id))
+                        .where(
+                            Sprint.project_id.in_(project_ids),
+                            Sprint.deleted_at.is_(None),
+                        )
+                        .group_by(Sprint.project_id)
+                    )
+                ).all()
             )
 
         summaries: list[ProjectSummary] = []
@@ -511,7 +591,7 @@ class ProjectService:
                     status=project.status,
                     created_by=str(project.created_by),
                     created_at=project.created_at,
-                    sprint_count=len(project_sprints),
+                    sprint_count=sprint_counts.get(project.id, len(project_sprints)),
                     total_tasks=task_counts.get(project.id, 0),
                     total_members=member_counts.get(project.id, 0),
                     slug=project.slug,
@@ -543,7 +623,7 @@ class ProjectService:
 
     async def members(self, project_id: str, organization_id: str, page: int,
                       page_size: int, name: str = ""):
-        project = await self._project(project_id, organization_id)
+        project = await self._project(project_id, organization_id, load_org=True)
         stmt = self._member_statement(project_id, name)
         total = (
             await self.db.execute(
@@ -592,13 +672,7 @@ class ProjectService:
         org_name = None
         project_key = None
         if include_context:
-            org_name = (
-                await self.db.execute(
-                    select(Organization.name).where(
-                        Organization.id == project.organization_id
-                    )
-                )
-            ).scalar_one_or_none()
+            org_name = project.organization.name if project.organization else None
             project_key = self._project_key(project.name)
         return [
             ProjectMemberResponse(
@@ -607,9 +681,6 @@ class ProjectService:
                 full_name=user.full_name,
                 role=role.name,
                 avatar_url=user.avatar_url or None,
-                # Detail responses intentionally omit organization/project
-                # context, but a member's profile color is always part of the
-                # response contract.
                 color=user.color or "",
                 organization_name=org_name,
                 project_key=project_key,
@@ -646,7 +717,24 @@ class ProjectService:
                     )
                 ).scalars()
             )
-            role_cache: dict[tuple[str | None, str | None], Role] = {}
+
+            # Pre-fetch available organization roles in a single query
+            org_roles = list(
+                (
+                    await self.db.execute(
+                        select(Role).where(
+                            or_(
+                                Role.organization_id == organization_id,
+                                Role.organization_id.is_(None),
+                            ),
+                            Role.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+            roles_by_id = {str(r.id): r for r in org_roles}
+            roles_by_name = {r.name: r for r in org_roles}
+            aliases = {"tester": "qa", "viewer": "stakeholder"}
 
             existing_users: list[str] = []
             for item in body.members:
@@ -667,16 +755,37 @@ class ProjectService:
                     "stakeholder",
                 }:
                     project_role = "developer"
-                role_key = (item.role_id, project_role)
-                role = role_cache.get(role_key)
-                if role is None:
-                    role = await self._role(
-                        item.role_id, project_role, organization_id
+
+                if item.role_id:
+                    role = roles_by_id.get(item.role_id)
+                else:
+                    lookup_name = aliases.get(project_role, project_role)
+                    role = roles_by_name.get(lookup_name)
+
+                if not role:
+                    role = await self._role(item.role_id, project_role, organization_id)
+
+                self.db.add(
+                    ProjectMember(
+                        project_id=project.id,
+                        user_id=user.id,
+                        role_id=role.id,
+                        added_by_id=actor,
+                        joined_at=datetime.now(timezone.utc),
                     )
-                    role_cache[role_key] = role
-                self.db.add(ProjectMember(project_id=project.id, user_id=user.id,
-                    role_id=role.id, added_by_id=actor, joined_at=datetime.now(timezone.utc)))
+                )
             await self.db.commit()
+            await bump_project_version(self.redis, project.id)
+            logger.info(
+                "Added project members",
+                extra={
+                    "project_id": str(project.id),
+                    "organization_id": organization_id,
+                    "actor_id": actor,
+                    "added_count": len(body.members) - len(existing_users),
+                    "operation": "add_members",
+                },
+            )
             if existing_users:
                 raise ProjectServiceError(
                     400,
@@ -704,6 +813,17 @@ class ProjectService:
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Project member not found")
         member.deleted_at = datetime.now(timezone.utc)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
+        logger.info(
+            "Removed project member",
+            extra={
+                "project_id": project_id,
+                "target_id": target_id,
+                "actor": actor,
+                "organization_id": organization_id,
+                "operation": "remove_member",
+            },
+        )
 
     async def update_member(self, project_id: str, target_id: str,
                             body: UpdateProjectMemberRequest, actor: str,
@@ -724,10 +844,35 @@ class ProjectService:
         member.role_id = role.id
         member.updated_at = datetime.now(timezone.utc)
         await self._commit()
+        await bump_project_version(self.redis, project_id)
+        logger.info(
+            "Updated project member role",
+            extra={
+                "project_id": project_id,
+                "target_id": target_id,
+                "actor": actor,
+                "organization_id": organization_id,
+                "operation": "update_member",
+            },
+        )
 
     async def detail(self, project_id: str, user_id: str, organization_id: str) -> ProjectDetail:
         project = await self._project_by_reference(project_id, organization_id)
         resolved_project_id = str(project.id)
+
+        # Check Redis cache first (failure-tolerant)
+        cache_key = None
+        if self.redis is not None:
+            try:
+                ver = await project_version(self.redis, resolved_project_id)
+                if ver is not None:
+                    cache_key = f"wp:project:detail:{resolved_project_id}:{ver}"
+                    cached = await cache_get_json(self.redis, cache_key)
+                    if cached:
+                        return ProjectDetail.model_validate(cached)
+            except Exception as exc:
+                logger.warning("Redis cache read in detail failed: %s", exc)
+
         member_rows = (
             await self.db.execute(
                 self._member_statement(resolved_project_id)
@@ -736,46 +881,62 @@ class ProjectService:
             )
         ).all()
         members = await self._member_responses(project, member_rows, include_context=False)
-        sprints = list(
-            (
-                await self.db.execute(
-                    select(Sprint).where(
-                        Sprint.project_id == resolved_project_id,
-                        Sprint.deleted_at.is_(None),
-                    ).limit(1000)
-                )
-            ).scalars()
-        )
-        task_rows = (
+
+        sprint_rows = (
             await self.db.execute(
-                select(Task.status, Task.due_date).where(
-                    Task.project_id == resolved_project_id,
-                    Task.deleted_at.is_(None),
-                ).limit(10000)
+                select(
+                    Sprint.id,
+                    Sprint.name,
+                    Sprint.goal,
+                    Sprint.status,
+                    Sprint.start_date,
+                    Sprint.end_date,
+                ).where(
+                    Sprint.project_id == resolved_project_id,
+                    Sprint.deleted_at.is_(None),
+                ).limit(1000)
             )
         ).all()
-        total = len(task_rows)
-        complete = sum(1 for status_value, _ in task_rows if status_value == "completed")
+
         now = datetime.now(timezone.utc)
-        overdue = sum(
-            1
-            for status_value, due_date in task_rows
-            if status_value != "completed" and due_date is not None and due_date < now
-        )
-        creator = (
+        # Use single SQL conditional aggregation instead of loading up to 10,000 tasks
+        task_metrics_row = (
             await self.db.execute(
-                select(User.username).where(
-                    User.id == project.created_by,
+                select(
+                    func.count(Task.id).label("total"),
+                    func.count(case((Task.status == "completed", 1))).label("completed"),
+                    func.count(
+                        case(
+                            (
+                                and_(
+                                    Task.status != "completed",
+                                    Task.due_date.is_not(None),
+                                    Task.due_date < now,
+                                ),
+                                1,
+                            )
+                        )
+                    ).label("overdue"),
+                ).where(
+                    Task.project_id == resolved_project_id,
+                    Task.deleted_at.is_(None),
                 )
             )
-        ).scalar_one_or_none() or ""
-        active = sum(1 for s in sprints if s.status == "active")
-        completed_sprints = sum(1 for s in sprints if s.status == "completed")
-        metrics = ProjectMetrics(total_tasks=total, completed_tasks=complete,
-            pending_tasks=total-complete, overdue_tasks=overdue,
-            completed_tasks_percentage=int(complete * 100 / total) if total else 0,
-            total_sprints=len(sprints), active_sprints=active,
-            completed_sprints=completed_sprints, total_members=len(members))
+        ).first()
+
+        total = task_metrics_row.total if task_metrics_row else 0
+        complete = task_metrics_row.completed if task_metrics_row else 0
+        overdue = task_metrics_row.overdue if task_metrics_row else 0
+
+        creator = getattr(project.creator, "username", "") if project.creator else ""
+        if not creator and project.created_by:
+            creator_row = (
+                await self.db.execute(
+                    select(User.username).where(User.id == project.created_by)
+                )
+            ).scalar_one_or_none()
+            creator = creator_row or ""
+
         sprint_responses = [
             SprintResponse(
                 id=str(sprint.id),
@@ -785,24 +946,118 @@ class ProjectService:
                 start_date=sprint.start_date,
                 end_date=sprint.end_date,
             )
-            for sprint in sprints
+            for sprint in sprint_rows
         ]
+        active = sum(1 for s in sprint_responses if s.status == "active")
+        completed_sprints = sum(1 for s in sprint_responses if s.status == "completed")
+
+        metrics = ProjectMetrics(
+            total_tasks=total,
+            completed_tasks=complete,
+            pending_tasks=total - complete,
+            overdue_tasks=overdue,
+            completed_tasks_percentage=int(complete * 100 / total) if total else 0,
+            total_sprints=len(sprint_responses),
+            active_sprints=active,
+            completed_sprints=completed_sprints,
+            total_members=len(members),
+        )
         active_sprint = next(
             (sr for sr in sprint_responses if sr.status == "active"), None
         )
-        return ProjectDetail(id=str(project.id), organization_id=str(project.organization_id),
-            organization_name=None, name=project.name, key=None, project_key=None,
-            description=project.description, status=project.status,
-            created_by=str(project.created_by), creator=creator,
-            created_at=project.created_at, members=members,
+        detail = ProjectDetail(
+            id=str(project.id),
+            organization_id=str(project.organization_id),
+            organization_name=None,
+            name=project.name,
+            key=None,
+            project_key=None,
+            description=project.description,
+            status=project.status,
+            created_by=str(project.created_by),
+            creator=creator,
+            created_at=project.created_at,
+            members=members,
             sprints=sprint_responses,
             active_sprint=active_sprint,
-            metrics=metrics, slug=project.slug)
+            metrics=metrics,
+            slug=project.slug,
+        )
+        if cache_key and self.redis is not None:
+            try:
+                await cache_set_json(self.redis, cache_key, detail.model_dump(mode="json"))
+            except Exception as exc:
+                logger.warning("Redis cache write in detail failed: %s", exc)
+
+        return detail
 
     async def delete(self, project_id: str, user_id: str, organization_id: str):
         project = await self._project(project_id, organization_id)
         project.deleted_at = datetime.now(timezone.utc)
+        self._audit(user_id, organization_id, project_id, "deleted", "project",
+                    project_id, f"Soft-deleted project {project.name}")
         await self._commit()
+        await bump_project_version(self.redis, project_id)
+        logger.info(
+            "Project soft-deleted successfully",
+            extra={
+                "project_id": project_id,
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "operation": "delete_project",
+            },
+        )
+
+    async def restore(self, project_id: str, user_id: str, organization_id: str) -> Project:
+        project = (
+            await self.db.execute(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                    Project.deleted_at.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if not project:
+            raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Deleted project not found")
+
+        project.deleted_at = None
+        project.updated_at = datetime.now(timezone.utc)
+        self._audit(user_id, organization_id, project_id, "restored", "project",
+                    project_id, f"Restored project {project.name}")
+        await self._commit()
+        await bump_project_version(self.redis, project_id)
+        logger.info(
+            "Project restored successfully",
+            extra={
+                "project_id": project_id,
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "operation": "restore_project",
+            },
+        )
+        return project
+
+    async def reopen(self, project_id: str, user_id: str, organization_id: str) -> Project:
+        project = await self._project(project_id, organization_id)
+        if project.status == "active":
+            return project
+        project.status = "active"
+        project.updated_at = datetime.now(timezone.utc)
+        self._audit(user_id, organization_id, project_id, "reopened", "project",
+                    project_id, f"Reopened project {project.name}")
+        await self._commit()
+        await bump_project_version(self.redis, project_id)
+        logger.info(
+            "Project reopened successfully",
+            extra={
+                "project_id": project_id,
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "operation": "reopen_project",
+            },
+        )
+        return project
 
     async def user_projects(
         self,
@@ -876,7 +1131,9 @@ class ProjectService:
                         organization_id: str) -> UserProjectRoleResponse:
         user = (
             await self.db.execute(
-                select(User).where(
+                select(User)
+                .options(joinedload(User.role))
+                .where(
                     User.id == user_id,
                     User.deleted_at.is_(None),
                 )
@@ -925,16 +1182,7 @@ class ProjectService:
             # every project even when legacy/imported data lacks their
             # project_members row. Return their organization role instead of
             # incorrectly reporting the project as inaccessible.
-            role = None
-            if user.role_id:
-                role = (
-                    await self.db.execute(
-                        select(Role).where(
-                            Role.id == user.role_id,
-                            Role.deleted_at.is_(None),
-                        )
-                    )
-                ).scalar_one_or_none()
+            role = user.role
             if role and (
                 str(project.created_by) == str(user_id)
                 or role.name in {"org_admin", "super_admin"}
@@ -1144,6 +1392,11 @@ class ProjectService:
     async def _commit(self) -> None:
         try:
             await self.db.commit()
-        except Exception:
+        except IntegrityError as exc:
             await self.db.rollback()
+            logger.warning("Database integrity constraint violation during commit: %s", exc)
+            raise ProjectServiceError(409, "CONFLICT", "Resource constraint violation") from exc
+        except Exception as exc:
+            await self.db.rollback()
+            logger.error("Database commit failure: %s", exc, exc_info=True)
             raise
