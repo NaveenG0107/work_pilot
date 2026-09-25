@@ -1157,7 +1157,6 @@ class ProjectService:
                     ProjectMember.project_id == project_id,
                     ProjectMember.user_id == user_id,
                     ProjectMember.deleted_at.is_(None),
-                    Project.deleted_at.is_(None),
                     Project.organization_id == organization_id,
                     Role.deleted_at.is_(None),
                 )
@@ -1169,7 +1168,6 @@ class ProjectService:
                     select(Project).where(
                         Project.id == project_id,
                         Project.organization_id == organization_id,
-                        Project.deleted_at.is_(None),
                     )
                 )
             ).scalar_one_or_none()
