@@ -330,7 +330,13 @@ class UserStoryService:
 
         return story
 
-    async def _member_role(self, user_id: str, project_id: str) -> Role | None:
+    async def _member_role(self, user_id: str, project_id: str, user: User | None = None) -> Role | None:
+        if user is not None:
+            cache_attr = f"_pm_role_{project_id}"
+            cached = getattr(user, cache_attr, ...)
+            if cached is not ...:
+                return cached
+
         member = (
             await self.db.execute(
                 select(ProjectMember)
@@ -343,10 +349,10 @@ class UserStoryService:
             )
         ).scalar_one_or_none()
 
-        if member:
-            return member.role
-
-        return None
+        role = member.role if member else None
+        if user is not None:
+            setattr(user, f"_pm_role_{project_id}", role)
+        return role
 
     async def check_permission(
         self,
@@ -366,7 +372,7 @@ class UserStoryService:
             return False
 
         if member_role is None:
-            member_role = await self._member_role(user_id, project_id)
+            member_role = await self._member_role(user_id, project_id, user=user)
 
         if member_role is not None:
             if _has_default_permission(member_role.name, resource, action):
@@ -630,36 +636,31 @@ class UserStoryService:
 
         return {str(row.task_id): True for row in rows}
 
-    async def _status_color_map(self, project_id: str) -> dict[str, str]:
+    async def _custom_status_maps(self, project_id: str) -> tuple[dict[str, str], dict[str, bool]]:
         color_map = dict(DEFAULT_STATUS_COLORS)
-        rows = (
-            await self.db.execute(
-                select(CustomStatus.name, CustomStatus.color).where(
-                    CustomStatus.project_id == project_id,
-                    CustomStatus.deleted_at.is_(None),
-                )
-            )
-        ).all()
-
-        for name, color in rows:
-            color_map[normalize_task_status(name)] = color
-
-        return color_map
-
-    async def _status_is_final_map(self, project_id: str) -> dict[str, bool]:
         final_map = dict(DEFAULT_STATUS_IS_FINAL)
         rows = (
             await self.db.execute(
-                select(CustomStatus.name, CustomStatus.is_final).where(
+                select(CustomStatus.name, CustomStatus.color, CustomStatus.is_final).where(
                     CustomStatus.project_id == project_id,
                     CustomStatus.deleted_at.is_(None),
                 )
             )
         ).all()
 
-        for name, is_final in rows:
-            final_map[normalize_task_status(name)] = bool(is_final)
+        for name, color, is_final in rows:
+            norm = normalize_task_status(name)
+            color_map[norm] = color
+            final_map[norm] = bool(is_final)
 
+        return color_map, final_map
+
+    async def _status_color_map(self, project_id: str) -> dict[str, str]:
+        color_map, _ = await self._custom_status_maps(project_id)
+        return color_map
+
+    async def _status_is_final_map(self, project_id: str) -> dict[str, bool]:
+        _, final_map = await self._custom_status_maps(project_id)
         return final_map
 
     async def _tasks_by_story(self, user_story_id: str) -> list[Task]:
@@ -818,8 +819,7 @@ class UserStoryService:
 
     async def _build_single_story(self, story: UserStory, user_id: str, project_id: str) -> UserStoryResponse:
         statuses = await self._statuses_by_project(project_id)
-        color_map = await self._status_color_map(project_id)
-        is_final_map = await self._status_is_final_map(project_id)
+        color_map, is_final_map = await self._custom_status_maps(project_id)
 
         tasks = await self._tasks_by_story(story.id)
         total = len(tasks)
@@ -1574,8 +1574,7 @@ class UserStoryService:
         story_ids = [story.id for story in stories]
         stats = await self._story_task_stats(project_id, story_ids=story_ids)
         statuses = await self._statuses_by_project(project_id)
-        color_map = await self._status_color_map(project_id)
-        is_final_map = await self._status_is_final_map(project_id)
+        color_map, is_final_map = await self._custom_status_maps(project_id)
         fav_story_map = await self._get_favorite_story_map(user_id, story_ids=story_ids)
 
         tasks_by_story = await self._tasks_by_stories(story_ids)

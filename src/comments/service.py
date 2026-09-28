@@ -167,7 +167,7 @@ class CommentService:
         return str(task_id)
 
     async def _check_permission(
-        self, user: User, project_id: str, resource: str, action: str
+        self, user: User, project_id: str, resource: str, action: str, project: Project | None = None
     ) -> bool:
 
         if user.role and user.role.name == "super_admin":
@@ -194,9 +194,10 @@ class CommentService:
                 return True
 
         # 2. Check organization-level role if user is an org_admin in the project's organization
-        proj_stmt = select(Project).where(Project.id == project_id, Project.deleted_at.is_(None))
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
+        if project is None:
+            proj_stmt = select(Project).where(Project.id == project_id, Project.deleted_at.is_(None))
+            proj_res = await self.db.execute(proj_stmt)
+            project = proj_res.scalar_one_or_none()
 
         if project and user.organization_id and str(user.organization_id) == str(project.organization_id):
             if user.role and user.role.name == "org_admin":
@@ -919,8 +920,12 @@ class CommentService:
                 detail="Super admins are not allowed to perform organization-level activities",
             )
 
-        # 2. Fetch task
-        task_stmt = select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
+        # 2. Fetch task with project eagerly loaded
+        task_stmt = (
+            select(Task)
+            .options(joinedload(Task.project))
+            .where(Task.id == task_id, Task.deleted_at.is_(None))
+        )
         task_res = await self.db.execute(task_stmt)
         task = task_res.scalar_one_or_none()
         if not task:
@@ -933,7 +938,7 @@ class CommentService:
         task_title = task.title
 
         # 3. Check permission
-        can_view = await self._check_permission(user, project_id, "comments", "view")
+        can_view = await self._check_permission(user, project_id, "comments", "view", project=task.project)
         if not can_view:
             logger.error("User %s does not have permission to view comments in project %s", user_id, project_id)
             raise HTTPException(
