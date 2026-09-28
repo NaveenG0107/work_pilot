@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -78,5 +78,26 @@ class DashboardResponse(BaseModel):
         default=None, description="Sprint burndown data"
     )
     team_workload: List[TeamWorkload] = Field(default_factory=list, description="Team workload data")
+
+
+class PaginationResponse(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+
+class SuccessResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+    data: Any | None = Field(default=None, exclude_if=lambda value: value is None)
+    meta: PaginationResponse | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
 
 
