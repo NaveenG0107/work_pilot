@@ -166,23 +166,14 @@ class DashboardService:
             )
         return deadlines
 
-    async def get_overview(
+    async def _validate_user_project_and_permission(
         self,
-        project_id: str,
         user_id: str,
-        sprint_id: Optional[str] = None,
-    ) -> DashboardOverview:
-        """
-        Fetches task counts overview (total, completed, pending, overdue, due_soon) for a project/sprint.
-        """
-        logger.info(
-            "Fetching dashboard overview for project %s (user: %s, sprint: %s)",
-            project_id,
-            user_id,
-            sprint_id or "all",
-        )
-
-        # 1. Fetch user
+        project_id: str,
+        resource: str = "projects",
+        action: str = "view",
+        denied_detail: str = "You do not have permission to view dashboard in this project",
+    ) -> tuple[User, Project]:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
@@ -204,7 +195,6 @@ class DashboardService:
                 detail="Super admins are not allowed to perform organization-level activities",
             )
 
-        # 2. Fetch project
         proj_stmt = (
             select(Project)
             .where(Project.id == project_id, Project.deleted_at.is_(None))
@@ -218,24 +208,30 @@ class DashboardService:
                 detail="Project not found",
             )
 
-        # 3. Check permission (requires projects:view)
-        can_view = await self._check_permission(user, project_id, "projects", "view")
+        can_view = await self._check_permission(user, project_id, resource, action)
         if not can_view:
             logger.warning(
-                "User %s not authorized to view dashboard in project %s",
+                "User %s not authorized for %s:%s in project %s",
                 user_id,
+                resource,
+                action,
                 project_id,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to view dashboard in this project",
+                detail=denied_detail,
             )
 
+        return user, project
+
+    async def _get_overview_data(
+        self,
+        project_id: str,
+        sprint_id: Optional[str] = None,
+    ) -> DashboardOverview:
         now = datetime.now(timezone.utc)
         forty_eight_hours_later = now + timedelta(hours=48)
 
-        # Count the shared task scope once. The outer join keeps tasks with a
-        # missing/deleted status in the total, but not in status-based metrics.
         metrics_stmt = (
             select(
                 func.count(Task.id),
@@ -283,72 +279,32 @@ class DashboardService:
             due_soon=due_soon_tasks,
         )
 
-    async def get_task_status(
+    async def get_overview(
         self,
         project_id: str,
         user_id: str,
         sprint_id: Optional[str] = None,
-    ) -> dict:
+    ) -> DashboardOverview:
         """
-        Fetches task counts grouped by custom status for a project/sprint.
+        Fetches task counts overview (total, completed, pending, overdue, due_soon) for a project/sprint.
         """
         logger.info(
-            "Fetching task status summary for project %s (user: %s, sprint: %s)",
+            "Fetching dashboard overview for project %s (user: %s, sprint: %s)",
             project_id,
             user_id,
             sprint_id or "all",
         )
-
-        # 1. Fetch user
-        user_stmt = (
-            select(User)
-            .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(joinedload(User.role).selectinload(Role.permissions))
+        await self._validate_user_project_and_permission(
+            user_id, project_id, "projects", "view",
+            "You do not have permission to view dashboard in this project"
         )
-        user_res = await self.db.execute(user_stmt)
-        user = user_res.scalar_one_or_none()
-        if not user:
-            logger.error("User not found: %s", user_id)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
+        return await self._get_overview_data(project_id, sprint_id)
 
-        if user.role and user.role.name == "super_admin":
-            logger.error("Super admins are not allowed to perform organization-level activities")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Super admins are not allowed to perform organization-level activities",
-            )
-
-        # 2. Fetch project
-        proj_stmt = (
-            select(Project)
-            .where(Project.id == project_id, Project.deleted_at.is_(None))
-        )
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found or is deleted", project_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
-
-        # 3. Check permission (requires projects:view)
-        can_view = await self._check_permission(user, project_id, "projects", "view")
-        if not can_view:
-            logger.warning(
-                "User %s not authorized to view task status in project %s",
-                user_id,
-                project_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to view task status in this project",
-            )
-
-        # 4. Fetch all custom statuses for the project to include zero values for unused statuses
+    async def _get_task_status_data(
+        self,
+        project_id: str,
+        sprint_id: Optional[str] = None,
+    ) -> dict:
         cs_stmt = (
             select(CustomStatus)
             .where(
@@ -368,7 +324,6 @@ class DashboardService:
                 "color": cs.color,
             }
 
-        # 5. Fetch task counts grouped by status (using is_final for completed)
         status_expr = case(
             (CustomStatus.is_final.is_(True), "completed"),
             else_=Task.status,
@@ -393,7 +348,6 @@ class DashboardService:
         grouped_res = await self.db.execute(query)
         rows = grouped_res.all()
 
-        # 6. Update task_status map with actual counts
         for row in rows:
             stat_name = row[0]
             count_val = row[1]
@@ -413,39 +367,34 @@ class DashboardService:
 
         return task_status
 
-    async def _calculate_sprint_burndown(
-        self, project_id: str, sprint: Sprint
-    ) -> List[SprintBurndownPoint]:
-        if not sprint.start_date or not sprint.end_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Sprint start date and end date must be set",
-            )
-
-        start_d = sprint.start_date if isinstance(sprint.start_date, date) else sprint.start_date.date()
-        end_d = sprint.end_date if isinstance(sprint.end_date, date) else sprint.end_date.date()
-
-        if end_d < start_d:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Sprint end date cannot be before start date",
-            )
-
-        # Fetch tasks in this sprint
-        tasks_stmt = (
-            select(Task)
-            .where(
-                Task.project_id == project_id,
-                Task.sprint_id == sprint.id,
-                Task.deleted_at.is_(None),
-            )
+    async def get_task_status(
+        self,
+        project_id: str,
+        user_id: str,
+        sprint_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Fetches task counts grouped by custom status for a project/sprint.
+        """
+        logger.info(
+            "Fetching task status summary for project %s (user: %s, sprint: %s)",
+            project_id,
+            user_id,
+            sprint_id or "all",
         )
-        tasks_res = await self.db.execute(tasks_stmt)
-        tasks = tasks_res.scalars().all()
+        await self._validate_user_project_and_permission(
+            user_id, project_id, "projects", "view",
+            "You do not have permission to view task status in this project"
+        )
+        return await self._get_task_status_data(project_id, sprint_id)
 
-        total_estimated_hours = float(sum(t.estimated_hours or 0 for t in tasks))
-        total_actual_hours = float(sum(t.actual_hours or 0 for t in tasks))
-
+    @staticmethod
+    def _generate_burndown_points(
+        start_d: date,
+        end_d: date,
+        total_estimated_hours: float,
+        total_actual_hours: float,
+    ) -> List[SprintBurndownPoint]:
         total_estimated_hours = round(total_estimated_hours, 2)
         total_actual_hours = round(total_actual_hours, 2)
 
@@ -481,73 +430,45 @@ class DashboardService:
 
         return result
 
-    async def get_sprint_burndown(
+    async def _calculate_sprint_burndown(
+        self, project_id: str, sprint: Sprint
+    ) -> List[SprintBurndownPoint]:
+        if not sprint.start_date or not sprint.end_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Sprint start date and end date must be set",
+            )
+
+        start_d = sprint.start_date if isinstance(sprint.start_date, date) else sprint.start_date.date()
+        end_d = sprint.end_date if isinstance(sprint.end_date, date) else sprint.end_date.date()
+
+        if end_d < start_d:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Sprint end date cannot be before start date",
+            )
+
+        hours_stmt = (
+            select(
+                func.coalesce(func.sum(Task.estimated_hours), 0.0).label("est"),
+                func.coalesce(func.sum(Task.actual_hours), 0.0).label("act"),
+            )
+            .where(
+                Task.project_id == project_id,
+                Task.sprint_id == sprint.id,
+                Task.deleted_at.is_(None),
+            )
+        )
+        row = (await self.db.execute(hours_stmt)).one()
+        return self._generate_burndown_points(
+            start_d, end_d, float(row.est or 0.0), float(row.act or 0.0)
+        )
+
+    async def _get_sprint_burndown_data(
         self,
         project_id: str,
-        user_id: str,
         sprint_id: Optional[str] = None,
     ) -> DashboardSprintBurndownResponse:
-        """
-        Fetches sprint burndown chart data for a project dashboard.
-        If sprint_id is specified, returns data for that single sprint.
-        If omitted, returns burndown for all active sprints of the project.
-        """
-        logger.info(
-            "Fetching sprint burndown for project %s (user: %s, sprint: %s)",
-            project_id,
-            user_id,
-            sprint_id or "all active",
-        )
-
-        # 1. Fetch user
-        user_stmt = (
-            select(User)
-            .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(joinedload(User.role).selectinload(Role.permissions))
-        )
-        user_res = await self.db.execute(user_stmt)
-        user = user_res.scalar_one_or_none()
-        if not user:
-            logger.error("User not found: %s", user_id)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
-
-        if user.role and user.role.name == "super_admin":
-            logger.error("Super admins are not allowed to perform organization-level activities")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Super admins are not allowed to perform organization-level activities",
-            )
-
-        # 2. Fetch project
-        proj_stmt = (
-            select(Project)
-            .where(Project.id == project_id, Project.deleted_at.is_(None))
-        )
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found or is deleted", project_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
-
-        # 3. Check permission (requires projects:view)
-        can_view = await self._check_permission(user, project_id, "projects", "view")
-        if not can_view:
-            logger.warning(
-                "User %s not authorized to view sprint burndown in project %s",
-                user_id,
-                project_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to view sprint burndown in this project",
-            )
-
         response_sprints: List[SprintBurndownData] = []
 
         if sprint_id:
@@ -591,6 +512,7 @@ class DashboardService:
             active_res = await self.db.execute(active_sprints_stmt)
             active_sprints = active_res.scalars().all()
 
+            valid_sprints = []
             for sp in active_sprints:
                 if not sp.start_date or not sp.end_date:
                     logger.warning("Skipping active sprint %s due to missing start or end date", sp.id)
@@ -600,9 +522,33 @@ class DashboardService:
                 if end_d < start_d:
                     logger.warning("Skipping active sprint %s because end date is before start date", sp.id)
                     continue
+                valid_sprints.append((sp, start_d, end_d))
 
+            if not valid_sprints:
+                return DashboardSprintBurndownResponse(sprint_burndown=[])
+
+            # Batch query estimated and actual hours for all active sprints in ONE query
+            sp_ids = [sp.id for sp, _, _ in valid_sprints]
+            hours_stmt = (
+                select(
+                    Task.sprint_id,
+                    func.coalesce(func.sum(Task.estimated_hours), 0.0).label("est"),
+                    func.coalesce(func.sum(Task.actual_hours), 0.0).label("act"),
+                )
+                .where(
+                    Task.project_id == project_id,
+                    Task.sprint_id.in_(sp_ids),
+                    Task.deleted_at.is_(None),
+                )
+                .group_by(Task.sprint_id)
+            )
+            hours_res = await self.db.execute(hours_stmt)
+            hours_map = {row.sprint_id: (float(row.est or 0.0), float(row.act or 0.0)) for row in hours_res.all()}
+
+            for sp, start_d, end_d in valid_sprints:
+                est, act = hours_map.get(sp.id, (0.0, 0.0))
                 try:
-                    burndown_points = await self._calculate_sprint_burndown(project_id, sp)
+                    burndown_points = self._generate_burndown_points(start_d, end_d, est, act)
                     response_sprints.append(
                         SprintBurndownData(
                             sprint_id=UUID(sp.id),
@@ -617,6 +563,29 @@ class DashboardService:
             return DashboardSprintBurndownResponse(
                 sprint_burndown=response_sprints
             )
+
+    async def get_sprint_burndown(
+        self,
+        project_id: str,
+        user_id: str,
+        sprint_id: Optional[str] = None,
+    ) -> DashboardSprintBurndownResponse:
+        """
+        Fetches sprint burndown chart data for a project dashboard.
+        If sprint_id is specified, returns data for that single sprint.
+        If omitted, returns burndown for all active sprints of the project.
+        """
+        logger.info(
+            "Fetching sprint burndown for project %s (user: %s, sprint: %s)",
+            project_id,
+            user_id,
+            sprint_id or "all active",
+        )
+        await self._validate_user_project_and_permission(
+            user_id, project_id, "projects", "view",
+            "You do not have permission to view sprint burndown in this project"
+        )
+        return await self._get_sprint_burndown_data(project_id, sprint_id)
 
     async def get_weekly_progress(
         self,
@@ -751,73 +720,11 @@ class DashboardService:
 
         return result
 
-    async def get_team_workload(
+    async def _get_team_workload_data(
         self,
         project_id: str,
-        user_id: str,
         sprint_id: Optional[str] = None,
     ) -> List[TeamWorkload]:
-        """
-        Fetches workload statistics (assigned tasks count and total story points)
-        for all team members assigned to tasks in a project/sprint.
-        """
-        logger.info(
-            "Fetching team workload for project %s (user: %s, sprint: %s)",
-            project_id,
-            user_id,
-            sprint_id or "all",
-        )
-
-        # 1. Fetch user
-        user_stmt = (
-            select(User)
-            .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(joinedload(User.role).selectinload(Role.permissions))
-        )
-        user_res = await self.db.execute(user_stmt)
-        user = user_res.scalar_one_or_none()
-        if not user:
-            logger.error("User not found: %s", user_id)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
-
-        if user.role and user.role.name == "super_admin":
-            logger.error("Super admins are not allowed to perform organization-level activities")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Super admins are not allowed to perform organization-level activities",
-            )
-
-        # 2. Fetch project
-        proj_stmt = (
-            select(Project)
-            .where(Project.id == project_id, Project.deleted_at.is_(None))
-        )
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found or is deleted", project_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
-
-        # 3. Check permission (requires projects:view)
-        can_view = await self._check_permission(user, project_id, "projects", "view")
-        if not can_view:
-            logger.warning(
-                "User %s not authorized to view team workload in project %s",
-                user_id,
-                project_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to view team workload in this project",
-            )
-
-        # 4. Build query joining tasks with users on assignee_id
         stmt = (
             select(
                 User.id.label("user_id"),
@@ -875,6 +782,28 @@ class DashboardService:
 
         return result
 
+    async def get_team_workload(
+        self,
+        project_id: str,
+        user_id: str,
+        sprint_id: Optional[str] = None,
+    ) -> List[TeamWorkload]:
+        """
+        Fetches workload statistics (assigned tasks count and total story points)
+        for all team members assigned to tasks in a project/sprint.
+        """
+        logger.info(
+            "Fetching team workload for project %s (user: %s, sprint: %s)",
+            project_id,
+            user_id,
+            sprint_id or "all",
+        )
+        await self._validate_user_project_and_permission(
+            user_id, project_id, "projects", "view",
+            "You do not have permission to view team workload in this project"
+        )
+        return await self._get_team_workload_data(project_id, sprint_id)
+
     async def get_dashboard_data(
         self,
         project_id: str,
@@ -892,8 +821,13 @@ class DashboardService:
             sprint_id or "all",
         )
 
-        # 1. Fetch overview (handles user auth, project validation, and permissions check)
-        overview = await self.get_overview(project_id, user_id, sprint_id)
+        # 1. Fetch overview (handles user auth, project validation, and permissions check once)
+        await self._validate_user_project_and_permission(
+            user_id, project_id, "projects", "view",
+            "You do not have permission to view dashboard in this project"
+        )
+
+        overview = await self._get_overview_data(project_id, sprint_id)
 
         version = await project_version(self.redis, project_id)
         cache_key = (
@@ -909,13 +843,13 @@ class DashboardService:
             return result
 
         # 2. Fetch task status counts
-        task_status = await self.get_task_status(project_id, user_id, sprint_id)
+        task_status = await self._get_task_status_data(project_id, sprint_id)
 
         # 3. Fetch team workload
-        team_workload = await self.get_team_workload(project_id, user_id, sprint_id)
+        team_workload = await self._get_team_workload_data(project_id, sprint_id)
 
         # 4. Fetch sprint burndown
-        burndown_response = await self.get_sprint_burndown(project_id, user_id, sprint_id)
+        burndown_response = await self._get_sprint_burndown_data(project_id, sprint_id)
 
         logger.info(
             "Composite dashboard data fetched successfully for project %s",

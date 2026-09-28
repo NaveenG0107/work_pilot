@@ -282,17 +282,24 @@ class TaskService:
         if _role_name(getattr(user.role, "name", None)) == "super_admin":
             return False
 
-        member = (
-            await self.db.execute(
-                select(ProjectMember)
-                .where(
-                    ProjectMember.project_id == str(project.id),
-                    ProjectMember.user_id == str(user.id),
-                    ProjectMember.deleted_at.is_(None),
+        cache_attr = f"_pm_{project.id}"
+        member = getattr(user, cache_attr, None)
+        if member is None:
+            member = (
+                await self.db.execute(
+                    select(ProjectMember)
+                    .where(
+                        ProjectMember.project_id == str(project.id),
+                        ProjectMember.user_id == str(user.id),
+                        ProjectMember.deleted_at.is_(None),
+                    )
+                    .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
                 )
-                .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
-            )
-        ).scalars().first()
+            ).scalars().first()
+            setattr(user, cache_attr, member if member is not None else False)
+        elif member is False:
+            member = None
+
         if member is not None and self._role_allows(member.role, resource, action):
             return True
 
@@ -322,17 +329,22 @@ class TaskService:
         return project, user
 
     async def _is_project_member(self, project: Project, user: User) -> bool:
-        member_id = (
-            await self.db.execute(
-                select(ProjectMember.id).where(
-                    ProjectMember.project_id == str(project.id),
-                    ProjectMember.user_id == str(user.id),
-                    ProjectMember.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if member_id is not None:
+        cache_attr = f"_pm_{project.id}"
+        cached = getattr(user, cache_attr, None)
+        if cached is not None and cached is not False:
             return True
+        elif cached is None:
+            member_id = (
+                await self.db.execute(
+                    select(ProjectMember.id).where(
+                        ProjectMember.project_id == str(project.id),
+                        ProjectMember.user_id == str(user.id),
+                        ProjectMember.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if member_id is not None:
+                return True
         return (
             _role_name(getattr(user.role, "name", None)) == "org_admin"
             and user.organization_id == project.organization_id
@@ -680,29 +692,25 @@ class TaskService:
             ).scalar_one_or_none()
             if story is None:
                 continue
-            status_ids = list(
-                (
-                    await self.db.execute(
-                        select(Task.status_id).where(
-                            Task.user_story_id == story_id,
-                            Task.deleted_at.is_(None),
-                        )
+            task_status_info = (
+                await self.db.execute(
+                    select(
+                        func.count(Task.id).label("total"),
+                        func.count(Task.id).filter(CustomStatus.is_final.is_(True)).label("completed"),
                     )
-                ).scalars()
-            )
-            if status_ids:
-                final_ids = set(
-                    (
-                        await self.db.execute(
-                            select(CustomStatus.id).where(
-                                CustomStatus.id.in_(status_ids),
-                                CustomStatus.is_final.is_(True),
-                                CustomStatus.deleted_at.is_(None),
-                            )
-                        )
-                    ).scalars()
+                    .outerjoin(CustomStatus, and_(
+                        CustomStatus.id == Task.status_id,
+                        CustomStatus.deleted_at.is_(None),
+                    ))
+                    .where(
+                        Task.user_story_id == story_id,
+                        Task.deleted_at.is_(None),
+                    )
                 )
-                is_closed = all(status_id in final_ids for status_id in status_ids)
+            ).one()
+            total, completed = int(task_status_info.total or 0), int(task_status_info.completed or 0)
+            if total > 0:
+                is_closed = (completed == total)
             else:
                 story_status = (
                     await self.db.execute(
@@ -1748,7 +1756,7 @@ class TaskService:
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to clone tasks in this project"
             )
-        original = await self._task(task_id, project_id, include_deleted=True)
+        original = await self._task(task_id, project_id, include_deleted=True, load_relations=False)
         statuses = await self._statuses(project_id)
         try:
             status_id, status_name = await self._resolve_status(
@@ -1817,8 +1825,6 @@ class TaskService:
         organization_id: str,
         role: str = "",
     ) -> TaskResponse:
-        task = await self._task(task_id, project_id)
-        task_id = str(task.id)
         project, actor = await self._check_authorization(
             project_id, user_id, "You do not have permission to view tasks in this project"
         )
@@ -1832,9 +1838,12 @@ class TaskService:
                 "FORBIDDEN",
                 "You must be an active project member to assign tasks to yourself",
             )
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         if task.assignee_id != user_id:
             old_assignee = task.assignee_id or "nil"
             task.assignee_id = user_id
+            task.assignee = actor
             task.updated_at = datetime.now(timezone.utc)
             try:
                 await self.db.commit()
@@ -1842,7 +1851,6 @@ class TaskService:
             except SQLAlchemyError as exc:
                 await self.db.rollback()
                 raise TaskServiceError(500, "INTERNAL_SERVER_ERROR", "Failed to update task") from exc
-            task = await self._task(task_id, project_id)
             changed_by = actor.username or actor.full_name or actor.email or user_id
             await self._audit(
                 user_id=user_id,

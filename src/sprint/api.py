@@ -854,6 +854,15 @@ async def trigger_sprint_snapshot(
         )
 
     try:
+        sprint_uuid = uuid.UUID(sprint_id)
+    except (ValueError, TypeError):
+        return error_response(
+            ErrorCode.ErrBadRequest,
+            "Invalid ID format",
+            status_code=400,
+        )
+
+    try:
         user_uuid = uuid.UUID(str(user_id))
     except (ValueError, TypeError):
         return error_response(
@@ -877,6 +886,7 @@ async def trigger_sprint_snapshot(
         project_id=str(project_uuid),
         user_id=str(user_uuid),
         organization_id=str(organization_uuid),
+        sprint_id=str(sprint_uuid),
     )
 
     if err:
