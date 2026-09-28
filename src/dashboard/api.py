@@ -11,6 +11,7 @@ from src.auth.deps import get_current_user
 from src.dashboard.schemas import (
     DashboardOverview,
     DashboardResponse,
+    SuccessResponse,
     TeamWorkload,
     UpcomingDeadline,
     WeeklyProgress,
@@ -38,7 +39,11 @@ def validate_uuid(value: str, param_name: str = "ID") -> str:
         )
 
 
-@router.get("/{project_id}/upcoming-deadlines", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/upcoming-deadlines",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_upcoming_deadlines(
     project_id: str = Path(..., description="Project ID (UUID)"),
     limit: int = Query(7, ge=1, le=50, description="Maximum tasks to return"),
@@ -84,7 +89,11 @@ async def get_upcoming_deadlines(
         )
 
 
-@router.get("/{project_id}/overview", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/overview",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_overview(
     project_id: str = Path(..., description="Project ID (UUID)"),
     sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
@@ -138,7 +147,11 @@ async def get_overview(
         )
 
 
-@router.get("/{project_id}/task-status", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/task-status",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_task_status(
     project_id: str = Path(..., description="Project ID (UUID)"),
     sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
@@ -192,7 +205,11 @@ async def get_task_status(
         )
 
 
-@router.get("/{project_id}/team-workload", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/team-workload",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_team_workload(
     project_id: str = Path(..., description="Project ID (UUID)"),
     sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
@@ -246,7 +263,11 @@ async def get_team_workload(
         )
 
 
-@router.get("/{project_id}/sprint-burndown", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/sprint-burndown",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_sprint_burndown(
     project_id: str = Path(..., description="Project ID (UUID)"),
     sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
@@ -300,7 +321,11 @@ async def get_sprint_burndown(
         )
 
 
-@router.get("/{project_id}/weekly-progress", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/weekly-progress",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_weekly_progress(
     project_id: str = Path(..., description="Project ID (UUID)"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
@@ -375,7 +400,11 @@ async def get_weekly_progress(
         )
 
 
-@router.get("/{project_id}/dashboard", status_code=status.HTTP_200_OK)
+@router.get(
+    "/{project_id}/dashboard",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
 async def get_dashboard(
     project_id: str = Path(..., description="Project ID (UUID)"),
     sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
