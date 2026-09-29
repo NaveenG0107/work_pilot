@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 from uuid6 import uuid7
@@ -1361,21 +1361,18 @@ class CommentService:
                 resource_title = story.title
             target_name = f"userstory: {resource_title or comment.user_story_id}"
 
-        # 6. Preserve deleted parents that still have replies; otherwise hide
-        # the row from normal queries, matching Go's Mark/Delete split.
         now = datetime.now(timezone.utc)
-        active_replies = int(
-            (
-                await self.db.execute(
-                    select(func.count(Comments.id)).where(
-                        Comments.parent_comment_id == comment_id,
-                        Comments.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one()
+        # Soft-delete child replies
+        await self.db.execute(
+            update(Comments)
+            .where(
+                Comments.parent_comment_id == comment_id,
+                Comments.deleted_at.is_(None),
+            )
+            .values(deleted_at=now, is_deleted=True, updated_at=now)
         )
         comment.is_deleted = True
-        comment.deleted_at = None if active_replies else now
+        comment.deleted_at = now
         comment.updated_at = now
 
         # 7. Audit Log
