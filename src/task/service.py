@@ -12,13 +12,14 @@ from html import escape
 from html.parser import HTMLParser
 from typing import Iterable, Sequence
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLogType
 from src.audit.service import AuditService
+from src.comments.models import Comments
 from src.config import get_logger
 from src.utils.performance_cache import (
     bump_project_version,
@@ -1255,19 +1256,12 @@ class TaskService:
                 None if body.sprint_id is None or _is_nil(body.sprint_id) else str(body.sprint_id)
             )
             sprint_changing = target_sprint_id != task.sprint_id
-        if sprint_changing:
-            if task.sprint is not None and task.sprint.status == "completed":
+        if sprint_changing and target_sprint_id is not None:
+            sprint = await self._validate_sprint(target_sprint_id, project_id)
+            if sprint.status == "completed":
                 raise TaskServiceError(
-                    400,
-                    "VALIDATION_ERROR",
-                    "Changing the sprint of a task in a completed sprint is blocked",
+                    400, "VALIDATION_ERROR", "Cannot assign a task to a completed sprint"
                 )
-            if target_sprint_id is not None:
-                sprint = await self._validate_sprint(target_sprint_id, project_id)
-                if sprint.status == "completed":
-                    raise TaskServiceError(
-                        400, "VALIDATION_ERROR", "Cannot assign a task to a completed sprint"
-                    )
 
         statuses = await self._statuses(project_id)
         status_changing = False
@@ -1522,12 +1516,6 @@ class TaskService:
                 ) != task.sprint_id
                 if sprint_changing:
                     target_sprint = None if _is_nil(item.sprint_id) else str(item.sprint_id)
-                    if task.sprint is not None and task.sprint.status == "completed":
-                        raise TaskServiceError(
-                            400,
-                            "VALIDATION_ERROR",
-                            "Changing the sprint of a task in a completed sprint is blocked",
-                        )
                     if target_sprint is not None:
                         sprint = await self._validate_sprint(target_sprint, project_id)
                         if sprint.status == "completed":
@@ -1640,6 +1628,11 @@ class TaskService:
                     raise TaskServiceError(400, "BAD_REQUEST", "Task is already deleted")
                 task.deleted_at = datetime.now(timezone.utc)
                 task.updated_at = datetime.now(timezone.utc)
+                await self.db.execute(
+                    update(Comments)
+                    .where(Comments.task_id == task_id, Comments.deleted_at.is_(None))
+                    .values(deleted_at=task.deleted_at, is_deleted=True, updated_at=task.updated_at)
+                )
                 await self.db.commit()
                 deleted_ids.append(task_id)
                 if task.user_story_id:

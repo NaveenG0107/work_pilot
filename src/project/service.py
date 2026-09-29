@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -46,8 +46,10 @@ from src.project.schema import (
     UserProjectsResponse,
 )
 from src.serial import models as serial_models  # noqa: F401
+from src.comments.models import Comments
 from src.sprint.models import Sprint
 from src.task.models import Task
+from src.user_story.models import UserStory
 from src.user_story import models as user_story_models  # noqa: F401
 from src.user_story_status import models as user_story_status_models  # noqa: F401
 from src.user_story_status.models import UserStoryStatus
@@ -997,7 +999,34 @@ class ProjectService:
 
     async def delete(self, project_id: str, user_id: str, organization_id: str):
         project = await self._project(project_id, organization_id)
-        project.deleted_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        project.deleted_at = now
+
+        # Soft-delete all active child sprints
+        await self.db.execute(
+            update(Sprint)
+            .where(Sprint.project_id == project_id, Sprint.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        # Soft-delete all active child user stories
+        await self.db.execute(
+            update(UserStory)
+            .where(UserStory.project_id == project_id, UserStory.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        # Soft-delete all active child tasks
+        await self.db.execute(
+            update(Task)
+            .where(Task.project_id == project_id, Task.deleted_at.is_(None))
+            .values(deleted_at=now, updated_at=now)
+        )
+        # Soft-delete all comments in this project
+        await self.db.execute(
+            update(Comments)
+            .where(Comments.project_id == project_id, Comments.deleted_at.is_(None))
+            .values(deleted_at=now, is_deleted=True, updated_at=now)
+        )
+
         self._audit(user_id, organization_id, project_id, "deleted", "project",
                     project_id, f"Soft-deleted project {project.name}")
         await self._commit()

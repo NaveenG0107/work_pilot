@@ -4,17 +4,19 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from math import ceil
 
-from sqlalchemy import select, update, func, text, delete, bindparam
+from sqlalchemy import select, update, func, text, delete, bindparam, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLog, AuditLogType
 from src.auth.models import User
+from src.comments.models import Comments
 from src.organization.models import Role
 from src.project.models import Project, ProjectMember
 from src.sprint.models import Sprint, SprintSnapshot
 from src.task.models import Task
+from src.user_story.models import UserStory
 from src.custom_status.models import CustomStatus
 from src.sprint.schema import (
     CreateSprintRequest, StartSprintRequest, UpdateSprintRequest)
@@ -1776,6 +1778,7 @@ class SprintService:
                 pass
 
             # 6. Delete sprint.
+            now = datetime.now(timezone.utc)
             result = await self.db.execute(
                 update(Sprint)
                 .where(
@@ -1783,7 +1786,7 @@ class SprintService:
                     Sprint.deleted_at.is_(None),
                 )
                 .values(
-                    deleted_at=datetime.now(timezone.utc)
+                    deleted_at=now
                 )
             )
 
@@ -1796,7 +1799,74 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Find active child user stories in this sprint
+            story_rows = await self.db.execute(
+                select(UserStory.id).where(
+                    UserStory.sprint_id == sprint_id,
+                    UserStory.project_id == project_id,
+                    UserStory.deleted_at.is_(None),
+                )
+            )
+            child_story_ids = [str(r[0]) for r in story_rows.fetchall()]
+
+            # Find active child tasks (assigned to sprint directly or via child stories)
+            task_conds = [Task.sprint_id == sprint_id]
+            if child_story_ids:
+                task_conds.append(Task.user_story_id.in_(child_story_ids))
+
+            task_rows = await self.db.execute(
+                select(Task.id).where(
+                    Task.project_id == project_id,
+                    Task.deleted_at.is_(None),
+                    or_(*task_conds),
+                )
+            )
+            child_task_ids = [str(r[0]) for r in task_rows.fetchall()]
+
+            # Soft-delete active child user stories
+            if child_story_ids:
+                await self.db.execute(
+                    update(UserStory)
+                    .where(UserStory.id.in_(child_story_ids))
+                    .values(deleted_at=now)
+                )
+
+            # Soft-delete active child tasks
+            if child_task_ids:
+                await self.db.execute(
+                    update(Task)
+                    .where(Task.id.in_(child_task_ids))
+                    .values(deleted_at=now, updated_at=now)
+                )
+
+            # Soft-delete comments on child stories and child tasks
+            if child_story_ids:
+                await self.db.execute(
+                    update(Comments)
+                    .where(
+                        Comments.user_story_id.in_(child_story_ids),
+                        Comments.deleted_at.is_(None),
+                    )
+                    .values(deleted_at=now, is_deleted=True, updated_at=now)
+                )
+            if child_task_ids:
+                await self.db.execute(
+                    update(Comments)
+                    .where(
+                        Comments.task_id.in_(child_task_ids),
+                        Comments.deleted_at.is_(None),
+                    )
+                    .values(deleted_at=now, is_deleted=True, updated_at=now)
+                )
+
             await self.db.commit()
+
+            try:
+                from src.database import get_redis
+                from src.utils.performance_cache import bump_project_version
+                await bump_project_version(get_redis(), project_id)
+            except Exception:
+                pass
 
             # 7. Audit logging.
             try:

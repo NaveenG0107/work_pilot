@@ -6,7 +6,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 from typing import List, Tuple
 
-from sqlalchemy import String, and_, case, func, or_, select, text
+from sqlalchemy import String, and_, case, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -933,11 +933,11 @@ class UserStoryService:
                 )
 
         if req.sprint_id:
-            in_project = await self._sprint_in_project(req.sprint_id, project_id)
-            if not in_project:
+            sprint = await self._validate_sprint(req.sprint_id, project_id)
+            if sprint.status == "completed":
                 raise UserStoryServiceError(
                     400, ErrorCode.ErrBadRequest.value,
-                    "Sprint must belong to the same project",
+                    "Cannot assign a user story to a completed sprint",
                 )
 
         # Serialize numbering for creations in this project until commit.
@@ -1062,6 +1062,23 @@ class UserStoryService:
         ).first()
 
         return sprint is not None
+
+    async def _validate_sprint(self, sprint_id: str, project_id: str) -> Sprint:
+        sprint = (
+            await self.db.execute(
+                select(Sprint).where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if not sprint:
+            raise UserStoryServiceError(
+                400, ErrorCode.ErrBadRequest.value,
+                "Sprint must belong to the same project",
+            )
+        return sprint
 
     async def get_by_id(
         self, user_story_id: str, project_id: str, user_id: str, organization_id: str
@@ -1288,15 +1305,14 @@ class UserStoryService:
                 changes.append(f"removed from sprint '{old_sp_name or 'Sprint'}'")
             updates["sprint_id"] = None
         elif sprint_id:
-            in_project = await self._sprint_in_project(sprint_id, project_id)
-            if not in_project:
-                raise UserStoryServiceError(
-                    400, ErrorCode.ErrBadRequest.value,
-                    "Sprint must belong to the same project",
-                )
-
+            sprint = await self._validate_sprint(sprint_id, project_id)
             old_sprint = existing.sprint_id
             new_sprint = sprint_id
+            if old_sprint != new_sprint and sprint.status == "completed":
+                raise UserStoryServiceError(
+                    400, ErrorCode.ErrBadRequest.value,
+                    "Cannot assign a user story to a completed sprint",
+                )
             if old_sprint != new_sprint:
                 old_sp_name = existing.sprint.name if (existing.sprint and str(existing.sprint_id) == str(old_sprint)) else None
                 if not old_sp_name and existing.sprint_id:
@@ -1394,14 +1410,53 @@ class UserStoryService:
         existing = await self._story(user_story_id, project_id, load_relations=False)
         user_story_id = str(existing.id)
 
+        now = datetime.now(timezone.utc)
+        # 1. Soft-delete user story
         await self.db.execute(
             UserStory.__table__.update()
             .where(
                 UserStory.id == user_story_id,
                 UserStory.project_id == project_id,
             )
-            .values(deleted_at=datetime.now(timezone.utc))
+            .values(deleted_at=now)
         )
+
+        # 2. Find and soft-delete active child tasks
+        task_rows = await self.db.execute(
+            select(Task.id).where(
+                Task.user_story_id == user_story_id,
+                Task.project_id == project_id,
+                Task.deleted_at.is_(None),
+            )
+        )
+        child_task_ids = [str(r[0]) for r in task_rows.fetchall()]
+
+        if child_task_ids:
+            await self.db.execute(
+                update(Task)
+                .where(Task.id.in_(child_task_ids))
+                .values(deleted_at=now, updated_at=now)
+            )
+
+        # 3. Soft-delete comments on user story and on child tasks
+        await self.db.execute(
+            update(Comments)
+            .where(
+                Comments.user_story_id == user_story_id,
+                Comments.deleted_at.is_(None),
+            )
+            .values(deleted_at=now, is_deleted=True, updated_at=now)
+        )
+        if child_task_ids:
+            await self.db.execute(
+                update(Comments)
+                .where(
+                    Comments.task_id.in_(child_task_ids),
+                    Comments.deleted_at.is_(None),
+                )
+                .values(deleted_at=now, is_deleted=True, updated_at=now)
+            )
+
         await self._commit()
         await bump_project_version(self.redis, project_id)
 
