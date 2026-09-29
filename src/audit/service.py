@@ -221,6 +221,28 @@ class AuditService:
                     )
                 )
 
+            if filters.sprint_id:
+                conditions.append(
+                    or_(
+                        AuditLog.sprint_id == filters.sprint_id,
+                        (
+                            func.lower(AuditLog.resource_type).in_(
+                                [
+                                    "sprint",
+                                    "sprints",
+                                ]
+                            )
+                            & (AuditLog.resource_id == filters.sprint_id)
+                        ),
+                        AuditLog.task_id.in_(
+                            select(Task.id).where(Task.sprint_id == filters.sprint_id)
+                        ),
+                        AuditLog.user_story_id.in_(
+                            select(UserStory.id).where(UserStory.sprint_id == filters.sprint_id)
+                        ),
+                    )
+                )
+
             if filters.resource_type:
                 resource_type = filters.resource_type.strip().lower()
 
