@@ -46,6 +46,8 @@ def validate_uuid(value: str, param_name: str = "ID") -> str:
 )
 async def get_upcoming_deadlines(
     project_id: str = Path(..., description="Project ID (UUID)"),
+    sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
+    sprintid: Optional[str] = Query(None, description="Optional Sprint ID alias (UUID)"),
     limit: int = Query(7, ge=1, le=50, description="Maximum tasks to return"),
     current_user: dict = Depends(get_current_user),
     service: DashboardService = Depends(get_dashboard_service),
@@ -66,12 +68,19 @@ async def get_upcoming_deadlines(
             code="ORGANIZATION_REQUIRED",
         )
 
+    # Validate optional sprint ID
+    chosen_sprint_id = sprint_id or sprintid
+    valid_sprint_id: Optional[str] = None
+    if chosen_sprint_id:
+        valid_sprint_id = validate_uuid(chosen_sprint_id, "sprint ID")
+
     try:
         valid_project_id = validate_uuid(project_id, "project ID")
         deadlines = await service.get_upcoming_deadlines(
             user_id=user_id,
             organization_id=organization_id,
             project_id=valid_project_id,
+            sprint_id=valid_sprint_id,
             limit=limit,
         )
         return success(

@@ -80,6 +80,7 @@ class DashboardService:
         organization_id: str,
         *,
         project_id: str,
+        sprint_id: Optional[str] = None,
         limit: int = 7,
     ) -> list[UpcomingDeadline]:
         """Return the exact open tasks counted by dashboard ``due_soon``."""
@@ -125,6 +126,8 @@ class DashboardService:
             CustomStatus.is_final.is_(False),
             CustomStatus.deleted_at.is_(None),
         ]
+        if sprint_id:
+            conditions.append(Task.sprint_id == sprint_id)
 
         rows = (
             await self.db.execute(

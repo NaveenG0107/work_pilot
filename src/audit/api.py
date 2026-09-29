@@ -179,6 +179,7 @@ async def get_audit_logs(
     task_id: str | None = Query(default=None),
     user_story_id: str | None = Query(default=None),
     project_id: str | None = Query(default=None),
+    sprint_id: str | None = Query(default=None),
     service: AuditService = Depends(get_audit_service),
 ):
     try:
@@ -221,6 +222,7 @@ async def get_audit_logs(
             task_id=task_id,
             user_story_id=(user_story_id),
             project_id=project_id,
+            sprint_id=sprint_id,
             type=normalized_type,
         )
 
