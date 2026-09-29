@@ -878,6 +878,7 @@ class TaskService:
         labels: Sequence[str] | None = None,
         is_deleted: bool = False,
         unassigned_task: bool = False,
+        storyless_task: bool = False,
         match: str = "",
         sequence_number: int | None = None,
         serial_number: int | None = None,
@@ -911,6 +912,7 @@ class TaskService:
                 "labels": sorted(list(labels)) if labels else None,
                 "is_deleted": is_deleted,
                 "unassigned_task": unassigned_task,
+                "storyless_task": storyless_task,
                 "match": match,
                 "sequence_number": sequence_number,
                 "serial_number": serial_number,
@@ -993,6 +995,8 @@ class TaskService:
                 conditions.append(condition)
         if unassigned_task:
             conditions.extend((Task.sprint_id.is_(None), Task.user_story_id.is_(None)))
+        if storyless_task:
+            conditions.extend((Task.sprint_id.isnot(None), Task.user_story_id.is_(None)))
         if type:
             conditions.append(Task.type.in_(list(type)))
         if priority:

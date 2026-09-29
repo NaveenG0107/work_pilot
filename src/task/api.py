@@ -288,6 +288,7 @@ async def get_tasks(
     labels: str | None = Query(default=None),
     is_deleted: bool = Query(default=False),
     unassigned_task: bool = Query(default=False),
+    storyless_task: bool = Query(default=False),
     match: str = Query(default="", json_schema_extra={"enum": ["any", "all"]}),
     service: TaskService = Depends(get_task_service),
 ):
@@ -327,6 +328,7 @@ async def get_tasks(
             labels=multi_query(request, "labels"),
             is_deleted=is_deleted,
             unassigned_task=unassigned_task,
+            storyless_task=storyless_task,
             match=match,
             sequence_number=hidden_int_query(request, "sequence_number"),
             serial_number=hidden_int_query(request, "serial_number"),
