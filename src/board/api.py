@@ -56,7 +56,9 @@ async def get_board(
     request: Request,
     page: int = Query(default=1, description="Page number (1-indexed)"),
     page_size: int = Query(default=5, description="Page size (max 50)"),
-    story_id: Optional[str] = Query(default=None, description="User story ID for story expansion or status pagination"),
+    tasks_per_status: int = Query(default=5, ge=1, le=20, description="Tasks per status column in board stories (default 5)"),
+    user_story_id: Optional[str] = Query(default=None, description="User story ID for story expansion or status pagination"),
+    story_id: Optional[str] = Query(default=None, description="Alias for user_story_id", include_in_schema=False),
     status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story"),
     storyless: bool = Query(default=False, description="Whether to fetch story-less tasks (user_story_id IS NULL AND sprint_id IS NOT NULL)"),
     sprint_id: Optional[str] = Query(default=None, description="Optional sprint filter"),
@@ -79,17 +81,20 @@ async def get_board(
         if page_size > MAX_PAGE_SIZE:
             raise BoardServiceError(400, "BAD_REQUEST", f"page_size must not exceed {MAX_PAGE_SIZE}")
 
+        # Resolve user_story_id (support user_story_id, plus backward-compatible story_id alias)
+        effective_story_id = user_story_id or story_id
+
         # Ambiguous combination validations
-        if storyless and story_id:
-            raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide story_id when storyless is true")
+        if storyless and effective_story_id:
+            raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide user_story_id when storyless is true")
         if storyless and status_id:
             raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide status_id when storyless is true")
-        if status_id and not story_id:
-            raise BoardServiceError(400, "BAD_REQUEST", "status_id requires story_id to be specified")
+        if status_id and not effective_story_id:
+            raise BoardServiceError(400, "BAD_REQUEST", "status_id requires user_story_id to be specified")
 
         # UUID validations
         clean_project_id = validate_uuid_param("project_id", project_id)
-        clean_story_id = validate_uuid_param("story_id", story_id)
+        clean_user_story_id = validate_uuid_param("user_story_id", effective_story_id)
         clean_status_id = validate_uuid_param("status_id", status_id)
         clean_sprint_id = validate_uuid_param("sprint_id", sprint_id)
         clean_story_assignee_id = validate_uuid_param("story_assignee_id", story_assignee_id)
@@ -123,11 +128,11 @@ async def get_board(
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
             )
-        elif clean_story_id and clean_status_id:
+        elif clean_user_story_id and clean_status_id:
             mode = "story_status_tasks"
             response = await service.get_board_status_tasks(
                 clean_project_id,
-                clean_story_id,
+                clean_user_story_id,
                 clean_status_id,
                 page=page,
                 page_size=page_size,
@@ -138,11 +143,13 @@ async def get_board(
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
             )
-        elif clean_story_id:
+        elif clean_user_story_id:
             mode = "story"
             response = await service.get_board_story_details(
                 clean_project_id,
-                clean_story_id,
+                clean_user_story_id,
+                page=page,
+                page_size=page_size,
                 task_assignee_id=clean_task_assignee_id,
                 task_status_id=clean_task_status_id,
                 priority=priority,
@@ -158,15 +165,21 @@ async def get_board(
                 page_size=page_size,
                 sprint_id=clean_sprint_id,
                 story_assignee_id=clean_story_assignee_id,
+                task_assignee_id=clean_task_assignee_id,
+                task_status_id=clean_task_status_id,
+                priority=priority,
+                work_type=work_type,
+                label_id=clean_label_id,
+                tasks_per_status=tasks_per_status,
                 current_user_id=str(user_id) if user_id else None,
             )
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.info(
-            "Board request completed: mode=%s, project_id=%s, story_id=%s, status_id=%s, page=%s, page_size=%s, duration_ms=%.2f",
+            "Board request completed: mode=%s, project_id=%s, user_story_id=%s, status_id=%s, page=%s, page_size=%s, duration_ms=%.2f",
             mode,
             clean_project_id,
-            clean_story_id,
+            clean_user_story_id,
             clean_status_id,
             page,
             page_size,
@@ -187,6 +200,8 @@ async def get_board(
             status_code=exc.status_code,
             content={
                 "success": False,
+                "status_code": exc.status_code,
+                "message": exc.message,
                 "error": {
                     "code": exc.code,
                     "status_code": exc.status_code,
@@ -200,6 +215,8 @@ async def get_board(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "success": False,
+                "status_code": 500,
+                "message": "Internal server error. Please try again later.",
                 "error": {
                     "code": "INTERNAL_SERVER_ERROR",
                     "status_code": 500,

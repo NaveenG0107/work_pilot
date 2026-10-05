@@ -859,6 +859,13 @@ class SprintService:
             await self.db.commit()
 
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             response_data = {
                 "id": str(sprint.id),
                 "name": sprint.name,
@@ -872,6 +879,7 @@ class SprintService:
                     parsed_end_date.isoformat()
                     + "T00:00:00Z"
                 ),
+                "total_stories": int(story_count),
             }
 
             return response_data, None
@@ -1142,6 +1150,21 @@ class SprintService:
 
             sprints = result.scalars().all()
 
+            # Batch count user stories per sprint to avoid N+1 queries
+            story_counts: dict[str, int] = {}
+            if sprints:
+                sprint_ids = [s.id for s in sprints]
+                counts_stmt = (
+                    select(UserStory.sprint_id, func.count(UserStory.id))
+                    .where(
+                        UserStory.sprint_id.in_(sprint_ids),
+                        UserStory.deleted_at.is_(None),
+                    )
+                    .group_by(UserStory.sprint_id)
+                )
+                counts_res = await self.db.execute(counts_stmt)
+                story_counts = {str(sp_id): int(cnt) for sp_id, cnt in counts_res.all()}
+
             total_pages = (
                 ceil(total_items / page_size)
                 if total_items > 0
@@ -1176,6 +1199,7 @@ class SprintService:
                             if sprint.end_date
                             else None
                         ),
+                        "total_stories": story_counts.get(str(sprint.id), 0),
                     }
                 )
 
@@ -1270,6 +1294,13 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             sprint_data = {
                 "id": str(sprint.id),
                 "name": sprint.name,
@@ -1285,6 +1316,7 @@ class SprintService:
                     if sprint.end_date
                     else None
                 ),
+                "total_stories": int(story_count),
             }
 
             try:
@@ -2546,6 +2578,13 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == updated_sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             data = {
                 "id": str(updated_sprint.id),
                 "name": updated_sprint.name,
@@ -2566,6 +2605,7 @@ class SprintService:
                     if updated_sprint.actual_end_date
                     else None
                 ),
+                "total_stories": int(story_count),
             }
 
             return data, None

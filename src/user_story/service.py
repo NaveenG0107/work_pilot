@@ -1632,22 +1632,16 @@ class UserStoryService:
         color_map, is_final_map = await self._custom_status_maps(project_id)
         fav_story_map = await self._get_favorite_story_map(user_id, story_ids=story_ids)
 
-        tasks_by_story = await self._tasks_by_stories(story_ids)
-        all_task_ids = [task.id for tasks in tasks_by_story.values() for task in tasks]
-        fav_task_map = await self._get_favorite_task_map(user_id, task_ids=all_task_ids)
-
         responses = []
         for story in stories:
             stat = stats.get(str(story.id), {"total": 0, "completed": 0})
             total_tasks, completed_tasks = stat["total"], stat["completed"]
             progress = (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0
-            tasks = tasks_by_story.get(str(story.id), [])
-            task_responses = await self._task_summaries(tasks, color_map, is_final_map, fav_task_map)
             responses.append(
                 self._story_response(
                     story, statuses, total_tasks, completed_tasks, progress, color_map,
                     is_favourite=fav_story_map.get(str(story.id), False),
-                    tasks=task_responses,
+                    tasks=[],
                 )
             )
 
