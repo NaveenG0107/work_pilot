@@ -199,9 +199,11 @@ async def test_mode_a_story_list():
             assert "id" in first
             assert "project_id" in first
             assert first["project_id"] == project_id
-            assert "name" in first
-            assert "task_count" in first
-            assert isinstance(first["task_count"], int)
+            assert "title" in first
+            assert "total_tasks" in first
+            assert isinstance(first["total_tasks"], int)
+            assert "completed_tasks" in first
+            assert "progress" in first
             assert "priority" in first
             assert "is_favourite" in first
             assert isinstance(first["is_favourite"], bool)
@@ -211,8 +213,21 @@ async def test_mode_a_story_list():
             assert "assignee" in first
             assert "reporter" in first
             assert "due_date" in first
-            # Verify tasks array is NOT returned in Mode A
+            # Verify top-level tasks array is NOT returned in BoardStorySummary (it is inside statuses)
             assert "tasks" not in first
+            assert "statuses" in first
+            assert isinstance(first["statuses"], list)
+            if first["statuses"]:
+                st0 = first["statuses"][0]
+                assert "status_id" in st0
+                assert "status_name" in st0
+                assert "task_count" in st0
+                assert "tasks" in st0
+                assert "meta" in st0
+                assert len(st0["tasks"]) <= 5
+                assert st0["meta"]["page"] == 1
+                assert st0["meta"]["page_size"] == 5
+                assert "has_next" in st0["meta"]
 
         # 2. Next page
         resp_p2 = await client.get(
@@ -226,6 +241,21 @@ async def test_mode_a_story_list():
         assert isinstance(body_p2["data"], list)
         assert body_p2["meta"]["page"] == 2
 
+        # 3. Test tasks_per_status query parameter
+        resp_tps = await client.get(
+            f"/api/v1/projects/{project_id}/board?page=1&page_size=2&tasks_per_status=2",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_tps.status_code == 200
+        body_tps = resp_tps.json()
+        assert body_tps["success"] is True
+        if body_tps["data"]:
+            story0 = body_tps["data"][0]
+            if story0["statuses"]:
+                for st in story0["statuses"]:
+                    assert len(st["tasks"]) <= 2
+                    assert st["meta"]["page_size"] == 2
+
 
 @pytest.mark.anyio
 async def test_mode_b_story_expansion():
@@ -238,17 +268,30 @@ async def test_mode_b_story_expansion():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Test primary user_story_id query parameter
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?story_id={story_id}",
+            f"/api/v1/projects/{project_id}/board?user_story_id={story_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text
+
+        # Verify backward-compatible story_id alias also succeeds
+        resp_alias = await client.get(
+            f"/api/v1/projects/{project_id}/board?story_id={story_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_alias.status_code == 200, resp_alias.text
         body = resp.json()
         assert body["success"] is True
         assert body["status_code"] == 200
         assert isinstance(body["message"], str)
         assert "mode" not in body
         assert "data" in body
+        assert "meta" in body
+        assert body["meta"] is not None
+        assert body["meta"]["page"] == 1
+        assert body["meta"]["total"] == 1
+        assert body["meta"]["has_next"] is False
 
         data = body["data"]
         assert "mode" not in data
@@ -264,7 +307,9 @@ async def test_mode_b_story_expansion():
         assert "status_color" in data
         assert "story_points" in data
         assert isinstance(data["story_points"], int)
-        assert "name" in data
+        assert "title" in data
+        assert "total_tasks" in data
+        assert isinstance(data["total_tasks"], int)
         assert "assignee" in data
         assert "reporter" in data
         assert "due_date" in data
@@ -312,7 +357,7 @@ async def test_mode_c_status_tasks_pagination():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?story_id={story_id}&status_id={status_id}&page=1&page_size=5",
+            f"/api/v1/projects/{project_id}/board?user_story_id={story_id}&status_id={status_id}&page=1&page_size=5",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text
@@ -322,6 +367,12 @@ async def test_mode_c_status_tasks_pagination():
         assert isinstance(body["message"], str)
         assert "mode" not in body
         assert "data" in body
+        assert "meta" in body
+        assert body["meta"] is not None
+        assert body["meta"]["page"] == 1
+        assert body["meta"]["page_size"] == 5
+        assert "total" in body["meta"]
+        assert "has_next" in body["meta"]
 
         data = body["data"]
         assert isinstance(data, dict)
@@ -332,7 +383,9 @@ async def test_mode_c_status_tasks_pagination():
         assert isinstance(data["is_favourite"], bool)
         assert "status_color" in data
         assert "story_points" in data
-        assert "name" in data
+        assert "title" in data
+        assert "total_tasks" in data
+        assert isinstance(data["total_tasks"], int)
         assert "assignee" in data
         assert "reporter" in data
 
@@ -413,9 +466,9 @@ async def test_invalid_parameter_combinations():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 1. storyless=true + story_id
+        # 1. storyless=true + user_story_id
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?storyless=true&story_id={story_id}",
+            f"/api/v1/projects/{project_id}/board?storyless=true&user_story_id={story_id}",
             headers=headers,
         )
         assert resp.status_code == 400
@@ -429,7 +482,7 @@ async def test_invalid_parameter_combinations():
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "BAD_REQUEST"
 
-        # 3. status_id without story_id
+        # 3. status_id without user_story_id
         resp = await client.get(
             f"/api/v1/projects/{project_id}/board?status_id={status_id}",
             headers=headers,
@@ -465,16 +518,16 @@ async def test_invalid_parameter_combinations():
         )
         assert resp.status_code == 400
 
-        # 8. Non-existent story_id
+        # 8. Non-existent user_story_id
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?story_id=00000000-0000-0000-0000-000000000000",
+            f"/api/v1/projects/{project_id}/board?user_story_id=00000000-0000-0000-0000-000000000000",
             headers=headers,
         )
         assert resp.status_code == 404
 
         # 9. Non-existent status_id in Mode C
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?story_id={story_id}&status_id=00000000-0000-0000-0000-000000000000",
+            f"/api/v1/projects/{project_id}/board?user_story_id={story_id}&status_id=00000000-0000-0000-0000-000000000000",
             headers=headers,
         )
         assert resp.status_code == 404
@@ -540,14 +593,14 @@ async def test_n_plus_one_prevention():
 
         # 2. Test Mode B (Story Expansion)
         with QueryCounter(engine) as q_exp:
-            resp_exp = await client.get(f"/api/v1/projects/{project_id}/board?story_id={story_id}", headers=headers)
+            resp_exp = await client.get(f"/api/v1/projects/{project_id}/board?user_story_id={story_id}", headers=headers)
             assert resp_exp.status_code == 200
         print(f"[N+1 Check] Mode B (Story Expansion) Query Count: {q_exp.count} queries")
         assert q_exp.count <= 12, f"Mode B executed too many queries ({q_exp.count})!"
 
         # 3. Test Mode C (Status Pagination)
         with QueryCounter(engine) as q_c:
-            resp_c = await client.get(f"/api/v1/projects/{project_id}/board?story_id={story_id}&status_id={status_id}&page=1&page_size=5", headers=headers)
+            resp_c = await client.get(f"/api/v1/projects/{project_id}/board?user_story_id={story_id}&status_id={status_id}&page=1&page_size=5", headers=headers)
             assert resp_c.status_code == 200
         print(f"[N+1 Check] Mode C (Status Pagination) Query Count: {q_c.count} queries")
         assert q_c.count <= 12, f"Mode C executed too many queries ({q_c.count})!"
