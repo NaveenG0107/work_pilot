@@ -1603,27 +1603,54 @@ class UserStoryService:
         elif filter_.sort_by == "sequence_number":
             order_column = UserStory.sequence_number
 
+        order_expr = (
+            order_column.asc()
+            if filter_.sort_order == "ASC"
+            else order_column.desc()
+        )
+
+        fav_join = (
+            and_(
+                Favorite.user_story_id == UserStory.id,
+                Favorite.user_id == user_id,
+                Favorite.item_type == "user_story",
+                Favorite.deleted_at.is_(None),
+            )
+            if user_id
+            else None
+        )
+
+        stories_stmt = (
+            select(UserStory)
+            .options(
+                joinedload(UserStory.project),
+                joinedload(UserStory.sprint),
+                joinedload(UserStory.status),
+                joinedload(UserStory.assignee).joinedload(User.role),
+                joinedload(UserStory.reporter).joinedload(User.role),
+            )
+            .where(*conditions)
+        )
+
+        if fav_join is not None:
+            fav_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            stories_stmt = stories_stmt.outerjoin(Favorite, fav_join).order_by(
+                fav_priority.asc(),
+                order_expr,
+                UserStory.id.desc(),
+            )
+        else:
+            stories_stmt = stories_stmt.order_by(
+                order_expr,
+                UserStory.id.desc(),
+            )
+
         stories = list(
             (
                 await self.db.execute(
-                    select(UserStory)
-                    .options(
-                        joinedload(UserStory.project),
-                        joinedload(UserStory.sprint),
-                        joinedload(UserStory.status),
-                        joinedload(UserStory.assignee).joinedload(User.role),
-                        joinedload(UserStory.reporter).joinedload(User.role),
-                    )
-                    .where(*conditions)
-                    .order_by(
-                        order_column.asc()
-                        if filter_.sort_order == "ASC"
-                        else order_column.desc()
-                    )
-                    .offset(offset)
-                    .limit(page_size)
+                    stories_stmt.offset(offset).limit(page_size)
                 )
-            ).scalars()
+            ).scalars().unique()
         )
 
         story_ids = [story.id for story in stories]

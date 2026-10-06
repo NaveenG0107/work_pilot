@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -386,6 +386,16 @@ class BoardService:
 
         # 2. Paginated stories query with eager loaded relationships
         offset = (page - 1) * page_size
+        fav_story_join = (
+            and_(
+                Favorite.user_story_id == UserStory.id,
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "user_story",
+                Favorite.deleted_at.is_(None),
+            )
+            if current_user_id
+            else None
+        )
         stories_stmt = (
             select(UserStory)
             .where(*conditions)
@@ -395,15 +405,21 @@ class BoardService:
                 joinedload(UserStory.sprint),
                 joinedload(UserStory.status),
             )
-            .order_by(
-                UserStory.backlog_order.asc(),
+        )
+        if fav_story_join is not None:
+            fav_story_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            stories_stmt = stories_stmt.outerjoin(Favorite, fav_story_join).order_by(
+                fav_story_priority.asc(),
                 UserStory.created_at.desc(),
                 UserStory.id.desc(),
             )
-            .limit(page_size)
-            .offset(offset)
-        )
-        stories = (await self.db.execute(stories_stmt)).scalars().all()
+        else:
+            stories_stmt = stories_stmt.order_by(
+                UserStory.created_at.desc(),
+                UserStory.id.desc(),
+            )
+        stories_stmt = stories_stmt.limit(page_size).offset(offset)
+        stories = (await self.db.execute(stories_stmt)).scalars().unique().all()
 
         story_summaries: list[BoardStorySummary] = []
         if stories:
@@ -450,21 +466,49 @@ class BoardService:
             }
 
             # 7. Window function query to fetch top tasks_per_status per (user_story_id, status_id)
-            rn_col = func.row_number().over(
-                partition_by=(Task.user_story_id, Task.status_id),
-                order_by=(Task.created_at.desc(), Task.id.desc()),
-            ).label("rn")
-
-            ranked_subq = (
-                select(Task.id.label("task_id"), rn_col)
-                .where(
-                    Task.project_id == project_id,
-                    Task.user_story_id.in_(story_ids),
-                    Task.deleted_at.is_(None),
-                    *task_filters,
+            fav_task_join = (
+                and_(
+                    Favorite.task_id == Task.id,
+                    Favorite.user_id == current_user_id,
+                    Favorite.item_type == "task",
+                    Favorite.deleted_at.is_(None),
                 )
-                .subquery()
+                if current_user_id
+                else None
             )
+
+            if fav_task_join is not None:
+                fav_task_priority = case((Favorite.id.is_not(None), 0), else_=1)
+                rn_col = func.row_number().over(
+                    partition_by=(Task.user_story_id, Task.status_id),
+                    order_by=(fav_task_priority.asc(), Task.created_at.desc(), Task.id.desc()),
+                ).label("rn")
+                ranked_subq = (
+                    select(Task.id.label("task_id"), rn_col)
+                    .outerjoin(Favorite, fav_task_join)
+                    .where(
+                        Task.project_id == project_id,
+                        Task.user_story_id.in_(story_ids),
+                        Task.deleted_at.is_(None),
+                        *task_filters,
+                    )
+                    .subquery()
+                )
+            else:
+                rn_col = func.row_number().over(
+                    partition_by=(Task.user_story_id, Task.status_id),
+                    order_by=(Task.created_at.desc(), Task.id.desc()),
+                ).label("rn")
+                ranked_subq = (
+                    select(Task.id.label("task_id"), rn_col)
+                    .where(
+                        Task.project_id == project_id,
+                        Task.user_story_id.in_(story_ids),
+                        Task.deleted_at.is_(None),
+                        *task_filters,
+                    )
+                    .subquery()
+                )
 
             preview_stmt = (
                 select(Task)
@@ -479,7 +523,7 @@ class BoardService:
                     joinedload(Task.user_story),
                     selectinload(Task.labels),
                 )
-                .order_by(Task.user_story_id, Task.status_id, Task.created_at.desc(), Task.id.desc())
+                .order_by(Task.user_story_id, Task.status_id, ranked_subq.c.rn.asc())
             )
             preview_tasks = (await self.db.execute(preview_stmt)).scalars().unique().all()
 
@@ -655,21 +699,49 @@ class BoardService:
         status_counts = dict((await self.db.execute(counts_stmt)).all())
 
         # 4. Batch query preview tasks (top 5 per status) using ROW_NUMBER() window function
-        rn_col = func.row_number().over(
-            partition_by=Task.status_id,
-            order_by=(Task.created_at.desc(), Task.id.desc()),
-        ).label("rn")
-
-        ranked_subq = (
-            select(Task.id.label("task_id"), rn_col)
-            .where(
-                Task.project_id == project_id,
-                Task.user_story_id == user_story_id,
-                Task.deleted_at.is_(None),
-                *task_filters,
+        fav_task_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
             )
-            .subquery()
+            if current_user_id
+            else None
         )
+
+        if fav_task_join is not None:
+            fav_task_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            rn_col = func.row_number().over(
+                partition_by=Task.status_id,
+                order_by=(fav_task_priority.asc(), Task.created_at.desc(), Task.id.desc()),
+            ).label("rn")
+            ranked_subq = (
+                select(Task.id.label("task_id"), rn_col)
+                .outerjoin(Favorite, fav_task_join)
+                .where(
+                    Task.project_id == project_id,
+                    Task.user_story_id == user_story_id,
+                    Task.deleted_at.is_(None),
+                    *task_filters,
+                )
+                .subquery()
+            )
+        else:
+            rn_col = func.row_number().over(
+                partition_by=Task.status_id,
+                order_by=(Task.created_at.desc(), Task.id.desc()),
+            ).label("rn")
+            ranked_subq = (
+                select(Task.id.label("task_id"), rn_col)
+                .where(
+                    Task.project_id == project_id,
+                    Task.user_story_id == user_story_id,
+                    Task.deleted_at.is_(None),
+                    *task_filters,
+                )
+                .subquery()
+            )
 
         preview_stmt = (
             select(Task)
@@ -684,7 +756,7 @@ class BoardService:
                 joinedload(Task.user_story),
                 selectinload(Task.labels),
             )
-            .order_by(Task.status_id, Task.created_at.desc(), Task.id.desc())
+            .order_by(Task.status_id, ranked_subq.c.rn.asc())
         )
         preview_tasks = (await self.db.execute(preview_stmt)).scalars().unique().all()
 
@@ -865,6 +937,16 @@ class BoardService:
 
         # 5. Paginated tasks query
         offset = (page - 1) * page_size
+        fav_task_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
+            )
+            if current_user_id
+            else None
+        )
         tasks_stmt = (
             select(Task)
             .where(*conditions)
@@ -877,10 +959,20 @@ class BoardService:
                 joinedload(Task.user_story),
                 selectinload(Task.labels),
             )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-            .limit(page_size)
-            .offset(offset)
         )
+        if fav_task_join is not None:
+            fav_task_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            tasks_stmt = tasks_stmt.outerjoin(Favorite, fav_task_join).order_by(
+                fav_task_priority.asc(),
+                Task.created_at.desc(),
+                Task.id.desc(),
+            )
+        else:
+            tasks_stmt = tasks_stmt.order_by(
+                Task.created_at.desc(),
+                Task.id.desc(),
+            )
+        tasks_stmt = tasks_stmt.limit(page_size).offset(offset)
         tasks = (await self.db.execute(tasks_stmt)).scalars().unique().all()
 
         # Consolidated batch favorites query for story and tasks (Single round-trip, Zero N+1)
@@ -1009,6 +1101,16 @@ class BoardService:
 
         # 2. Paginated tasks query
         offset = (page - 1) * page_size
+        fav_task_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
+            )
+            if current_user_id
+            else None
+        )
         tasks_stmt = (
             select(Task)
             .where(*conditions)
@@ -1020,10 +1122,20 @@ class BoardService:
                 joinedload(Task.sprint),
                 selectinload(Task.labels),
             )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-            .limit(page_size)
-            .offset(offset)
         )
+        if fav_task_join is not None:
+            fav_task_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            tasks_stmt = tasks_stmt.outerjoin(Favorite, fav_task_join).order_by(
+                fav_task_priority.asc(),
+                Task.created_at.desc(),
+                Task.id.desc(),
+            )
+        else:
+            tasks_stmt = tasks_stmt.order_by(
+                Task.created_at.desc(),
+                Task.id.desc(),
+            )
+        tasks_stmt = tasks_stmt.limit(page_size).offset(offset)
         tasks = (await self.db.execute(tasks_stmt)).scalars().unique().all()
 
         # Batch task favorites query for current user (Zero N+1)

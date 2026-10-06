@@ -12,7 +12,7 @@ from html import escape
 from html.parser import HTMLParser
 from typing import Iterable, Sequence
 
-from sqlalchemy import String, and_, cast, func, or_, select, update
+from sqlalchemy import String, and_, cast, func, or_, select, update, case
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -1079,17 +1079,40 @@ class TaskService:
         }
         sort_column = columns.get(sort_by, Task.created_at)
         order = sort_column.desc() if sort_order == "DESC" else sort_column.asc()
+        fav_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
+            )
+            if user_id
+            else None
+        )
+        tasks_stmt = (
+            select(Task)
+            .where(*conditions)
+            .options(*self._task_options())
+        )
+        if fav_join is not None:
+            fav_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            tasks_stmt = tasks_stmt.outerjoin(Favorite, fav_join).order_by(
+                fav_priority.asc(),
+                order,
+                Task.id.desc(),
+            )
+        else:
+            tasks_stmt = tasks_stmt.order_by(
+                order,
+                Task.id.desc(),
+            )
+
         tasks = list(
             (
                 await self.db.execute(
-                    select(Task)
-                    .where(*conditions)
-                    .options(*self._task_options())
-                    .order_by(order)
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
+                    tasks_stmt.offset((page - 1) * page_size).limit(page_size)
                 )
-            ).scalars()
+            ).scalars().unique()
         )
         colors, finals = self._status_maps(statuses)
         favorite_ids = await self._favorite_task_ids(user_id, (str(task.id) for task in tasks))
