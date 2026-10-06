@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from math import ceil
 
-from sqlalchemy import select, update, func, text, delete, bindparam, or_
+from sqlalchemy import select, update, func, text, delete, bindparam, or_, case
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -1139,11 +1139,23 @@ class SprintService:
 
             offset = (page - 1) * page_size
 
+            status_priority = case(
+                (Sprint.status == "active", 0),
+                (Sprint.status == "planned", 1),
+                (Sprint.status == "completed", 2),
+                else_=3,
+            )
+
             # Fetch sprints
             result = await self.db.execute(
                 select(Sprint)
                 .where(*conditions)
-                .order_by(Sprint.created_at.desc())
+                .order_by(
+                    status_priority.asc(),
+                    Sprint.start_date.desc().nullslast(),
+                    Sprint.created_at.desc(),
+                    Sprint.id.desc(),
+                )
                 .limit(page_size)
                 .offset(offset)
             )
