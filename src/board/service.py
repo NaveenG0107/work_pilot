@@ -439,7 +439,23 @@ class BoardService:
                 )
                 .group_by(Task.user_story_id)
             )
-            task_counts = dict((await self.db.execute(task_counts_stmt)).all())
+            task_counts = {str(r[0]): r[1] for r in (await self.db.execute(task_counts_stmt)).all()}
+
+            final_status_ids = [str(st.id) for st in statuses if st.is_final]
+            if final_status_ids:
+                completed_counts_stmt = (
+                    select(Task.user_story_id, func.count(Task.id))
+                    .where(
+                        Task.project_id == project_id,
+                        Task.user_story_id.in_(story_ids),
+                        Task.status_id.in_(final_status_ids),
+                        Task.deleted_at.is_(None),
+                    )
+                    .group_by(Task.user_story_id)
+                )
+                completed_counts = {str(r[0]): r[1] for r in (await self.db.execute(completed_counts_stmt)).all()}
+            else:
+                completed_counts = {}
 
             # 5. Build task filters for status columns & preview tasks
             task_filters = self._build_task_filters(
@@ -596,14 +612,16 @@ class BoardService:
                     )
 
                 t_count = task_counts.get(sid_str, 0)
+                comp_t = completed_counts.get(sid_str, 0)
+                prog = round((comp_t / t_count * 100.0), 2) if t_count > 0 else 0.0
                 story_summaries.append(
                     BoardStorySummary(
                         id=sid_str,
                         project_id=str(story.project_id),
                         title=story.title,
                         total_tasks=t_count,
-                        completed_tasks=getattr(story, "completed_tasks", 0) or 0,
-                        progress=float(getattr(story, "progress", 0.0) or 0.0),
+                        completed_tasks=comp_t,
+                        progress=prog,
                         description=story.description,
                         assignee=user_summary_from_model(story.assignee),
                         reporter=user_summary_from_model(story.reporter),
@@ -732,7 +750,33 @@ class BoardService:
             )
             .group_by(Task.status_id)
         )
-        status_counts = dict((await self.db.execute(counts_stmt)).all())
+        status_counts = {str(r[0]): r[1] for r in (await self.db.execute(counts_stmt)).all()}
+
+        total_stmt = (
+            select(func.count(Task.id))
+            .where(
+                Task.project_id == project_id,
+                Task.user_story_id == user_story_id,
+                Task.deleted_at.is_(None),
+            )
+        )
+        original_total = (await self.db.execute(total_stmt)).scalar_one()
+
+        final_status_ids = [str(st.id) for st in statuses if st.is_final]
+        if final_status_ids:
+            completed_stmt = (
+                select(func.count(Task.id))
+                .where(
+                    Task.project_id == project_id,
+                    Task.user_story_id == user_story_id,
+                    Task.status_id.in_(final_status_ids),
+                    Task.deleted_at.is_(None),
+                )
+            )
+            original_completed = (await self.db.execute(completed_stmt)).scalar_one()
+        else:
+            original_completed = 0
+        story_progress = round((original_completed / original_total * 100.0), 2) if original_total > 0 else 0.0
 
         # 4. Batch query preview tasks (top 5 per status) using ROW_NUMBER() window function
         fav_task_join = (
@@ -869,9 +913,9 @@ class BoardService:
             priority=story.priority or "medium",
             is_favourite=is_fav,
             story_points=int(story.story_points or 0),
-            total_tasks=sum(status_counts.values()),
-            completed_tasks=getattr(story, "completed_tasks", 0) or 0,
-            progress=float(getattr(story, "progress", 0.0) or 0.0),
+            total_tasks=original_total,
+            completed_tasks=original_completed,
+            progress=story_progress,
             assignee=user_summary_from_model(story.assignee),
             reporter=user_summary_from_model(story.reporter),
             due_date=due_date,
@@ -1065,7 +1109,34 @@ class BoardService:
             meta=pagination,
         )
 
+        statuses = await self._statuses(project_id)
+        final_status_ids = [str(st.id) for st in statuses if st.is_final]
+
         if story is not None:
+            story_total_stmt = (
+                select(func.count(Task.id))
+                .where(
+                    Task.project_id == project_id,
+                    Task.user_story_id == user_story_id,
+                    Task.deleted_at.is_(None),
+                )
+            )
+            story_total = (await self.db.execute(story_total_stmt)).scalar_one()
+            if final_status_ids:
+                story_comp_stmt = (
+                    select(func.count(Task.id))
+                    .where(
+                        Task.project_id == project_id,
+                        Task.user_story_id == user_story_id,
+                        Task.status_id.in_(final_status_ids),
+                        Task.deleted_at.is_(None),
+                    )
+                )
+                story_completed = (await self.db.execute(story_comp_stmt)).scalar_one()
+            else:
+                story_completed = 0
+            story_prog = round((story_completed / story_total * 100.0), 2) if story_total > 0 else 0.0
+
             due_date = None
             if story.sprint and story.sprint.end_date:
                 due_date = datetime.combine(story.sprint.end_date, datetime.min.time(), tzinfo=timezone.utc)
@@ -1083,9 +1154,9 @@ class BoardService:
                 priority=story.priority or "medium",
                 is_favourite=is_fav,
                 story_points=int(story.story_points or 0),
-                total_tasks=getattr(story, "total_tasks", 0) or 0,
-                completed_tasks=getattr(story, "completed_tasks", 0) or 0,
-                progress=float(getattr(story, "progress", 0.0) or 0.0),
+                total_tasks=story_total,
+                completed_tasks=story_completed,
+                progress=story_prog,
                 assignee=user_summary_from_model(story.assignee),
                 reporter=user_summary_from_model(story.reporter),
                 due_date=due_date,
@@ -1097,6 +1168,25 @@ class BoardService:
                 statuses=[status_group],
             )
         else:
+            storyless_base = [
+                Task.project_id == project_id,
+                Task.user_story_id.is_(None),
+                Task.deleted_at.is_(None),
+            ]
+            if sprint_id:
+                storyless_base.append(Task.sprint_id == sprint_id)
+            else:
+                storyless_base.append(Task.sprint_id.isnot(None))
+
+            story_total = (await self.db.execute(select(func.count(Task.id)).where(*storyless_base))).scalar_one()
+            if final_status_ids:
+                story_completed = (await self.db.execute(
+                    select(func.count(Task.id)).where(*storyless_base, Task.status_id.in_(final_status_ids))
+                )).scalar_one()
+            else:
+                story_completed = 0
+            story_prog = round((story_completed / story_total * 100.0), 2) if story_total > 0 else 0.0
+
             story_detail_data = BoardStoryDetailData(
                 id="storyless",
                 project_id=str(project_id),
@@ -1107,9 +1197,9 @@ class BoardService:
                 priority="medium",
                 is_favourite=False,
                 story_points=0,
-                total_tasks=total,
-                completed_tasks=0,
-                progress=0.0,
+                total_tasks=story_total,
+                completed_tasks=story_completed,
+                progress=story_prog,
                 assignee=None,
                 reporter=None,
                 due_date=None,
@@ -1318,7 +1408,7 @@ class BoardService:
             .where(*filtered_conditions)
             .group_by(Task.status_id)
         )
-        status_counts = dict((await self.db.execute(counts_stmt)).all())
+        status_counts = {str(r[0]): r[1] for r in (await self.db.execute(counts_stmt)).all()}
 
         # Top tasks_per_status preview per status
         fav_task_join = (

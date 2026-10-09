@@ -56,13 +56,11 @@ async def get_board(
     request: Request,
     page: int = Query(default=1, description="Page number (1-indexed)"),
     page_size: int = Query(default=5, description="Page size (max 50)"),
-    tasks_per_status: int = Query(default=5, ge=0, le=20, description="Tasks per status column in board stories (default 5)"),
+    tasks_per_status: int = Query(default=5, ge=0, le=20, description="Tasks per status column in board (default 5)"),
     user_story_id: Optional[str] = Query(default=None, description="User story ID for story expansion or status pagination"),
     story_id: Optional[str] = Query(default=None, description="Alias for user_story_id", include_in_schema=False),
-    status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story"),
-    storyless: bool = Query(default=False, description="Whether to fetch story-less tasks (user_story_id IS NULL AND sprint_id IS NOT NULL)"),
-    include_storyless: bool = Query(default=False, description="Whether to include storyless tasks summary row in stories board"),
-    group_by_status: bool = Query(default=True, description="When storyless=true, format storyless tasks by status columns like user stories (default True)"),
+    status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story or status filtering"),
+    storyless_tasks: bool = Query(default=False, description="Whether to fetch storyless tasks grouped by status"),
     sprint_id: Optional[str] = Query(default=None, description="Optional sprint filter"),
     story_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for user stories"),
     task_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for tasks"),
@@ -70,6 +68,10 @@ async def get_board(
     priority: Optional[str] = Query(default=None, description="Optional priority filter (low, medium, high, critical)"),
     work_type: Optional[str] = Query(default=None, description="Optional task type filter (bug, feature, task, etc.)"),
     label_id: Optional[str] = Query(default=None, description="Optional label filter"),
+    # Hidden backward-compatible query aliases:
+    storyless: Optional[bool] = Query(default=None, include_in_schema=False),
+    include_storyless: Optional[bool] = Query(default=None, include_in_schema=False),
+    group_by_status: Optional[bool] = Query(default=None, include_in_schema=False),
     service: BoardService = Depends(get_board_service),
 ):
     start_time = time.perf_counter()
@@ -83,13 +85,16 @@ async def get_board(
         if page_size > MAX_PAGE_SIZE:
             raise BoardServiceError(400, "BAD_REQUEST", f"page_size must not exceed {MAX_PAGE_SIZE}")
 
+        # Resolve storyless_tasks vs legacy storyless
+        effective_storyless = storyless_tasks or (storyless is True)
+
         # Resolve user_story_id (support user_story_id, plus backward-compatible story_id alias)
         effective_story_id = user_story_id or story_id
         is_storyless_id = bool(effective_story_id and effective_story_id.strip().lower() == "storyless")
 
         # Ambiguous combination validations
-        if storyless and effective_story_id and not is_storyless_id:
-            raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide user_story_id when storyless is true")
+        if effective_storyless and effective_story_id and not is_storyless_id:
+            raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide user_story_id when storyless_tasks is true")
 
         # UUID validations
         clean_project_id = validate_uuid_param("project_id", project_id)
@@ -101,8 +106,8 @@ async def get_board(
         clean_task_status_id = validate_uuid_param("task_status_id", task_status_id)
         clean_label_id = validate_uuid_param("label_id", label_id)
 
-        # If storyless=True and status_id is provided, treat it as status tasks pagination for storyless row
-        if storyless and clean_status_id:
+        # If storyless_tasks=True and status_id is provided, treat it as status tasks pagination for storyless row
+        if effective_storyless and clean_status_id:
             clean_user_story_id = "storyless"
         elif clean_status_id and not clean_user_story_id:
             # When status_id is provided without any story reference, treat status_id as task_status_id filter across board
@@ -136,7 +141,7 @@ async def get_board(
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
             )
-        elif storyless:
+        elif effective_storyless:
             mode = "storyless_tasks"
             response = await service.get_board_storyless_tasks(
                 clean_project_id,
@@ -150,7 +155,7 @@ async def get_board(
                 work_type=work_type,
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
-                group_by_status=group_by_status,
+                group_by_status=(group_by_status is not False),
             )
         elif clean_user_story_id:
             mode = "story"
@@ -182,7 +187,7 @@ async def get_board(
                 label_id=clean_label_id,
                 tasks_per_status=tasks_per_status,
                 current_user_id=str(user_id) if user_id else None,
-                include_storyless=include_storyless,
+                include_storyless=bool(include_storyless),
             )
 
         duration_ms = (time.perf_counter() - start_time) * 1000
