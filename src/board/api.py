@@ -56,11 +56,13 @@ async def get_board(
     request: Request,
     page: int = Query(default=1, description="Page number (1-indexed)"),
     page_size: int = Query(default=5, description="Page size (max 50)"),
-    tasks_per_status: int = Query(default=5, ge=1, le=20, description="Tasks per status column in board stories (default 5)"),
+    tasks_per_status: int = Query(default=5, ge=0, le=20, description="Tasks per status column in board stories (default 5)"),
     user_story_id: Optional[str] = Query(default=None, description="User story ID for story expansion or status pagination"),
     story_id: Optional[str] = Query(default=None, description="Alias for user_story_id", include_in_schema=False),
     status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story"),
     storyless: bool = Query(default=False, description="Whether to fetch story-less tasks (user_story_id IS NULL AND sprint_id IS NOT NULL)"),
+    include_storyless: bool = Query(default=False, description="Whether to include storyless tasks summary row in stories board"),
+    group_by_status: bool = Query(default=False, description="When storyless=true, format storyless tasks by status columns like user stories"),
     sprint_id: Optional[str] = Query(default=None, description="Optional sprint filter"),
     story_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for user stories"),
     task_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for tasks"),
@@ -83,24 +85,26 @@ async def get_board(
 
         # Resolve user_story_id (support user_story_id, plus backward-compatible story_id alias)
         effective_story_id = user_story_id or story_id
+        is_storyless_id = bool(effective_story_id and effective_story_id.strip().lower() == "storyless")
 
         # Ambiguous combination validations
-        if storyless and effective_story_id:
+        if storyless and effective_story_id and not is_storyless_id:
             raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide user_story_id when storyless is true")
-        if storyless and status_id:
-            raise BoardServiceError(400, "BAD_REQUEST", "Cannot provide status_id when storyless is true")
-        if status_id and not effective_story_id:
-            raise BoardServiceError(400, "BAD_REQUEST", "status_id requires user_story_id to be specified")
 
         # UUID validations
         clean_project_id = validate_uuid_param("project_id", project_id)
-        clean_user_story_id = validate_uuid_param("user_story_id", effective_story_id)
+        clean_user_story_id = "storyless" if is_storyless_id else validate_uuid_param("user_story_id", effective_story_id)
         clean_status_id = validate_uuid_param("status_id", status_id)
         clean_sprint_id = validate_uuid_param("sprint_id", sprint_id)
         clean_story_assignee_id = validate_uuid_param("story_assignee_id", story_assignee_id)
         clean_task_assignee_id = validate_uuid_param("task_assignee_id", task_assignee_id)
         clean_task_status_id = validate_uuid_param("task_status_id", task_status_id)
         clean_label_id = validate_uuid_param("label_id", label_id)
+
+        # When status_id is provided without a story (or when storyless=True), treat status_id as task_status_id filter
+        if clean_status_id and not clean_user_story_id:
+            clean_task_status_id = clean_task_status_id or clean_status_id
+            clean_status_id = None
 
         # 2. Authentication & Authorization context
         user_id = getattr(request.state, "user_id", None)
@@ -127,6 +131,7 @@ async def get_board(
                 work_type=work_type,
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
+                group_by_status=group_by_status,
             )
         elif clean_user_story_id and clean_status_id:
             mode = "story_status_tasks"
@@ -172,6 +177,7 @@ async def get_board(
                 label_id=clean_label_id,
                 tasks_per_status=tasks_per_status,
                 current_user_id=str(user_id) if user_id else None,
+                include_storyless=include_storyless,
             )
 
         duration_ms = (time.perf_counter() - start_time) * 1000

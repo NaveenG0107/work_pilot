@@ -370,6 +370,7 @@ class BoardService:
         label_id: str | None = None,
         tasks_per_status: int = 5,
         current_user_id: str | None = None,
+        include_storyless: bool = False,
     ) -> BoardResponse:
         conditions = [
             UserStory.project_id == project_id,
@@ -621,6 +622,22 @@ class BoardService:
                     )
                 )
 
+        if include_storyless:
+            storyless_summary = await self.get_board_storyless_summary(
+                project_id,
+                sprint_id=sprint_id,
+                task_assignee_id=task_assignee_id,
+                task_status_id=task_status_id,
+                priority=priority,
+                work_type=work_type,
+                label_id=label_id,
+                tasks_per_status=tasks_per_status,
+                current_user_id=current_user_id,
+            )
+            if storyless_summary and storyless_summary.total_tasks > 0:
+                story_summaries.append(storyless_summary)
+                total += 1
+
         has_next = (page * page_size) < total
         pagination = BoardPagination(
             page=page,
@@ -655,6 +672,24 @@ class BoardService:
         current_user_id: str | None = None,
     ) -> BoardResponse:
         # 1. Fetch story with eager-loaded single-value relationships
+        if user_story_id == "storyless":
+            summary = await self.get_board_storyless_summary(
+                project_id,
+                task_assignee_id=task_assignee_id,
+                task_status_id=task_status_id,
+                priority=priority,
+                work_type=work_type,
+                label_id=label_id,
+                tasks_per_status=page_size,
+                current_user_id=current_user_id,
+            )
+            return BoardResponse(
+                success=True,
+                status_code=200,
+                message="Storyless tasks retrieved successfully",
+                data=summary,
+            )
+
         story_stmt = (
             select(UserStory)
             .where(
@@ -881,24 +916,27 @@ class BoardService:
         current_user_id: str | None = None,
     ) -> BoardResponse:
         # 1. Validate story belongs to project & load details
-        story_stmt = (
-            select(UserStory)
-            .where(
-                UserStory.id == user_story_id,
-                UserStory.project_id == project_id,
-                UserStory.deleted_at.is_(None),
+        if user_story_id == "storyless":
+            story = None
+        else:
+            story_stmt = (
+                select(UserStory)
+                .where(
+                    UserStory.id == user_story_id,
+                    UserStory.project_id == project_id,
+                    UserStory.deleted_at.is_(None),
+                )
+                .options(
+                    joinedload(UserStory.assignee).joinedload(User.role),
+                    joinedload(UserStory.reporter).joinedload(User.role),
+                    joinedload(UserStory.sprint),
+                    joinedload(UserStory.status),
+                )
             )
-            .options(
-                joinedload(UserStory.assignee).joinedload(User.role),
-                joinedload(UserStory.reporter).joinedload(User.role),
-                joinedload(UserStory.sprint),
-                joinedload(UserStory.status),
-            )
-        )
-        story = (await self.db.execute(story_stmt)).scalars().first()
-        if not story:
-            logger.warning("User story not found for status tasks: user_story_id=%s, project_id=%s", user_story_id, project_id)
-            raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
+            story = (await self.db.execute(story_stmt)).scalars().first()
+            if not story:
+                logger.warning("User story not found for status tasks: user_story_id=%s, project_id=%s", user_story_id, project_id)
+                raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
 
         # 2. Validate status belongs to project
         status_obj = (
@@ -923,13 +961,15 @@ class BoardService:
         )
         conditions = [
             Task.project_id == project_id,
-            Task.user_story_id == user_story_id,
+            Task.user_story_id.is_(None) if user_story_id == "storyless" else (Task.user_story_id == user_story_id),
             Task.status_id == status_id,
             Task.deleted_at.is_(None),
             *task_filters,
         ]
         if sprint_id:
             conditions.append(Task.sprint_id == sprint_id)
+        elif user_story_id == "storyless":
+            conditions.append(Task.sprint_id.isnot(None))
 
         # 4. Total count query
         count_stmt = select(func.count(Task.id)).where(*conditions)
@@ -979,25 +1019,28 @@ class BoardService:
         fav_task_ids: set[str] = set()
         is_fav = False
         if current_user_id:
-            fav_conditions = [
-                and_(Favorite.item_type == "user_story", Favorite.user_story_id == user_story_id)
-            ]
+            fav_conditions = []
+            if user_story_id != "storyless":
+                fav_conditions.append(
+                    and_(Favorite.item_type == "user_story", Favorite.user_story_id == user_story_id)
+                )
             if tasks:
                 t_ids = [str(t.id) for t in tasks]
                 fav_conditions.append(
                     and_(Favorite.item_type == "task", Favorite.task_id.in_(t_ids))
                 )
-            fav_stmt = select(Favorite.item_type, Favorite.task_id, Favorite.user_story_id).where(
-                Favorite.user_id == current_user_id,
-                Favorite.deleted_at.is_(None),
-                or_(*fav_conditions),
-            )
-            fav_rows = (await self.db.execute(fav_stmt)).all()
-            for f_type, f_tid, f_sid in fav_rows:
-                if f_type == "task" and f_tid:
-                    fav_task_ids.add(str(f_tid))
-                elif f_type == "user_story" and str(f_sid) == str(user_story_id):
-                    is_fav = True
+            if fav_conditions:
+                fav_stmt = select(Favorite.item_type, Favorite.task_id, Favorite.user_story_id).where(
+                    Favorite.user_id == current_user_id,
+                    Favorite.deleted_at.is_(None),
+                    or_(*fav_conditions),
+                )
+                fav_rows = (await self.db.execute(fav_stmt)).all()
+                for f_type, f_tid, f_sid in fav_rows:
+                    if f_type == "task" and f_tid:
+                        fav_task_ids.add(str(f_tid))
+                    elif f_type == "user_story" and str(f_sid) == str(user_story_id):
+                        is_fav = True
 
         serialized_tasks = [
             serialize_board_task(t, is_favourite=(str(t.id) in fav_task_ids))
@@ -1021,36 +1064,61 @@ class BoardService:
             meta=pagination,
         )
 
-        due_date = None
-        if story.sprint and story.sprint.end_date:
-            due_date = datetime.combine(story.sprint.end_date, datetime.min.time(), tzinfo=timezone.utc)
+        if story is not None:
+            due_date = None
+            if story.sprint and story.sprint.end_date:
+                due_date = datetime.combine(story.sprint.end_date, datetime.min.time(), tzinfo=timezone.utc)
 
-        status_name = story.status.name if getattr(story, "status", None) else (story.status_text or "")
-        status_color = story.status.color if getattr(story, "status", None) and story.status.color else "#4A90E2"
+            status_name = story.status.name if getattr(story, "status", None) else (story.status_text or "")
+            status_color = story.status.color if getattr(story, "status", None) and story.status.color else "#4A90E2"
 
-        story_detail_data = BoardStoryDetailData(
-            id=str(story.id),
-            project_id=str(story.project_id),
-            title=story.title,
-            key=story.key,
-            serial_number=int(story.serial_number or story.sequence_number or 0),
-            description=story.description,
-            priority=story.priority or "medium",
-            is_favourite=is_fav,
-            story_points=int(story.story_points or 0),
-            total_tasks=getattr(story, "total_tasks", 0) or 0,
-            completed_tasks=getattr(story, "completed_tasks", 0) or 0,
-            progress=float(getattr(story, "progress", 0.0) or 0.0),
-            assignee=user_summary_from_model(story.assignee),
-            reporter=user_summary_from_model(story.reporter),
-            due_date=due_date,
-            status_id=str(story.status_id) if story.status_id else None,
-            status=status_name,
-            status_color=status_color,
-            created_at=story.created_at,
-            updated_at=story.updated_at,
-            statuses=[status_group],
-        )
+            story_detail_data = BoardStoryDetailData(
+                id=str(story.id),
+                project_id=str(story.project_id),
+                title=story.title,
+                key=story.key,
+                serial_number=int(story.serial_number or story.sequence_number or 0),
+                description=story.description,
+                priority=story.priority or "medium",
+                is_favourite=is_fav,
+                story_points=int(story.story_points or 0),
+                total_tasks=getattr(story, "total_tasks", 0) or 0,
+                completed_tasks=getattr(story, "completed_tasks", 0) or 0,
+                progress=float(getattr(story, "progress", 0.0) or 0.0),
+                assignee=user_summary_from_model(story.assignee),
+                reporter=user_summary_from_model(story.reporter),
+                due_date=due_date,
+                status_id=str(story.status_id) if story.status_id else None,
+                status=status_name,
+                status_color=status_color,
+                created_at=story.created_at,
+                updated_at=story.updated_at,
+                statuses=[status_group],
+            )
+        else:
+            story_detail_data = BoardStoryDetailData(
+                id="storyless",
+                project_id=str(project_id),
+                title="Storyless Tasks",
+                key="STORYLESS",
+                serial_number=0,
+                description="Tasks not linked to any user story",
+                priority="medium",
+                is_favourite=False,
+                story_points=0,
+                total_tasks=total,
+                completed_tasks=0,
+                progress=0.0,
+                assignee=None,
+                reporter=None,
+                due_date=None,
+                status_id=None,
+                status=None,
+                status_color="",
+                created_at=None,
+                updated_at=None,
+                statuses=[status_group],
+            )
 
         return BoardResponse(
             success=True,
@@ -1076,7 +1144,27 @@ class BoardService:
         work_type: str | None = None,
         label_id: str | None = None,
         current_user_id: str | None = None,
+        group_by_status: bool = False,
     ) -> BoardResponse:
+        if group_by_status:
+            summary = await self.get_board_storyless_summary(
+                project_id,
+                sprint_id=sprint_id,
+                task_assignee_id=task_assignee_id,
+                task_status_id=task_status_id,
+                priority=priority,
+                work_type=work_type,
+                label_id=label_id,
+                tasks_per_status=page_size,
+                current_user_id=current_user_id,
+            )
+            return BoardResponse(
+                success=True,
+                status_code=200,
+                message="Storyless tasks retrieved successfully",
+                data=summary,
+            )
+
         # Condition: user_story_id IS NULL AND sprint_id IS NOT NULL
         task_filters = self._build_task_filters(
             task_assignee_id=task_assignee_id,
@@ -1170,4 +1258,171 @@ class BoardService:
             message="Storyless tasks retrieved successfully",
             data=serialized_tasks,
             meta=pagination.model_dump(),
+        )
+
+    async def get_board_storyless_summary(
+        self,
+        project_id: str,
+        *,
+        sprint_id: str | None = None,
+        task_assignee_id: str | None = None,
+        task_status_id: str | None = None,
+        priority: str | None = None,
+        work_type: str | None = None,
+        label_id: str | None = None,
+        tasks_per_status: int = 5,
+        current_user_id: str | None = None,
+    ) -> BoardStorySummary:
+        # Base conditions: user_story_id IS NULL
+        base_conditions = [
+            Task.project_id == project_id,
+            Task.user_story_id.is_(None),
+            Task.deleted_at.is_(None),
+        ]
+        if sprint_id:
+            base_conditions.append(Task.sprint_id == sprint_id)
+        else:
+            base_conditions.append(Task.sprint_id.isnot(None))
+
+        # Unfiltered total tasks
+        total_stmt = select(func.count(Task.id)).where(*base_conditions)
+        total_tasks = (await self.db.execute(total_stmt)).scalar_one()
+
+        statuses = await self._statuses(project_id)
+        final_status_ids = [str(st.id) for st in statuses if st.is_final]
+        if final_status_ids:
+            completed_stmt = select(func.count(Task.id)).where(
+                *base_conditions,
+                Task.status_id.in_(final_status_ids),
+            )
+            completed_tasks = (await self.db.execute(completed_stmt)).scalar_one()
+        else:
+            completed_tasks = 0
+        progress = (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0
+
+        # Filtered conditions for status columns
+        task_filters = self._build_task_filters(
+            task_assignee_id=task_assignee_id,
+            task_status_id=task_status_id,
+            priority=priority,
+            work_type=work_type,
+            label_id=label_id,
+        )
+        filtered_conditions = [*base_conditions, *task_filters]
+
+        # Status task counts
+        counts_stmt = (
+            select(Task.status_id, func.count(Task.id))
+            .where(*filtered_conditions)
+            .group_by(Task.status_id)
+        )
+        status_counts = dict((await self.db.execute(counts_stmt)).all())
+
+        # Top tasks_per_status preview per status
+        fav_task_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
+            )
+            if current_user_id
+            else None
+        )
+
+        if fav_task_join is not None:
+            fav_task_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            rn_col = func.row_number().over(
+                partition_by=Task.status_id,
+                order_by=(fav_task_priority.asc(), Task.created_at.desc(), Task.id.desc()),
+            ).label("rn")
+            ranked_subq = (
+                select(Task.id.label("task_id"), rn_col)
+                .outerjoin(Favorite, fav_task_join)
+                .where(*filtered_conditions)
+                .subquery()
+            )
+        else:
+            rn_col = func.row_number().over(
+                partition_by=Task.status_id,
+                order_by=(Task.created_at.desc(), Task.id.desc()),
+            ).label("rn")
+            ranked_subq = (
+                select(Task.id.label("task_id"), rn_col)
+                .where(*filtered_conditions)
+                .subquery()
+            )
+
+        preview_stmt = (
+            select(Task)
+            .join(ranked_subq, Task.id == ranked_subq.c.task_id)
+            .where(ranked_subq.c.rn <= tasks_per_status)
+            .options(
+                joinedload(Task.assignee).joinedload(User.role),
+                joinedload(Task.reporter).joinedload(User.role),
+                joinedload(Task.status_rel),
+                joinedload(Task.project),
+                joinedload(Task.sprint),
+                selectinload(Task.labels),
+            )
+            .order_by(Task.status_id, ranked_subq.c.rn.asc())
+        )
+        preview_tasks = (await self.db.execute(preview_stmt)).scalars().unique().all()
+
+        fav_task_ids: set[str] = set()
+        if current_user_id and preview_tasks:
+            t_ids = [str(t.id) for t in preview_tasks]
+            fav_task_stmt = select(Favorite.task_id).where(
+                Favorite.user_id == current_user_id,
+                Favorite.item_type == "task",
+                Favorite.task_id.in_(t_ids),
+                Favorite.deleted_at.is_(None),
+            )
+            fav_task_rows = (await self.db.execute(fav_task_stmt)).scalars().all()
+            fav_task_ids = {str(fid) for fid in fav_task_rows}
+
+        grouped_tasks: dict[str, list[TaskResponse]] = {}
+        for t in preview_tasks:
+            sid = str(t.status_id)
+            if sid not in grouped_tasks:
+                grouped_tasks[sid] = []
+            grouped_tasks[sid].append(
+                serialize_board_task(t, is_favourite=(str(t.id) in fav_task_ids))
+            )
+
+        storyless_statuses: list[BoardStatusGroup] = []
+        for st in statuses:
+            st_id = str(st.id)
+            st_count = status_counts.get(st_id, 0)
+            st_tasks = grouped_tasks.get(st_id, [])
+            storyless_statuses.append(
+                BoardStatusGroup(
+                    status_id=st_id,
+                    status_name=st.name,
+                    color=st.color or "",
+                    display_order=st.display_order,
+                    task_count=st_count,
+                    tasks=st_tasks,
+                    meta=BoardPagination(
+                        page=1,
+                        page_size=tasks_per_status,
+                        total=st_count,
+                        has_next=st_count > len(st_tasks),
+                    ),
+                )
+            )
+
+        return BoardStorySummary(
+            id="storyless",
+            project_id=project_id,
+            title="Storyless Tasks",
+            total_tasks=total_tasks,
+            completed_tasks=completed_tasks,
+            progress=progress,
+            description="Tasks not linked to any user story",
+            key="STORYLESS",
+            serial_number=0,
+            priority="medium",
+            is_favourite=False,
+            statuses=storyless_statuses,
         )

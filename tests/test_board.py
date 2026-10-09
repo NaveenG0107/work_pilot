@@ -474,23 +474,7 @@ async def test_invalid_parameter_combinations():
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "BAD_REQUEST"
 
-        # 2. storyless=true + status_id
-        resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?storyless=true&status_id={status_id}",
-            headers=headers,
-        )
-        assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "BAD_REQUEST"
-
-        # 3. status_id without user_story_id
-        resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?status_id={status_id}",
-            headers=headers,
-        )
-        assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "BAD_REQUEST"
-
-        # 4. page < 1
+        # 2. page < 1
         resp = await client.get(
             f"/api/v1/projects/{project_id}/board?page=0",
             headers=headers,
@@ -611,3 +595,95 @@ async def test_n_plus_one_prevention():
             assert resp_d.status_code == 200
         print(f"[N+1 Check] Mode D (Storyless Tasks) Query Count: {q_d.count} queries")
         assert q_d.count <= 12, f"Mode D executed too many queries ({q_d.count})!"
+
+
+@pytest.mark.anyio
+async def test_board_status_id_filter():
+    ctx = await get_test_context()
+    project_id = ctx["project_id"]
+    status_id = ctx["status_id"]
+    token = ctx["token"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = await client.get(
+            f"/api/v1/projects/{project_id}/board?status_id={status_id}",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["success"] is True
+        assert isinstance(body["data"], list)
+        for story in body["data"]:
+            for st in story.get("statuses", []):
+                if st["status_id"] != status_id:
+                    assert st["task_count"] == 0
+                    assert len(st["tasks"]) == 0
+
+
+@pytest.mark.anyio
+async def test_board_storyless_grouped_by_status():
+    ctx = await get_test_context()
+    project_id = ctx["project_id"]
+    status_id = ctx["status_id"]
+    token = ctx["token"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. storyless=true&group_by_status=true returns story-like summary with statuses
+        resp = await client.get(
+            f"/api/v1/projects/{project_id}/board?storyless=true&group_by_status=true",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["success"] is True
+        data = body["data"]
+        assert data["id"] == "storyless"
+        assert "statuses" in data
+        assert isinstance(data["statuses"], list)
+        for st in data["statuses"]:
+            assert "status_id" in st
+            assert "status_name" in st
+            assert "task_count" in st
+            assert "tasks" in st
+            for task in st["tasks"]:
+                assert task.get("user_story_id") is None
+
+        # 2. user_story_id=storyless
+        resp_sl = await client.get(
+            f"/api/v1/projects/{project_id}/board?user_story_id=storyless",
+            headers=headers,
+        )
+        assert resp_sl.status_code == 200, resp_sl.text
+        data_sl = resp_sl.json()["data"]
+        assert data_sl["id"] == "storyless"
+        assert "statuses" in data_sl
+
+        # 3. user_story_id=storyless&status_id={status_id} (column pagination)
+        resp_c = await client.get(
+            f"/api/v1/projects/{project_id}/board?user_story_id=storyless&status_id={status_id}",
+            headers=headers,
+        )
+        assert resp_c.status_code == 200, resp_c.text
+        data_c = resp_c.json()["data"]
+        assert data_c["id"] == "storyless"
+        assert len(data_c["statuses"]) == 1
+        assert data_c["statuses"][0]["status_id"] == status_id
+
+        # 4. include_storyless=true on board
+        resp_inc = await client.get(
+            f"/api/v1/projects/{project_id}/board?include_storyless=true",
+            headers=headers,
+        )
+        assert resp_inc.status_code == 200, resp_inc.text
+        body_inc = resp_inc.json()
+        assert isinstance(body_inc["data"], list)
+        ids = [row["id"] for row in body_inc["data"]]
+        if any(row["id"] == "storyless" for row in body_inc["data"]):
+            storyless_row = next(r for r in body_inc["data"] if r["id"] == "storyless")
+            assert "statuses" in storyless_row
+
