@@ -343,6 +343,17 @@ async def test_mode_b_story_expansion():
                 assert "status_color" in task
                 assert "story_points" in task
 
+        # Test tasks_per_status query parameter in story expansion
+        resp_tps1 = await client.get(
+            f"/api/v1/projects/{project_id}/board?user_story_id={story_id}&tasks_per_status=1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_tps1.status_code == 200
+        data_tps1 = resp_tps1.json()["data"]
+        for st in data_tps1["statuses"]:
+            assert len(st["tasks"]) <= 1
+            assert st["meta"]["page_size"] == 1
+
 
 @pytest.mark.anyio
 async def test_mode_c_status_tasks_pagination():
@@ -426,8 +437,23 @@ async def test_mode_d_storyless_tasks():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Default storyless returns grouped by status columns (BoardStorySummary)
+        resp_grouped = await client.get(
+            f"/api/v1/projects/{project_id}/board?storyless=true&tasks_per_status=1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_grouped.status_code == 200, resp_grouped.text
+        body_grouped = resp_grouped.json()
+        assert body_grouped["success"] is True
+        assert body_grouped["data"]["id"] == "storyless"
+        assert "statuses" in body_grouped["data"]
+        for st in body_grouped["data"]["statuses"]:
+            assert len(st["tasks"]) <= 1
+            assert st["meta"]["page_size"] == 1
+
+        # 2. group_by_status=false returns flat list of storyless tasks
         resp = await client.get(
-            f"/api/v1/projects/{project_id}/board?storyless=true&page=1&page_size=5",
+            f"/api/v1/projects/{project_id}/board?storyless=true&group_by_status=false&page=1&page_size=5",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text

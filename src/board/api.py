@@ -62,7 +62,7 @@ async def get_board(
     status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story"),
     storyless: bool = Query(default=False, description="Whether to fetch story-less tasks (user_story_id IS NULL AND sprint_id IS NOT NULL)"),
     include_storyless: bool = Query(default=False, description="Whether to include storyless tasks summary row in stories board"),
-    group_by_status: bool = Query(default=False, description="When storyless=true, format storyless tasks by status columns like user stories"),
+    group_by_status: bool = Query(default=True, description="When storyless=true, format storyless tasks by status columns like user stories (default True)"),
     sprint_id: Optional[str] = Query(default=None, description="Optional sprint filter"),
     story_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for user stories"),
     task_assignee_id: Optional[str] = Query(default=None, description="Optional assignee filter for tasks"),
@@ -101,8 +101,11 @@ async def get_board(
         clean_task_status_id = validate_uuid_param("task_status_id", task_status_id)
         clean_label_id = validate_uuid_param("label_id", label_id)
 
-        # When status_id is provided without a story (or when storyless=True), treat status_id as task_status_id filter
-        if clean_status_id and not clean_user_story_id:
+        # If storyless=True and status_id is provided, treat it as status tasks pagination for storyless row
+        if storyless and clean_status_id:
+            clean_user_story_id = "storyless"
+        elif clean_status_id and not clean_user_story_id:
+            # When status_id is provided without any story reference, treat status_id as task_status_id filter across board
             clean_task_status_id = clean_task_status_id or clean_status_id
             clean_status_id = None
 
@@ -118,22 +121,7 @@ async def get_board(
         await service.check_authorization(clean_project_id, str(user_id), str(org_id))
 
         # 3. Determine request mode & dispatch
-        if storyless:
-            mode = "storyless_tasks"
-            response = await service.get_board_storyless_tasks(
-                clean_project_id,
-                page=page,
-                page_size=page_size,
-                sprint_id=clean_sprint_id,
-                task_assignee_id=clean_task_assignee_id,
-                task_status_id=clean_task_status_id,
-                priority=priority,
-                work_type=work_type,
-                label_id=clean_label_id,
-                current_user_id=str(user_id) if user_id else None,
-                group_by_status=group_by_status,
-            )
-        elif clean_user_story_id and clean_status_id:
+        if clean_user_story_id and clean_status_id:
             mode = "story_status_tasks"
             response = await service.get_board_status_tasks(
                 clean_project_id,
@@ -148,6 +136,22 @@ async def get_board(
                 label_id=clean_label_id,
                 current_user_id=str(user_id) if user_id else None,
             )
+        elif storyless:
+            mode = "storyless_tasks"
+            response = await service.get_board_storyless_tasks(
+                clean_project_id,
+                page=page,
+                page_size=page_size,
+                tasks_per_status=tasks_per_status,
+                sprint_id=clean_sprint_id,
+                task_assignee_id=clean_task_assignee_id,
+                task_status_id=clean_task_status_id,
+                priority=priority,
+                work_type=work_type,
+                label_id=clean_label_id,
+                current_user_id=str(user_id) if user_id else None,
+                group_by_status=group_by_status,
+            )
         elif clean_user_story_id:
             mode = "story"
             response = await service.get_board_story_details(
@@ -155,6 +159,7 @@ async def get_board(
                 clean_user_story_id,
                 page=page,
                 page_size=page_size,
+                tasks_per_status=tasks_per_status,
                 task_assignee_id=clean_task_assignee_id,
                 task_status_id=clean_task_status_id,
                 priority=priority,

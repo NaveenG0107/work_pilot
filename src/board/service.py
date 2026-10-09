@@ -664,6 +664,7 @@ class BoardService:
         *,
         page: int = 1,
         page_size: int = 5,
+        tasks_per_status: int = 5,
         task_assignee_id: str | None = None,
         task_status_id: str | None = None,
         priority: str | None = None,
@@ -680,7 +681,7 @@ class BoardService:
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
-                tasks_per_status=page_size,
+                tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
             return BoardResponse(
@@ -781,7 +782,7 @@ class BoardService:
         preview_stmt = (
             select(Task)
             .join(ranked_subq, Task.id == ranked_subq.c.task_id)
-            .where(ranked_subq.c.rn <= 5)
+            .where(ranked_subq.c.rn <= tasks_per_status)
             .options(
                 joinedload(Task.assignee).joinedload(User.role),
                 joinedload(Task.reporter).joinedload(User.role),
@@ -844,9 +845,9 @@ class BoardService:
                     tasks=grouped_tasks.get(st_id, []),
                     meta=BoardPagination(
                         page=1,
-                        page_size=5,
+                        page_size=tasks_per_status,
                         total=count,
-                        has_next=count > 5,
+                        has_next=count > len(grouped_tasks.get(st_id, [])),
                     ),
                 )
             )
@@ -1136,6 +1137,7 @@ class BoardService:
         project_id: str,
         page: int = 1,
         page_size: int = 5,
+        tasks_per_status: int = 5,
         *,
         sprint_id: str | None = None,
         task_assignee_id: str | None = None,
@@ -1144,7 +1146,7 @@ class BoardService:
         work_type: str | None = None,
         label_id: str | None = None,
         current_user_id: str | None = None,
-        group_by_status: bool = False,
+        group_by_status: bool = True,
     ) -> BoardResponse:
         if group_by_status:
             summary = await self.get_board_storyless_summary(
@@ -1155,7 +1157,7 @@ class BoardService:
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
-                tasks_per_status=page_size,
+                tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
             return BoardResponse(
