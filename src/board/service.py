@@ -706,7 +706,7 @@ class BoardService:
                 success=True,
                 status_code=200,
                 message="Storyless tasks retrieved successfully",
-                data=summary,
+                data=summary.statuses,
             )
 
         story_stmt = (
@@ -1167,57 +1167,21 @@ class BoardService:
                 updated_at=story.updated_at,
                 statuses=[status_group],
             )
-        else:
-            storyless_base = [
-                Task.project_id == project_id,
-                Task.user_story_id.is_(None),
-                Task.deleted_at.is_(None),
-            ]
-            if sprint_id:
-                storyless_base.append(Task.sprint_id == sprint_id)
-            else:
-                storyless_base.append(Task.sprint_id.isnot(None))
-
-            story_total = (await self.db.execute(select(func.count(Task.id)).where(*storyless_base))).scalar_one()
-            if final_status_ids:
-                story_completed = (await self.db.execute(
-                    select(func.count(Task.id)).where(*storyless_base, Task.status_id.in_(final_status_ids))
-                )).scalar_one()
-            else:
-                story_completed = 0
-            story_prog = round((story_completed / story_total * 100.0), 2) if story_total > 0 else 0.0
-
-            story_detail_data = BoardStoryDetailData(
-                id="storyless",
-                project_id=str(project_id),
-                title="Storyless Tasks",
-                key="STORYLESS",
-                serial_number=0,
-                description="Tasks not linked to any user story",
-                priority="medium",
-                is_favourite=False,
-                story_points=0,
-                total_tasks=story_total,
-                completed_tasks=story_completed,
-                progress=story_prog,
-                assignee=None,
-                reporter=None,
-                due_date=None,
-                status_id=None,
-                status=None,
-                status_color="",
-                created_at=None,
-                updated_at=None,
-                statuses=[status_group],
+            return BoardResponse(
+                success=True,
+                status_code=200,
+                message="Status tasks retrieved successfully",
+                data=story_detail_data,
+                meta=pagination.model_dump(),
             )
-
-        return BoardResponse(
-            success=True,
-            status_code=200,
-            message="Status tasks retrieved successfully",
-            data=story_detail_data,
-            meta=pagination.model_dump(),
-        )
+        else:
+            return BoardResponse(
+                success=True,
+                status_code=200,
+                message="Status tasks retrieved successfully",
+                data=[status_group],
+                meta=pagination.model_dump(),
+            )
 
     # -----------------------------------------------------------------------
     # Mode D — Story-less Tasks
@@ -1254,7 +1218,7 @@ class BoardService:
                 success=True,
                 status_code=200,
                 message="Storyless tasks retrieved successfully",
-                data=summary,
+                data=summary.statuses,
             )
 
         # Condition: user_story_id IS NULL AND sprint_id IS NOT NULL
