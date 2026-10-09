@@ -700,7 +700,21 @@ async def test_board_storyless_grouped_by_status():
         assert len(data_c["statuses"]) == 1
         assert data_c["statuses"][0]["status_id"] == status_id
 
-        # 4. include_storyless=true on board
+        # 4. storyless_tasks=true&tasks_per_status=1 query parameter
+        resp_st = await client.get(
+            f"/api/v1/projects/{project_id}/board?storyless_tasks=true&tasks_per_status=1",
+            headers=headers,
+        )
+        assert resp_st.status_code == 200, resp_st.text
+        data_st = resp_st.json()["data"]
+        assert data_st["id"] == "storyless"
+        assert data_st["total_tasks"] > 0
+        assert "statuses" in data_st
+        for st in data_st["statuses"]:
+            assert len(st["tasks"]) <= 1
+            assert st["meta"]["page_size"] == 1
+
+        # 5. include_storyless=true on board
         resp_inc = await client.get(
             f"/api/v1/projects/{project_id}/board?include_storyless=true",
             headers=headers,
