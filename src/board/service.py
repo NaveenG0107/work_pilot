@@ -331,27 +331,74 @@ class BoardService:
     def _build_task_filters(
         self,
         *,
-        task_assignee_id: str | None = None,
-        task_status_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        task_assignee_id: str | list[str] | None = None,
+        task_status_id: str | list[str] | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
     ) -> list[Any]:
         conditions = []
         if task_assignee_id:
-            conditions.append(Task.assignee_id == task_assignee_id)
+            if isinstance(task_assignee_id, (list, tuple, set)):
+                assignee_list = [str(a) for a in task_assignee_id if a]
+                if len(assignee_list) == 1:
+                    conditions.append(Task.assignee_id == assignee_list[0])
+                elif len(assignee_list) > 1:
+                    conditions.append(Task.assignee_id.in_(assignee_list))
+            else:
+                conditions.append(Task.assignee_id == task_assignee_id)
+
         if task_status_id:
-            conditions.append(Task.status_id == task_status_id)
+            if isinstance(task_status_id, (list, tuple, set)):
+                status_list = [str(s) for s in task_status_id if s]
+                if len(status_list) == 1:
+                    conditions.append(Task.status_id == status_list[0])
+                elif len(status_list) > 1:
+                    conditions.append(Task.status_id.in_(status_list))
+            else:
+                conditions.append(Task.status_id == task_status_id)
+
         if priority:
-            conditions.append(func.lower(Task.priority) == priority.lower())
+            if isinstance(priority, (list, tuple, set)):
+                priorities = [str(p).lower() for p in priority if p]
+                if len(priorities) == 1:
+                    conditions.append(func.lower(Task.priority) == priorities[0])
+                elif len(priorities) > 1:
+                    conditions.append(func.lower(Task.priority).in_(priorities))
+            else:
+                conditions.append(func.lower(Task.priority) == priority.lower())
+
         if work_type:
-            conditions.append(func.lower(Task.type) == work_type.lower())
+            if isinstance(work_type, (list, tuple, set)):
+                types = [str(wt).lower() for wt in work_type if wt]
+                if len(types) == 1:
+                    conditions.append(func.lower(Task.type) == types[0])
+                elif len(types) > 1:
+                    conditions.append(func.lower(Task.type).in_(types))
+            else:
+                conditions.append(func.lower(Task.type) == work_type.lower())
+
         if label_id:
-            conditions.append(
-                Task.id.in_(
-                    select(task_labels.c.task_id).where(task_labels.c.label_id == label_id)
+            if isinstance(label_id, (list, tuple, set)):
+                labels = [str(l) for l in label_id if l]
+                if len(labels) == 1:
+                    conditions.append(
+                        Task.id.in_(
+                            select(task_labels.c.task_id).where(task_labels.c.label_id == labels[0])
+                        )
+                    )
+                elif len(labels) > 1:
+                    conditions.append(
+                        Task.id.in_(
+                            select(task_labels.c.task_id).where(task_labels.c.label_id.in_(labels))
+                        )
+                    )
+            else:
+                conditions.append(
+                    Task.id.in_(
+                        select(task_labels.c.task_id).where(task_labels.c.label_id == label_id)
+                    )
                 )
-            )
         return conditions
 
     # -----------------------------------------------------------------------
@@ -363,12 +410,12 @@ class BoardService:
         page: int = 1,
         page_size: int = 5,
         sprint_id: str | None = None,
-        story_assignee_id: str | None = None,
-        task_assignee_id: str | None = None,
-        task_status_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        story_assignee_id: str | list[str] | None = None,
+        task_assignee_id: str | list[str] | None = None,
+        task_status_id: str | list[str] | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
         tasks_per_status: int = 5,
         current_user_id: str | None = None,
         include_storyless: bool = False,
@@ -380,7 +427,14 @@ class BoardService:
         if sprint_id:
             conditions.append(UserStory.sprint_id == sprint_id)
         if story_assignee_id:
-            conditions.append(UserStory.assignee_id == story_assignee_id)
+            if isinstance(story_assignee_id, (list, tuple, set)):
+                story_assignees = [str(a) for a in story_assignee_id if a]
+                if len(story_assignees) == 1:
+                    conditions.append(UserStory.assignee_id == story_assignees[0])
+                elif len(story_assignees) > 1:
+                    conditions.append(UserStory.assignee_id.in_(story_assignees))
+            else:
+                conditions.append(UserStory.assignee_id == story_assignee_id)
 
         # 1. Total stories count query
         count_stmt = select(func.count(UserStory.id)).where(*conditions)
@@ -688,11 +742,11 @@ class BoardService:
         page: int = 1,
         page_size: int = 5,
         tasks_per_status: int = 5,
-        task_assignee_id: str | None = None,
-        task_status_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        task_assignee_id: str | list[str] | None = None,
+        task_status_id: str | list[str] | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
         current_user_id: str | None = None,
     ) -> BoardResponse:
         # 1. Fetch story with eager-loaded single-value relationships
@@ -970,11 +1024,11 @@ class BoardService:
         page: int = 1,
         page_size: int = 5,
         *,
-        task_assignee_id: str | None = None,
+        task_assignee_id: str | list[str] | None = None,
         sprint_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
         current_user_id: str | None = None,
     ) -> BoardResponse:
         # 1. Validate story belongs to project & load details
@@ -1244,11 +1298,11 @@ class BoardService:
         tasks_per_status: int = 5,
         *,
         sprint_id: str | None = None,
-        task_assignee_id: str | None = None,
-        task_status_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        task_assignee_id: str | list[str] | None = None,
+        task_status_id: str | list[str] | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
         current_user_id: str | None = None,
         group_by_status: bool = True,
     ) -> BoardResponse:
@@ -1427,11 +1481,11 @@ class BoardService:
         project_id: str,
         *,
         sprint_id: str | None = None,
-        task_assignee_id: str | None = None,
-        task_status_id: str | None = None,
-        priority: str | None = None,
-        work_type: str | None = None,
-        label_id: str | None = None,
+        task_assignee_id: str | list[str] | None = None,
+        task_status_id: str | list[str] | None = None,
+        priority: str | list[str] | None = None,
+        work_type: str | list[str] | None = None,
+        label_id: str | list[str] | None = None,
         tasks_per_status: int = 5,
         current_user_id: str | None = None,
     ) -> BoardStorySummary:

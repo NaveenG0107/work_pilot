@@ -663,6 +663,104 @@ async def test_board_status_id_filter():
                     assert st["task_count"] == 0
                     assert len(st["tasks"]) == 0
 
+        # Multi-status filtering tests (comma-separated and repeated params)
+        async with AsyncSessionLocal() as db:
+            statuses = (await db.execute(
+                select(CustomStatus).where(
+                    CustomStatus.project_id == project_id,
+                    CustomStatus.deleted_at.is_(None)
+                ).limit(3)
+            )).scalars().all()
+            status_ids = [str(s.id) for s in statuses]
+
+        if len(status_ids) >= 2:
+            st1, st2 = status_ids[0], status_ids[1]
+            # Comma-separated: ?task_status_id=st1,st2
+            resp_multi = await client.get(
+                f"/api/v1/projects/{project_id}/board?task_status_id={st1},{st2}",
+                headers=headers,
+            )
+            assert resp_multi.status_code == 200, resp_multi.text
+            body_multi = resp_multi.json()
+            assert body_multi["success"] is True
+            for story in body_multi["data"]:
+                for st in story.get("statuses", []):
+                    if st["status_id"] not in (st1, st2):
+                        assert st["task_count"] == 0
+                        assert len(st["tasks"]) == 0
+
+            # Repeated query params: ?task_status_id=st1&task_status_id=st2
+            resp_repeat = await client.get(
+                f"/api/v1/projects/{project_id}/board?task_status_id={st1}&task_status_id={st2}",
+                headers=headers,
+            )
+            assert resp_repeat.status_code == 200, resp_repeat.text
+            body_repeat = resp_repeat.json()
+            assert body_repeat["success"] is True
+            for story in body_repeat["data"]:
+                for st in story.get("statuses", []):
+                    if st["status_id"] not in (st1, st2):
+                        assert st["task_count"] == 0
+                        assert len(st["tasks"]) == 0
+
+
+@pytest.mark.anyio
+async def test_board_multi_filters():
+    ctx = await get_test_context()
+    project_id = ctx["project_id"]
+    token = ctx["token"]
+    user_id = ctx["user_id"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. Multi priority filter: comma-separated and repeated
+        resp_p1 = await client.get(
+            f"/api/v1/projects/{project_id}/board?priority=low,medium,high",
+            headers=headers,
+        )
+        assert resp_p1.status_code == 200, resp_p1.text
+        assert resp_p1.json()["success"] is True
+
+        resp_p2 = await client.get(
+            f"/api/v1/projects/{project_id}/board?priority=low&priority=critical",
+            headers=headers,
+        )
+        assert resp_p2.status_code == 200, resp_p2.text
+        assert resp_p2.json()["success"] is True
+
+        # 2. Multi work_type filter: comma-separated and repeated
+        resp_wt1 = await client.get(
+            f"/api/v1/projects/{project_id}/board?work_type=task,bug,feature",
+            headers=headers,
+        )
+        assert resp_wt1.status_code == 200, resp_wt1.text
+        assert resp_wt1.json()["success"] is True
+
+        resp_wt2 = await client.get(
+            f"/api/v1/projects/{project_id}/board?work_type=task&work_type=bug",
+            headers=headers,
+        )
+        assert resp_wt2.status_code == 200, resp_wt2.text
+        assert resp_wt2.json()["success"] is True
+
+        # 3. Multi story_assignee_id and task_assignee_id
+        resp_asg = await client.get(
+            f"/api/v1/projects/{project_id}/board?story_assignee_id={user_id}&task_assignee_id={user_id}",
+            headers=headers,
+        )
+        assert resp_asg.status_code == 200, resp_asg.text
+        assert resp_asg.json()["success"] is True
+
+        # 4. Invalid UUID format should return 400
+        resp_bad = await client.get(
+            f"/api/v1/projects/{project_id}/board?task_assignee_id=invalid-id",
+            headers=headers,
+        )
+        assert resp_bad.status_code == 400
+        assert resp_bad.json()["error"]["code"] == "BAD_REQUEST"
+
 
 @pytest.mark.anyio
 async def test_board_storyless_grouped_by_status():
