@@ -32,6 +32,7 @@ from src.board.schemas import (
     BoardStatusInfo,
     BoardStoryDetail,
     BoardStoryDetailData,
+    BoardStorylessGroup,
     BoardStorySummary,
 )
 
@@ -587,6 +588,8 @@ class BoardService:
 
                 status_name = story.status.name if getattr(story, "status", None) else (story.status_text or "")
                 status_color = story.status.color if getattr(story, "status", None) and story.status.color else "#4A90E2"
+                sprint_id_val = str(story.sprint_id) if story.sprint_id else None
+                sprint_name_val = story.sprint.name if getattr(story, "sprint", None) and story.sprint.name else None
 
                 # Construct status groups for this story
                 story_statuses: list[BoardStatusGroup] = []
@@ -618,6 +621,8 @@ class BoardService:
                     BoardStorySummary(
                         id=sid_str,
                         project_id=str(story.project_id),
+                        sprint_id=sprint_id_val,
+                        sprint_name=sprint_name_val,
                         title=story.title,
                         total_tasks=t_count,
                         completed_tasks=comp_t,
@@ -702,11 +707,21 @@ class BoardService:
                 tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
+            storyless_group = BoardStorylessGroup(
+                type="storyless",
+                project_id=str(project_id),
+                sprint_id=summary.sprint_id,
+                sprint_name=summary.sprint_name,
+                total_tasks=summary.total_tasks,
+                completed_tasks=summary.completed_tasks,
+                progress=summary.progress,
+                statuses=summary.statuses,
+            )
             return BoardResponse(
                 success=True,
                 status_code=200,
                 message="Storyless tasks retrieved successfully",
-                data=summary.statuses,
+                data=storyless_group,
             )
 
         story_stmt = (
@@ -906,6 +921,8 @@ class BoardService:
         story_detail_data = BoardStoryDetailData(
             id=str(story.id),
             project_id=str(story.project_id),
+            sprint_id=str(story.sprint_id) if story.sprint_id else None,
+            sprint_name=story.sprint.name if getattr(story, "sprint", None) and story.sprint.name else None,
             title=story.title,
             key=story.key,
             serial_number=int(story.serial_number or story.sequence_number or 0),
@@ -1147,6 +1164,8 @@ class BoardService:
             story_detail_data = BoardStoryDetailData(
                 id=str(story.id),
                 project_id=str(story.project_id),
+                sprint_id=str(story.sprint_id) if story.sprint_id else None,
+                sprint_name=story.sprint.name if getattr(story, "sprint", None) and story.sprint.name else None,
                 title=story.title,
                 key=story.key,
                 serial_number=int(story.serial_number or story.sequence_number or 0),
@@ -1175,11 +1194,42 @@ class BoardService:
                 meta=pagination.model_dump(),
             )
         else:
+            storyless_base = [
+                Task.project_id == project_id,
+                Task.user_story_id.is_(None),
+                Task.deleted_at.is_(None),
+            ]
+            if sprint_id:
+                storyless_base.append(Task.sprint_id == sprint_id)
+            else:
+                storyless_base.append(Task.sprint_id.isnot(None))
+
+            story_total = (await self.db.execute(select(func.count(Task.id)).where(*storyless_base))).scalar_one()
+            if final_status_ids:
+                story_completed = (await self.db.execute(
+                    select(func.count(Task.id)).where(*storyless_base, Task.status_id.in_(final_status_ids))
+                )).scalar_one()
+            else:
+                story_completed = 0
+            story_prog = round((story_completed / story_total * 100.0), 2) if story_total > 0 else 0.0
+
+            eff_sprint_id, eff_sprint_name = await self._resolve_storyless_sprint(project_id, sprint_id)
+
+            storyless_group = BoardStorylessGroup(
+                type="storyless",
+                project_id=str(project_id),
+                sprint_id=eff_sprint_id,
+                sprint_name=eff_sprint_name,
+                total_tasks=story_total,
+                completed_tasks=story_completed,
+                progress=story_prog,
+                statuses=[status_group],
+            )
             return BoardResponse(
                 success=True,
                 status_code=200,
                 message="Status tasks retrieved successfully",
-                data=[status_group],
+                data=storyless_group,
                 meta=pagination.model_dump(),
             )
 
@@ -1214,11 +1264,21 @@ class BoardService:
                 tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
+            storyless_group = BoardStorylessGroup(
+                type="storyless",
+                project_id=str(project_id),
+                sprint_id=summary.sprint_id,
+                sprint_name=summary.sprint_name,
+                total_tasks=summary.total_tasks,
+                completed_tasks=summary.completed_tasks,
+                progress=summary.progress,
+                statuses=summary.statuses,
+            )
             return BoardResponse(
                 success=True,
                 status_code=200,
                 message="Storyless tasks retrieved successfully",
-                data=summary.statuses,
+                data=storyless_group,
             )
 
         # Condition: user_story_id IS NULL AND sprint_id IS NOT NULL
@@ -1315,6 +1375,52 @@ class BoardService:
             data=serialized_tasks,
             meta=pagination.model_dump(),
         )
+
+    async def _resolve_storyless_sprint(
+        self, project_id: str, sprint_id: str | None
+    ) -> tuple[str | None, str | None]:
+        if sprint_id:
+            sprint_name = (
+                await self.db.execute(
+                    select(Sprint.name).where(Sprint.id == sprint_id, Sprint.deleted_at.is_(None))
+                )
+            ).scalar_one_or_none()
+            return str(sprint_id), sprint_name
+
+        # 1. Try to resolve active sprint of the project
+        active_sprint = (
+            await self.db.execute(
+                select(Sprint.id, Sprint.name)
+                .where(
+                    Sprint.project_id == project_id,
+                    Sprint.status == "active",
+                    Sprint.deleted_at.is_(None),
+                )
+                .order_by(Sprint.created_at.desc())
+            )
+        ).first()
+        if active_sprint:
+            return str(active_sprint[0]), active_sprint[1]
+
+        # 2. Try to resolve from the most recent sprint of storyless tasks
+        task_sprint = (
+            await self.db.execute(
+                select(Sprint.id, Sprint.name)
+                .join(Task, Task.sprint_id == Sprint.id)
+                .where(
+                    Task.project_id == project_id,
+                    Task.user_story_id.is_(None),
+                    Task.deleted_at.is_(None),
+                    Sprint.deleted_at.is_(None),
+                )
+                .order_by(Sprint.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if task_sprint:
+            return str(task_sprint[0]), task_sprint[1]
+
+        return None, None
 
     async def get_board_storyless_summary(
         self,
@@ -1468,9 +1574,13 @@ class BoardService:
                 )
             )
 
+        eff_sprint_id, eff_sprint_name = await self._resolve_storyless_sprint(project_id, sprint_id)
+
         return BoardStorySummary(
             id="storyless",
             project_id=project_id,
+            sprint_id=eff_sprint_id,
+            sprint_name=eff_sprint_name,
             title="Storyless Tasks",
             total_tasks=total_tasks,
             completed_tasks=completed_tasks,

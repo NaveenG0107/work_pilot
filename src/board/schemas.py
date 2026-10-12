@@ -35,6 +35,8 @@ class BoardStatusGroup(BaseModel):
 class BoardStorySummary(BaseModel):
     id: str
     project_id: str
+    sprint_id: Optional[str] = None
+    sprint_name: Optional[str] = None
     title: str
     total_tasks: int = 0
     completed_tasks: int = 0
@@ -61,6 +63,8 @@ class BoardStorySummary(BaseModel):
 class BoardStoryDetail(BaseModel):
     id: str
     project_id: str
+    sprint_id: Optional[str] = None
+    sprint_name: Optional[str] = None
     title: str
     key: Optional[str] = None
     serial_number: Optional[int] = None
@@ -90,6 +94,19 @@ class BoardStatusInfo(BaseModel):
 
 class BoardStoryDetailData(BoardStoryDetail):
     statuses: list[BoardStatusGroup] = Field(default_factory=list)
+
+
+class BoardStorylessGroup(BaseModel):
+    type: str = "storyless"
+    project_id: Optional[str] = None
+    sprint_id: Optional[str] = None
+    sprint_name: Optional[str] = None
+    total_tasks: int = 0
+    completed_tasks: int = 0
+    progress: float = 0.0
+    statuses: list[BoardStatusGroup] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
     
 
 class BoardResponse(BaseModel):

@@ -213,6 +213,8 @@ async def test_mode_a_story_list():
             assert "assignee" in first
             assert "reporter" in first
             assert "due_date" in first
+            assert "sprint_id" in first
+            assert "sprint_name" in first
             # Verify top-level tasks array is NOT returned in BoardStorySummary (it is inside statuses)
             assert "tasks" not in first
             assert "statuses" in first
@@ -313,6 +315,8 @@ async def test_mode_b_story_expansion():
         assert "assignee" in data
         assert "reporter" in data
         assert "due_date" in data
+        assert "sprint_id" in data
+        assert "sprint_name" in data
 
         # 2. Statuses list directly on data
         assert "statuses" in data
@@ -399,6 +403,8 @@ async def test_mode_c_status_tasks_pagination():
         assert isinstance(data["total_tasks"], int)
         assert "assignee" in data
         assert "reporter" in data
+        assert "sprint_id" in data
+        assert "sprint_name" in data
 
         assert "statuses" in data
         statuses = data["statuses"]
@@ -437,7 +443,7 @@ async def test_mode_d_storyless_tasks():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 1. Default storyless returns grouped by status columns directly
+        # 1. Default storyless returns Option A (BoardStorylessGroup)
         resp_grouped = await client.get(
             f"/api/v1/projects/{project_id}/board?storyless=true&tasks_per_status=1",
             headers={"Authorization": f"Bearer {token}"},
@@ -445,8 +451,17 @@ async def test_mode_d_storyless_tasks():
         assert resp_grouped.status_code == 200, resp_grouped.text
         body_grouped = resp_grouped.json()
         assert body_grouped["success"] is True
-        assert isinstance(body_grouped["data"], list)
-        for st in body_grouped["data"]:
+        data_g = body_grouped["data"]
+        assert isinstance(data_g, dict)
+        assert data_g["type"] == "storyless"
+        assert data_g["project_id"] == project_id
+        assert "sprint_id" in data_g
+        assert "sprint_name" in data_g
+        assert "total_tasks" in data_g
+        assert "completed_tasks" in data_g
+        assert "progress" in data_g
+        assert isinstance(data_g["statuses"], list)
+        for st in data_g["statuses"]:
             assert "status_id" in st
             assert "status_name" in st
             assert len(st["tasks"]) <= 1
@@ -660,7 +675,7 @@ async def test_board_storyless_grouped_by_status():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 1. storyless=true&group_by_status=true returns list of status groups directly
+        # 1. storyless=true&group_by_status=true returns BoardStorylessGroup
         resp = await client.get(
             f"/api/v1/projects/{project_id}/board?storyless=true&group_by_status=true",
             headers=headers,
@@ -669,8 +684,16 @@ async def test_board_storyless_grouped_by_status():
         body = resp.json()
         assert body["success"] is True
         data = body["data"]
-        assert isinstance(data, list)
-        for st in data:
+        assert isinstance(data, dict)
+        assert data["type"] == "storyless"
+        assert data["project_id"] == project_id
+        assert "sprint_id" in data
+        assert "sprint_name" in data
+        assert "total_tasks" in data
+        assert "completed_tasks" in data
+        assert "progress" in data
+        assert isinstance(data["statuses"], list)
+        for st in data["statuses"]:
             assert "status_id" in st
             assert "status_name" in st
             assert "task_count" in st
@@ -685,9 +708,13 @@ async def test_board_storyless_grouped_by_status():
         )
         assert resp_sl.status_code == 200, resp_sl.text
         data_sl = resp_sl.json()["data"]
-        assert isinstance(data_sl, list)
-        assert len(data_sl) > 0
-        assert "status_id" in data_sl[0]
+        assert isinstance(data_sl, dict)
+        assert data_sl["type"] == "storyless"
+        assert data_sl["project_id"] == project_id
+        assert "sprint_id" in data_sl
+        assert "sprint_name" in data_sl
+        assert len(data_sl["statuses"]) > 0
+        assert "status_id" in data_sl["statuses"][0]
 
         # 3. user_story_id=storyless&status_id={status_id} (column pagination)
         resp_c = await client.get(
@@ -696,9 +723,13 @@ async def test_board_storyless_grouped_by_status():
         )
         assert resp_c.status_code == 200, resp_c.text
         data_c = resp_c.json()["data"]
-        assert isinstance(data_c, list)
-        assert len(data_c) == 1
-        assert data_c[0]["status_id"] == status_id
+        assert isinstance(data_c, dict)
+        assert data_c["type"] == "storyless"
+        assert data_c["project_id"] == project_id
+        assert "sprint_id" in data_c
+        assert "sprint_name" in data_c
+        assert len(data_c["statuses"]) == 1
+        assert data_c["statuses"][0]["status_id"] == status_id
 
         # 4. storyless_tasks=true&tasks_per_status=1 query parameter
         resp_st = await client.get(
@@ -707,8 +738,10 @@ async def test_board_storyless_grouped_by_status():
         )
         assert resp_st.status_code == 200, resp_st.text
         data_st = resp_st.json()["data"]
-        assert isinstance(data_st, list)
-        for st in data_st:
+        assert isinstance(data_st, dict)
+        assert data_st["type"] == "storyless"
+        assert "statuses" in data_st
+        for st in data_st["statuses"]:
             assert len(st["tasks"]) <= 1
             assert st["meta"]["page_size"] == 1
 
