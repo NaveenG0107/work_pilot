@@ -56,6 +56,11 @@ class Task(Base):
         Index("idx_tasks_sprint_id", "sprint_id"),
         Index("idx_tasks_status_id", "status_id"),
         Index("idx_tasks_user_story_id", "user_story_id"),
+        Index("idx_tasks_proj_created_at", "project_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_tasks_proj_status", "project_id", "status_id", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_tasks_proj_sprint", "project_id", "sprint_id", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_tasks_proj_story", "project_id", "user_story_id", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_tasks_assignee_active", "assignee_id", postgresql_where=text("deleted_at IS NULL")),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

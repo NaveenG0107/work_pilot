@@ -4,17 +4,19 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from math import ceil
 
-from sqlalchemy import select, update, func, text, delete
+from sqlalchemy import select, update, func, text, delete, bindparam, or_, case
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLog, AuditLogType
 from src.auth.models import User
+from src.comments.models import Comments
 from src.organization.models import Role
 from src.project.models import Project, ProjectMember
 from src.sprint.models import Sprint, SprintSnapshot
 from src.task.models import Task
+from src.user_story.models import UserStory
 from src.custom_status.models import CustomStatus
 from src.sprint.schema import (
     CreateSprintRequest, StartSprintRequest, UpdateSprintRequest)
@@ -177,8 +179,8 @@ class SprintService:
                 User.deleted_at.is_(None),
             )
             .options(
-                selectinload(User.organization),
-                selectinload(User.role).selectinload(
+                joinedload(User.organization),
+                joinedload(User.role).selectinload(
                     Role.permissions
                 ),
             )
@@ -238,7 +240,7 @@ class SprintService:
                 ProjectMember.deleted_at.is_(None),
             )
             .options(
-                selectinload(
+                joinedload(
                     ProjectMember.role
                 ).selectinload(
                     Role.permissions
@@ -911,6 +913,13 @@ class SprintService:
             await self.db.commit()
 
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             response_data = {
                 "id": str(sprint.id),
                 "name": sprint.name,
@@ -922,6 +931,7 @@ class SprintService:
                 "end_date": parsed_end_dt.strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
+                "total_stories": int(story_count),
             }
 
             return response_data, None
@@ -1181,16 +1191,43 @@ class SprintService:
 
             offset = (page - 1) * page_size
 
+            status_priority = case(
+                (Sprint.status == "active", 0),
+                (Sprint.status == "planned", 1),
+                (Sprint.status == "completed", 2),
+                else_=3,
+            )
+
             # Fetch sprints
             result = await self.db.execute(
                 select(Sprint)
                 .where(*conditions)
-                .order_by(Sprint.created_at.desc())
+                .order_by(
+                    status_priority.asc(),
+                    Sprint.start_date.desc().nullslast(),
+                    Sprint.created_at.desc(),
+                    Sprint.id.desc(),
+                )
                 .limit(page_size)
                 .offset(offset)
             )
 
             sprints = result.scalars().all()
+
+            # Batch count user stories per sprint to avoid N+1 queries
+            story_counts: dict[str, int] = {}
+            if sprints:
+                sprint_ids = [s.id for s in sprints]
+                counts_stmt = (
+                    select(UserStory.sprint_id, func.count(UserStory.id))
+                    .where(
+                        UserStory.sprint_id.in_(sprint_ids),
+                        UserStory.deleted_at.is_(None),
+                    )
+                    .group_by(UserStory.sprint_id)
+                )
+                counts_res = await self.db.execute(counts_stmt)
+                story_counts = {str(sp_id): int(cnt) for sp_id, cnt in counts_res.all()}
 
             total_pages = (
                 ceil(total_items / page_size)
@@ -1226,6 +1263,7 @@ class SprintService:
                             if sprint.end_date
                             else None
                         ),
+                        "total_stories": story_counts.get(str(sprint.id), 0),
                     }
                 )
 
@@ -1320,6 +1358,13 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             sprint_data = {
                 "id": str(sprint.id),
                 "name": sprint.name,
@@ -1335,6 +1380,7 @@ class SprintService:
                     if sprint.end_date
                     else None
                 ),
+                "total_stories": int(story_count),
             }
 
             try:
@@ -1830,6 +1876,7 @@ class SprintService:
                 pass
 
             # 6. Delete sprint.
+            now = datetime.now(timezone.utc)
             result = await self.db.execute(
                 update(Sprint)
                 .where(
@@ -1837,7 +1884,7 @@ class SprintService:
                     Sprint.deleted_at.is_(None),
                 )
                 .values(
-                    deleted_at=datetime.now(timezone.utc)
+                    deleted_at=now
                 )
             )
 
@@ -1850,7 +1897,74 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Find active child user stories in this sprint
+            story_rows = await self.db.execute(
+                select(UserStory.id).where(
+                    UserStory.sprint_id == sprint_id,
+                    UserStory.project_id == project_id,
+                    UserStory.deleted_at.is_(None),
+                )
+            )
+            child_story_ids = [str(r[0]) for r in story_rows.fetchall()]
+
+            # Find active child tasks (assigned to sprint directly or via child stories)
+            task_conds = [Task.sprint_id == sprint_id]
+            if child_story_ids:
+                task_conds.append(Task.user_story_id.in_(child_story_ids))
+
+            task_rows = await self.db.execute(
+                select(Task.id).where(
+                    Task.project_id == project_id,
+                    Task.deleted_at.is_(None),
+                    or_(*task_conds),
+                )
+            )
+            child_task_ids = [str(r[0]) for r in task_rows.fetchall()]
+
+            # Soft-delete active child user stories
+            if child_story_ids:
+                await self.db.execute(
+                    update(UserStory)
+                    .where(UserStory.id.in_(child_story_ids))
+                    .values(deleted_at=now)
+                )
+
+            # Soft-delete active child tasks
+            if child_task_ids:
+                await self.db.execute(
+                    update(Task)
+                    .where(Task.id.in_(child_task_ids))
+                    .values(deleted_at=now, updated_at=now)
+                )
+
+            # Soft-delete comments on child stories and child tasks
+            if child_story_ids:
+                await self.db.execute(
+                    update(Comments)
+                    .where(
+                        Comments.user_story_id.in_(child_story_ids),
+                        Comments.deleted_at.is_(None),
+                    )
+                    .values(deleted_at=now, is_deleted=True, updated_at=now)
+                )
+            if child_task_ids:
+                await self.db.execute(
+                    update(Comments)
+                    .where(
+                        Comments.task_id.in_(child_task_ids),
+                        Comments.deleted_at.is_(None),
+                    )
+                    .values(deleted_at=now, is_deleted=True, updated_at=now)
+                )
+
             await self.db.commit()
+
+            try:
+                from src.database import get_redis
+                from src.utils.performance_cache import bump_project_version
+                await bump_project_version(get_redis(), project_id)
+            except Exception:
+                pass
 
             # 7. Audit logging.
             try:
@@ -1975,49 +2089,24 @@ class SprintService:
 
             snapshots = snapshot_result.scalars().all()
 
-            # 5. Calculate total story points dynamically
-            total_result = await self.db.execute(
+            # 5. Calculate total and remaining story points dynamically in a single query
+            points_result = await self.db.execute(
                 text(
                     """
-                    SELECT COALESCE(SUM(story_points), 0)
-                    FROM tasks
-                    WHERE sprint_id = :sprint_id
-                    AND deleted_at IS NULL
+                    SELECT
+                        COALESCE(SUM(t.story_points), 0) AS total_story_points,
+                        COALESCE(SUM(CASE WHEN cs.is_final = false THEN t.story_points ELSE 0 END), 0) AS remaining_story_points
+                    FROM tasks t
+                    LEFT JOIN custom_statuses cs ON cs.id = t.status_id AND cs.deleted_at IS NULL
+                    WHERE t.sprint_id = :sprint_id
+                      AND t.deleted_at IS NULL
                     """
                 ),
-                {
-                    "sprint_id": sprint_id,
-                },
+                {"sprint_id": sprint_id},
             )
-
-            total_story_points = int(
-                total_result.scalar() or 0
-            )
-
-            # 6. Calculate remaining story points dynamically
-            remaining_result = await self.db.execute(
-                text(
-                    """
-                    SELECT COALESCE(SUM(story_points), 0)
-                    FROM tasks
-                    WHERE sprint_id = :sprint_id
-                    AND deleted_at IS NULL
-                    AND status_id IN (
-                        SELECT id
-                        FROM custom_statuses
-                        WHERE is_final = false
-                            AND deleted_at IS NULL
-                    )
-                    """
-                ),
-                {
-                    "sprint_id": sprint_id,
-                },
-            )
-
-            remaining_points_now = int(
-                remaining_result.scalar() or 0
-            )
+            points_row = points_result.mappings().one()
+            total_story_points = int(points_row["total_story_points"] or 0)
+            remaining_points_now = int(points_row["remaining_story_points"] or 0)
 
             # 7. Map snapshots by YYYY-MM-DD
             snapshot_map = {
@@ -2191,6 +2280,7 @@ class SprintService:
         project_id: str,
         user_id: str,
         organization_id: str,
+        sprint_id: Optional[str] = None,
     ):
         try:
             # 1. Get user
@@ -2242,104 +2332,91 @@ class SprintService:
                     status_code=403,
                 )
 
-            result = await self.db.execute(
-                select(Sprint).where(
+            # 5. Fetch target sprints scoped to project_id (and sprint_id if specified)
+            if sprint_id:
+                sprint_stmt = select(Sprint).where(
+                    Sprint.id == sprint_id,
+                    Sprint.project_id == project_id,
+                    Sprint.deleted_at.is_(None),
+                )
+                target_sprints = (await self.db.execute(sprint_stmt)).scalars().all()
+                if not target_sprints:
+                    return error_response(
+                        ErrorCode.ErrNotFound,
+                        "Sprint not found",
+                        status_code=404,
+                    )
+            else:
+                sprint_stmt = select(Sprint).where(
+                    Sprint.project_id == project_id,
                     Sprint.status == "active",
                     Sprint.deleted_at.is_(None),
                 )
-            )
+                target_sprints = (await self.db.execute(sprint_stmt)).scalars().all()
 
-            active_sprints = result.scalars().all()
+            if not target_sprints:
+                return None
 
+            sprint_ids = [str(s.id) for s in target_sprints]
             now = datetime.now(timezone.utc)
             today = now.date()
 
-            for sprint in active_sprints:
+            # 6. Aggregate story points in ONE grouped SQL query across all target sprints
+            points_result = await self.db.execute(
+                text(
+                    """
+                    SELECT
+                        t.sprint_id::text AS sprint_id,
+                        COALESCE(SUM(t.story_points), 0) AS total_story_points,
+                        COALESCE(SUM(CASE WHEN cs.is_final = false THEN t.story_points ELSE 0 END), 0) AS remaining_story_points
+                    FROM tasks t
+                    LEFT JOIN custom_statuses cs ON cs.id = t.status_id AND cs.deleted_at IS NULL
+                    WHERE t.sprint_id IN :sprint_ids
+                      AND t.deleted_at IS NULL
+                    GROUP BY t.sprint_id
+                    """
+                ).bindparams(bindparam("sprint_ids", expanding=True)),
+                {"sprint_ids": sprint_ids},
+            )
+            points_map = {
+                row.sprint_id: (int(row.total_story_points or 0), int(row.remaining_story_points or 0))
+                for row in points_result.fetchall()
+            }
 
-                # 5. Total story points
-                try:
-                    total_result = await self.db.execute(
-                        text(
-                            """
-                            SELECT COALESCE(SUM(story_points), 0)
-                            FROM tasks
-                            WHERE sprint_id = :sprint_id
-                            AND deleted_at IS NULL
-                            """
-                        ),
-                        {
-                            "sprint_id": sprint.id,
-                        },
-                    )
-
-                    total_points = int(
-                        total_result.scalar() or 0
-                    )
-
-                except Exception:
-                    continue
-
-                # 6. Remaining story points
-                try:
-                    remaining_result = await self.db.execute(
-                        text(
-                            """
-                            SELECT COALESCE(SUM(story_points), 0)
-                            FROM tasks
-                            WHERE sprint_id = :sprint_id
-                            AND deleted_at IS NULL
-                            AND status_id IN (
-                                SELECT id
-                                FROM custom_statuses
-                                WHERE is_final = false
-                                    AND deleted_at IS NULL
-                            )
-                            """
-                        ),
-                        {
-                            "sprint_id": sprint.id,
-                        },
-                    )
-
-                    remaining_points = int(
-                        remaining_result.scalar() or 0
-                    )
-
-                except Exception:
-                    continue
-
-                existing_result = await self.db.execute(
-                    select(SprintSnapshot).where(
-                        SprintSnapshot.sprint_id == sprint.id,
-                        SprintSnapshot.date == today,
-                    )
+            # 7. Bulk fetch existing snapshots for today in ONE query
+            existing_result = await self.db.execute(
+                select(SprintSnapshot).where(
+                    SprintSnapshot.sprint_id.in_(sprint_ids),
+                    SprintSnapshot.date == today,
                 )
+            )
+            existing_snapshots = {
+                str(snap.sprint_id): snap for snap in existing_result.scalars().all()
+            }
 
-                snapshot = existing_result.scalar_one_or_none()
+            # 8. Batch create or update snapshots in memory
+            for sprint in target_sprints:
+                sp_id = str(sprint.id)
+                total_points, remaining_points = points_map.get(sp_id, (0, 0))
+                snapshot = existing_snapshots.get(sp_id)
 
-                try:
-                    if snapshot is None:
-                        snapshot = SprintSnapshot(
-                            sprint_id=sprint.id,
-                            date=today,
-                            total_story_points=total_points,
-                            remaining_story_points=remaining_points,
-                            created_at=now,
-                        )
+                if snapshot is None:
+                    snapshot = SprintSnapshot(
+                        sprint_id=sprint.id,
+                        date=today,
+                        total_story_points=total_points,
+                        remaining_story_points=remaining_points,
+                        created_at=now,
+                    )
+                    self.db.add(snapshot)
+                else:
+                    snapshot.total_story_points = total_points
+                    snapshot.remaining_story_points = remaining_points
 
-                        self.db.add(snapshot)
+            # 9. Single batch commit for all snapshots
+            await self.db.commit()
 
-                    else:
-                        snapshot.total_story_points = total_points
-                        snapshot.remaining_story_points = remaining_points
-
-                    await self.db.commit()
-
-                except Exception:
-                    await self.db.rollback()
-                    continue
-
-            # 7. Audit log - best effort
+            # 10. Audit log - best effort
             try:
                 audit_log = AuditLog(
                     user_id=user_id,
@@ -2567,6 +2644,13 @@ class SprintService:
                     status_code=404,
                 )
 
+            # Count user stories in this sprint
+            count_stmt = select(func.count(UserStory.id)).where(
+                UserStory.sprint_id == updated_sprint.id,
+                UserStory.deleted_at.is_(None),
+            )
+            story_count = (await self.db.execute(count_stmt)).scalar() or 0
+
             data = {
                 "id": str(updated_sprint.id),
                 "name": updated_sprint.name,
@@ -2587,6 +2671,7 @@ class SprintService:
                     if updated_sprint.actual_end_date
                     else None
                 ),
+                "total_stories": int(story_count),
             }
 
             return data, None

@@ -5,7 +5,7 @@ import re
 from sqlalchemy import String, and_, cast, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.auth.models import User
 from src.label.models import Label as _Label  # noqa: F401
@@ -82,7 +82,7 @@ class SearchService:
                     User.organization_id == organization_id,
                     User.deleted_at.is_(None),
                 )
-                .options(selectinload(User.role).selectinload(Role.permissions))
+                .options(joinedload(User.role).selectinload(Role.permissions))
             )
         ).scalar_one_or_none()
         if user is None:
@@ -111,7 +111,7 @@ class SearchService:
                         ProjectMember.deleted_at.is_(None),
                     )
                     .options(
-                        selectinload(ProjectMember.role).selectinload(Role.permissions)
+                        joinedload(ProjectMember.role).selectinload(Role.permissions)
                     )
                 )
             ).scalars()
@@ -176,7 +176,7 @@ class SearchService:
                         Task.deleted_at.is_(None),
                         predicate,
                     )
-                    .options(selectinload(Task.project))
+                    .options(joinedload(Task.project))
                     .limit(20)
                 )
             ).scalars()
@@ -216,8 +216,8 @@ class SearchService:
                         predicate,
                     )
                     .options(
-                        selectinload(UserStory.project),
-                        selectinload(UserStory.status),
+                        joinedload(UserStory.project),
+                        joinedload(UserStory.status),
                     )
                     .limit(20)
                 )
@@ -318,7 +318,7 @@ class SearchService:
                         Sprint.deleted_at.is_(None),
                         self._search_predicate(query, Sprint.name, Sprint.goal),
                     )
-                    .options(selectinload(Sprint.project))
+                    .options(joinedload(Sprint.project))
                     .limit(20)
                 )
             ).scalars()

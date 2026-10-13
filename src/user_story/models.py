@@ -50,6 +50,10 @@ class UserStory(Base):
         Index("idx_user_stories_serial_number", "serial_number", unique=True),
         Index("idx_user_stories_sprint_id", "sprint_id"),
         Index("idx_user_stories_status_id", "status_id"),
+        Index("idx_user_stories_proj_created_at", "project_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_user_stories_proj_status", "project_id", "status_id", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_user_stories_proj_sprint", "project_id", "sprint_id", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_user_stories_proj_backlog", "project_id", "backlog_order", postgresql_where=text("deleted_at IS NULL")),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

@@ -37,12 +37,19 @@ def validate_s3_configuration() -> None:
         )
 
 
+_cached_s3_client = None
+
+
 def get_s3_client():
     """Builds an S3-compatible client (AWS S3 / Supabase S3 / MinIO) using centralized Settings."""
+    global _cached_s3_client
+    if _cached_s3_client is not None:
+        return _cached_s3_client
+
     validate_s3_configuration()
     settings = get_settings()
 
-    return boto3.client(
+    _cached_s3_client = boto3.client(
         "s3",
         endpoint_url=settings.s3_endpoint,
         region_name=settings.s3_region or "ap-south-1",
@@ -50,6 +57,7 @@ def get_s3_client():
         aws_secret_access_key=settings.s3_secret_access_key,
         config=Config(s3={"addressing_style": "path"}, signature_version="s3v4"),
     )
+    return _cached_s3_client
 
 
 def sanitize_filename(filename: str) -> str:

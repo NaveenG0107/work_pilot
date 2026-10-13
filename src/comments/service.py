@@ -9,9 +9,9 @@ from typing import Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from uuid6 import uuid7
 
 from src.audit.models import AuditLog
@@ -167,7 +167,7 @@ class CommentService:
         return str(task_id)
 
     async def _check_permission(
-        self, user: User, project_id: str, resource: str, action: str
+        self, user: User, project_id: str, resource: str, action: str, project: Project | None = None
     ) -> bool:
 
         if user.role and user.role.name == "super_admin":
@@ -181,7 +181,7 @@ class CommentService:
                 ProjectMember.user_id == user.id,
                 ProjectMember.deleted_at.is_(None),
             )
-            .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
+            .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
         result = await self.db.execute(stmt)
         member = result.scalar_one_or_none()
@@ -194,9 +194,10 @@ class CommentService:
                 return True
 
         # 2. Check organization-level role if user is an org_admin in the project's organization
-        proj_stmt = select(Project).where(Project.id == project_id, Project.deleted_at.is_(None))
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
+        if project is None:
+            proj_stmt = select(Project).where(Project.id == project_id, Project.deleted_at.is_(None))
+            proj_res = await self.db.execute(proj_stmt)
+            project = proj_res.scalar_one_or_none()
 
         if project and user.organization_id and str(user.organization_id) == str(project.organization_id):
             if user.role and user.role.name == "org_admin":
@@ -290,7 +291,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -511,7 +512,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -532,8 +533,8 @@ class CommentService:
             select(Comments)
             .where(Comments.id == comment_id, Comments.deleted_at.is_(None))
             .options(
-                selectinload(Comments.user),
-                selectinload(Comments.parent_comment).selectinload(Comments.user),
+                joinedload(Comments.user),
+                joinedload(Comments.parent_comment).joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
         )
@@ -680,7 +681,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -773,8 +774,8 @@ class CommentService:
                 Comments.deleted_at.is_(None),
             )
             .options(
-                selectinload(Comments.user),
-                selectinload(Comments.parent_comment).selectinload(Comments.user),
+                joinedload(Comments.user),
+                joinedload(Comments.parent_comment).joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
             .order_by(Comments.created_at.asc())
@@ -903,7 +904,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -919,8 +920,12 @@ class CommentService:
                 detail="Super admins are not allowed to perform organization-level activities",
             )
 
-        # 2. Fetch task
-        task_stmt = select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
+        # 2. Fetch task with project eagerly loaded
+        task_stmt = (
+            select(Task)
+            .options(joinedload(Task.project))
+            .where(Task.id == task_id, Task.deleted_at.is_(None))
+        )
         task_res = await self.db.execute(task_stmt)
         task = task_res.scalar_one_or_none()
         if not task:
@@ -933,7 +938,7 @@ class CommentService:
         task_title = task.title
 
         # 3. Check permission
-        can_view = await self._check_permission(user, project_id, "comments", "view")
+        can_view = await self._check_permission(user, project_id, "comments", "view", project=task.project)
         if not can_view:
             logger.error("User %s does not have permission to view comments in project %s", user_id, project_id)
             raise HTTPException(
@@ -965,7 +970,7 @@ class CommentService:
                 Comments.deleted_at.is_(None),
             )
             .options(
-                selectinload(Comments.user),
+                joinedload(Comments.user),
                 selectinload(Comments.attachments),
             )
             .order_by(Comments.created_at.desc())
@@ -1085,7 +1090,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1263,7 +1268,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1356,21 +1361,18 @@ class CommentService:
                 resource_title = story.title
             target_name = f"userstory: {resource_title or comment.user_story_id}"
 
-        # 6. Preserve deleted parents that still have replies; otherwise hide
-        # the row from normal queries, matching Go's Mark/Delete split.
         now = datetime.now(timezone.utc)
-        active_replies = int(
-            (
-                await self.db.execute(
-                    select(func.count(Comments.id)).where(
-                        Comments.parent_comment_id == comment_id,
-                        Comments.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one()
+        # Soft-delete child replies
+        await self.db.execute(
+            update(Comments)
+            .where(
+                Comments.parent_comment_id == comment_id,
+                Comments.deleted_at.is_(None),
+            )
+            .values(deleted_at=now, is_deleted=True, updated_at=now)
         )
         comment.is_deleted = True
-        comment.deleted_at = None if active_replies else now
+        comment.deleted_at = now
         comment.updated_at = now
 
         # 7. Audit Log
@@ -1451,7 +1453,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1700,7 +1702,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1826,7 +1828,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()
@@ -1969,7 +1971,7 @@ class CommentService:
         user_stmt = (
             select(User)
             .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(selectinload(User.role).selectinload(Role.permissions))
+            .options(joinedload(User.role).selectinload(Role.permissions))
         )
         user_res = await self.db.execute(user_stmt)
         user = user_res.scalar_one_or_none()

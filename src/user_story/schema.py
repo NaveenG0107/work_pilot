@@ -48,7 +48,7 @@ ALLOWED_SORT_ORDER = ["ASC", "DESC"]
 
 
 class CreateUserStoryRequest(BaseModel):
-    attachment_ids: List[str] = Field(default_factory=list, validation_alias=AliasChoices("attachments", "attachment_ids"))
+    attachment_ids: List[str] = Field(default_factory=list)
 
     @field_validator("attachment_ids")
     @classmethod

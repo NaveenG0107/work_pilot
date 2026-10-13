@@ -40,6 +40,7 @@ class AuditFilter(BaseModel):
     task_id: str | None = None
     user_story_id: str | None = None
     project_id: str | None = None
+    sprint_id: str | None = None
 
     type: str | None = None
 

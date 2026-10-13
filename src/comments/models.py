@@ -19,6 +19,8 @@ class Comments(Base):
         Index("idx_comments_task_id", "task_id"),
         Index("idx_comments_user_id", "user_id"),
         Index("idx_comments_user_story_id", "user_story_id"),
+        Index("idx_comments_task_created_at", "task_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_comments_story_created_at", "user_story_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
     )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))

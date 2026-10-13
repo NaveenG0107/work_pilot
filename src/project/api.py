@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -6,7 +7,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.project.schema import (
     PROJECT_STATUSES,
     CreateProjectMemberRequest,
@@ -32,6 +33,8 @@ from src.utils.core import (
     bearer_scheme,
     require_jwt,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GoValidationRoute(APIRoute):
@@ -115,8 +118,11 @@ def validation_message(exc: RequestValidationError, method: str) -> str:
     return "Invalid request payload."
 
 
-def get_project_service(db: AsyncSession = Depends(get_db)) -> ProjectService:
-    return ProjectService(db)
+def get_project_service(
+    db: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+) -> ProjectService:
+    return ProjectService(db, redis=redis)
 
 
 def success(
@@ -137,7 +143,12 @@ def success(
 def failure(exc: Exception) -> JSONResponse:
     if isinstance(exc, ProjectServiceError):
         code, error_code, message = exc.status_code, exc.code, exc.message
+        if code >= 500:
+            logger.error("Project service error [%s]: %s", error_code, message, exc_info=True)
+        else:
+            logger.warning("Project request failed [%s]: %s", error_code, message)
     else:
+        logger.error("Unexpected project API error: %s", exc, exc_info=True)
         code, error_code, message = (
             500,
             "INTERNAL_SERVER_ERROR",
@@ -556,6 +567,60 @@ async def delete_project(
         project_id = validated_uuid(project_id)
         await service.delete(project_id, user_id, org_id)
         return success("Project deleted successfully", {"project_id": project_id})
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.post(
+    "/{project_id}/restore",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+)
+@router.post(
+    "/restore/{project_id}",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+    include_in_schema=False,
+)
+@require_jwt
+async def restore_project(
+    project_id: str,
+    request: Request,
+    service: ProjectService = Depends(get_project_service),
+):
+    try:
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
+        project_id = validated_uuid(project_id)
+        await service.restore(project_id, user_id, org_id)
+        return success("Project restored successfully", {"project_id": project_id})
+    except Exception as exc:
+        return failure(exc)
+
+
+@router.post(
+    "/{project_id}/reopen",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+)
+@router.post(
+    "/reopen/{project_id}",
+    response_model=SuccessResponse[ProjectIDResponse],
+    tags=["Projects"],
+    include_in_schema=False,
+)
+@require_jwt
+async def reopen_project(
+    project_id: str,
+    request: Request,
+    service: ProjectService = Depends(get_project_service),
+):
+    try:
+        user_id = request.state.user_id
+        org_id = request.state.organization_id
+        project_id = validated_uuid(project_id)
+        await service.reopen(project_id, user_id, org_id)
+        return success("Project reopened successfully", {"project_id": project_id})
     except Exception as exc:
         return failure(exc)
 

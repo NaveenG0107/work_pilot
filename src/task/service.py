@@ -12,13 +12,24 @@ from html import escape
 from html.parser import HTMLParser
 from typing import Iterable, Sequence
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select, update, case
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLogType
 from src.audit.service import AuditService
+from src.comments.models import Comments
+from src.config import get_logger
+from src.utils.performance_cache import (
+    bump_project_version,
+    cache_get_json,
+    cache_set_json,
+    canonical_hash,
+    project_version,
+)
+
+logger = get_logger(__name__)
 from src.auth.models import User
 from src.custom_status.models import CustomStatus
 from src.favorite.models import Favorite
@@ -216,8 +227,9 @@ def _sanitize_html(value: str) -> str:
 
 
 class TaskService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis=None):
         self.db = db
+        self.redis = redis
 
     @staticmethod
     def pagination(page: int, page_size: int, total: int) -> PaginationResponse:
@@ -246,7 +258,7 @@ class TaskService:
             await self.db.execute(
                 select(User)
                 .where(User.id == user_id, User.deleted_at.is_(None))
-                .options(selectinload(User.role).selectinload(Role.permissions))
+                .options(joinedload(User.role).selectinload(Role.permissions))
             )
         ).scalar_one_or_none()
         if user is None:
@@ -271,17 +283,24 @@ class TaskService:
         if _role_name(getattr(user.role, "name", None)) == "super_admin":
             return False
 
-        member = (
-            await self.db.execute(
-                select(ProjectMember)
-                .where(
-                    ProjectMember.project_id == str(project.id),
-                    ProjectMember.user_id == str(user.id),
-                    ProjectMember.deleted_at.is_(None),
+        cache_attr = f"_pm_{project.id}"
+        member = getattr(user, cache_attr, None)
+        if member is None:
+            member = (
+                await self.db.execute(
+                    select(ProjectMember)
+                    .where(
+                        ProjectMember.project_id == str(project.id),
+                        ProjectMember.user_id == str(user.id),
+                        ProjectMember.deleted_at.is_(None),
+                    )
+                    .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
                 )
-                .options(selectinload(ProjectMember.role).selectinload(Role.permissions))
-            )
-        ).scalars().first()
+            ).scalars().first()
+            setattr(user, cache_attr, member if member is not None else False)
+        elif member is False:
+            member = None
+
         if member is not None and self._role_allows(member.role, resource, action):
             return True
 
@@ -311,17 +330,22 @@ class TaskService:
         return project, user
 
     async def _is_project_member(self, project: Project, user: User) -> bool:
-        member_id = (
-            await self.db.execute(
-                select(ProjectMember.id).where(
-                    ProjectMember.project_id == str(project.id),
-                    ProjectMember.user_id == str(user.id),
-                    ProjectMember.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if member_id is not None:
+        cache_attr = f"_pm_{project.id}"
+        cached = getattr(user, cache_attr, None)
+        if cached is not None and cached is not False:
             return True
+        elif cached is None:
+            member_id = (
+                await self.db.execute(
+                    select(ProjectMember.id).where(
+                        ProjectMember.project_id == str(project.id),
+                        ProjectMember.user_id == str(user.id),
+                        ProjectMember.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if member_id is not None:
+                return True
         return (
             _role_name(getattr(user.role, "name", None)) == "org_admin"
             and user.organization_id == project.organization_id
@@ -330,11 +354,11 @@ class TaskService:
     @staticmethod
     def _task_options():
         return (
-            selectinload(Task.project),
-            selectinload(Task.sprint),
-            selectinload(Task.user_story),
-            selectinload(Task.assignee).selectinload(User.role),
-            selectinload(Task.reporter).selectinload(User.role),
+            joinedload(Task.project),
+            joinedload(Task.sprint),
+            joinedload(Task.user_story),
+            joinedload(Task.assignee).joinedload(User.role),
+            joinedload(Task.reporter).joinedload(User.role),
             selectinload(Task.labels),
         )
 
@@ -344,6 +368,7 @@ class TaskService:
         project_id: str | None = None,
         *,
         include_deleted: bool = False,
+        load_relations: bool = True,
     ) -> Task:
         try:
             uuid.UUID(str(task_id))
@@ -356,11 +381,10 @@ class TaskService:
             conditions.append(Task.project_id == project_id)
         if not include_deleted:
             conditions.append(Task.deleted_at.is_(None))
-        task = (
-            await self.db.execute(
-                select(Task).where(*conditions).options(*self._task_options())
-            )
-        ).scalar_one_or_none()
+        stmt = select(Task).where(*conditions)
+        if load_relations:
+            stmt = stmt.options(*self._task_options())
+        task = (await self.db.execute(stmt)).scalar_one_or_none()
         if task is None:
             raise TaskServiceError(404, "RESOURCE_NOT_FOUND", "Task not found")
         return task
@@ -669,29 +693,25 @@ class TaskService:
             ).scalar_one_or_none()
             if story is None:
                 continue
-            status_ids = list(
-                (
-                    await self.db.execute(
-                        select(Task.status_id).where(
-                            Task.user_story_id == story_id,
-                            Task.deleted_at.is_(None),
-                        )
+            task_status_info = (
+                await self.db.execute(
+                    select(
+                        func.count(Task.id).label("total"),
+                        func.count(Task.id).filter(CustomStatus.is_final.is_(True)).label("completed"),
                     )
-                ).scalars()
-            )
-            if status_ids:
-                final_ids = set(
-                    (
-                        await self.db.execute(
-                            select(CustomStatus.id).where(
-                                CustomStatus.id.in_(status_ids),
-                                CustomStatus.is_final.is_(True),
-                                CustomStatus.deleted_at.is_(None),
-                            )
-                        )
-                    ).scalars()
+                    .outerjoin(CustomStatus, and_(
+                        CustomStatus.id == Task.status_id,
+                        CustomStatus.deleted_at.is_(None),
+                    ))
+                    .where(
+                        Task.user_story_id == story_id,
+                        Task.deleted_at.is_(None),
+                    )
                 )
-                is_closed = all(status_id in final_ids for status_id in status_ids)
+            ).one()
+            total, completed = int(task_status_info.total or 0), int(task_status_info.completed or 0)
+            if total > 0:
+                is_closed = (completed == total)
             else:
                 story_status = (
                     await self.db.execute(
@@ -816,6 +836,7 @@ class TaskService:
         try:
             self.db.add(task)
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except IntegrityError as exc:
             await self.db.rollback()
             raise TaskServiceError(409, "CONFLICT", "Task key already exists") from exc
@@ -858,6 +879,7 @@ class TaskService:
         labels: Sequence[str] | None = None,
         is_deleted: bool = False,
         unassigned_task: bool = False,
+        storyless_task: bool = False,
         match: str = "",
         sequence_number: int | None = None,
         serial_number: int | None = None,
@@ -870,6 +892,50 @@ class TaskService:
         sort_by = sort_by.strip() or "created_at"
         order_value = sort_order.strip().upper()
         sort_order = order_value if order_value in {"ASC", "DESC"} else "DESC"
+
+        # Check Redis cache first (failure-tolerant)
+        version = await project_version(self.redis, project_id)
+        cache_key = None
+        if version is not None:
+            filter_payload = {
+                "page": page,
+                "page_size": page_size,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+                "status_id": sorted(list(status_id)) if status_id else None,
+                "assignee_id": sorted(list(assignee_id)) if assignee_id else None,
+                "reporter_id": sorted(list(reporter_id)) if reporter_id else None,
+                "sprint_id": sorted(list(sprint_id)) if sprint_id else None,
+                "user_story_id": sorted(list(user_story_id)) if user_story_id else None,
+                "type": sorted(list(type)) if type else None,
+                "priority": sorted(list(priority)) if priority else None,
+                "search": search,
+                "labels": sorted(list(labels)) if labels else None,
+                "is_deleted": is_deleted,
+                "unassigned_task": unassigned_task,
+                "storyless_task": storyless_task,
+                "match": match,
+                "sequence_number": sequence_number,
+                "serial_number": serial_number,
+            }
+            cache_key = (
+                f"wp:tasks:v{version}:{project_id}:{user_id}:"
+                f"{canonical_hash(filter_payload)}"
+            )
+            cached = await cache_get_json(self.redis, cache_key)
+            if cached is not None:
+                responses = [TaskResponse.model_validate(item) for item in cached["data"]]
+                pagination = PaginationResponse.model_validate(cached["meta"])
+                await self._audit(
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    action="viewed",
+                    resource_id=project_id,
+                    details="tasks viewed",
+                    audit_type=AuditLogType.AUDIT,
+                )
+                return responses, pagination
 
         conditions = [Task.project_id == project_id]
         conditions.append(Task.deleted_at.isnot(None) if is_deleted else Task.deleted_at.is_(None))
@@ -930,6 +996,8 @@ class TaskService:
                 conditions.append(condition)
         if unassigned_task:
             conditions.extend((Task.sprint_id.is_(None), Task.user_story_id.is_(None)))
+        if storyless_task:
+            conditions.extend((Task.sprint_id.isnot(None), Task.user_story_id.is_(None)))
         if type:
             conditions.append(Task.type.in_(list(type)))
         if priority:
@@ -1011,17 +1079,40 @@ class TaskService:
         }
         sort_column = columns.get(sort_by, Task.created_at)
         order = sort_column.desc() if sort_order == "DESC" else sort_column.asc()
+        fav_join = (
+            and_(
+                Favorite.task_id == Task.id,
+                Favorite.user_id == user_id,
+                Favorite.item_type == "task",
+                Favorite.deleted_at.is_(None),
+            )
+            if user_id
+            else None
+        )
+        tasks_stmt = (
+            select(Task)
+            .where(*conditions)
+            .options(*self._task_options())
+        )
+        if fav_join is not None:
+            fav_priority = case((Favorite.id.is_not(None), 0), else_=1)
+            tasks_stmt = tasks_stmt.outerjoin(Favorite, fav_join).order_by(
+                fav_priority.asc(),
+                order,
+                Task.id.desc(),
+            )
+        else:
+            tasks_stmt = tasks_stmt.order_by(
+                order,
+                Task.id.desc(),
+            )
+
         tasks = list(
             (
                 await self.db.execute(
-                    select(Task)
-                    .where(*conditions)
-                    .options(*self._task_options())
-                    .order_by(order)
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
+                    tasks_stmt.offset((page - 1) * page_size).limit(page_size)
                 )
-            ).scalars()
+            ).scalars().unique()
         )
         colors, finals = self._status_maps(statuses)
         favorite_ids = await self._favorite_task_ids(user_id, (str(task.id) for task in tasks))
@@ -1034,6 +1125,16 @@ class TaskService:
             )
             for task in tasks
         ]
+        pagination = self.pagination(page, page_size, total)
+        if cache_key is not None:
+            await cache_set_json(
+                self.redis,
+                cache_key,
+                {
+                    "data": [r.model_dump(mode="json") for r in responses],
+                    "meta": pagination.model_dump(mode="json"),
+                },
+            )
         await self._audit(
             user_id=user_id,
             organization_id=organization_id,
@@ -1043,7 +1144,7 @@ class TaskService:
             details="tasks viewed",
             audit_type=AuditLogType.AUDIT,
         )
-        return responses, self.pagination(page, page_size, total)
+        return responses, pagination
 
     async def get(
         self,
@@ -1056,6 +1157,24 @@ class TaskService:
         _, actor = await self._check_authorization(
             project_id, user_id, "You do not have permission to view tasks in this project"
         )
+        version = await project_version(self.redis, project_id)
+        cache_key = None
+        if version is not None:
+            cache_key = f"wp:task:{project_id}:{task_id}:{user_id}:{version}"
+            cached = await cache_get_json(self.redis, cache_key)
+            if cached is not None:
+                await self._audit(
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    task_id=cached.get("id"),
+                    resource_id=cached.get("id"),
+                    action="viewed",
+                    details=f"The task '{cached.get('title')}' was viewed by {actor.username}",
+                    audit_type=AuditLogType.VIEW,
+                )
+                return TaskResponse.model_validate(cached)
+
         task = await self._task(task_id, project_id)
         statuses = await self._statuses(project_id)
         colors, finals = self._status_maps(statuses)
@@ -1064,6 +1183,8 @@ class TaskService:
             await self._favorite_task_ids(user_id, [canonical_task_id])
         )
         response = self._build_response(task, colors, finals, is_favourite=favorite)
+        if cache_key is not None:
+            await cache_set_json(self.redis, cache_key, response.model_dump(mode="json"))
         await self._audit(
             user_id=user_id,
             organization_id=organization_id,
@@ -1158,19 +1279,12 @@ class TaskService:
                 None if body.sprint_id is None or _is_nil(body.sprint_id) else str(body.sprint_id)
             )
             sprint_changing = target_sprint_id != task.sprint_id
-        if sprint_changing:
-            if task.sprint is not None and task.sprint.status == "completed":
+        if sprint_changing and target_sprint_id is not None:
+            sprint = await self._validate_sprint(target_sprint_id, project_id)
+            if sprint.status == "completed":
                 raise TaskServiceError(
-                    400,
-                    "VALIDATION_ERROR",
-                    "Changing the sprint of a task in a completed sprint is blocked",
+                    400, "VALIDATION_ERROR", "Cannot assign a task to a completed sprint"
                 )
-            if target_sprint_id is not None:
-                sprint = await self._validate_sprint(target_sprint_id, project_id)
-                if sprint.status == "completed":
-                    raise TaskServiceError(
-                        400, "VALIDATION_ERROR", "Cannot assign a task to a completed sprint"
-                    )
 
         statuses = await self._statuses(project_id)
         status_changing = False
@@ -1348,6 +1462,7 @@ class TaskService:
         task.updated_at = datetime.now(timezone.utc)
         try:
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except IntegrityError as exc:
             await self.db.rollback()
             raise TaskServiceError(409, "CONFLICT", "Task key already exists") from exc
@@ -1424,12 +1539,6 @@ class TaskService:
                 ) != task.sprint_id
                 if sprint_changing:
                     target_sprint = None if _is_nil(item.sprint_id) else str(item.sprint_id)
-                    if task.sprint is not None and task.sprint.status == "completed":
-                        raise TaskServiceError(
-                            400,
-                            "VALIDATION_ERROR",
-                            "Changing the sprint of a task in a completed sprint is blocked",
-                        )
                     if target_sprint is not None:
                         sprint = await self._validate_sprint(target_sprint, project_id)
                         if sprint.status == "completed":
@@ -1491,6 +1600,8 @@ class TaskService:
                 reasons[item_id] = "Failed to update task"
 
         await self._recalculate_stories(affected_stories)
+        if updated_count > 0:
+            await bump_project_version(self.redis, project_id)
         details = (
             f"Bulk update completed. Successfully updated {updated_count} tasks. "
             f"Failed tasks: {len(failed_ids)}."
@@ -1533,11 +1644,18 @@ class TaskService:
         affected_stories: set[str] = set()
         for task_id in task_ids:
             try:
-                task = await self._task(task_id, project_id, include_deleted=True)
+                task = await self._task(
+                    task_id, project_id, include_deleted=True, load_relations=False
+                )
                 if task.deleted_at is not None:
                     raise TaskServiceError(400, "BAD_REQUEST", "Task is already deleted")
                 task.deleted_at = datetime.now(timezone.utc)
                 task.updated_at = datetime.now(timezone.utc)
+                await self.db.execute(
+                    update(Comments)
+                    .where(Comments.task_id == task_id, Comments.deleted_at.is_(None))
+                    .values(deleted_at=task.deleted_at, is_deleted=True, updated_at=task.updated_at)
+                )
                 await self.db.commit()
                 deleted_ids.append(task_id)
                 if task.user_story_id:
@@ -1561,6 +1679,8 @@ class TaskService:
                 failed_ids.append(task_id)
                 reasons[task_id] = "Failed to delete task"
         await self._recalculate_stories(affected_stories)
+        if deleted_ids:
+            await bump_project_version(self.redis, project_id)
         details = (
             f"Bulk deletion completed. Successfully deleted {len(deleted_ids)} tasks. "
             f"Failed tasks: {len(failed_ids)}."
@@ -1599,7 +1719,9 @@ class TaskService:
             project_id, user_id, "You do not have permission to restore tasks in this project"
         )
         try:
-            task = await self._task(task_id, project_id, include_deleted=True)
+            task = await self._task(
+                task_id, project_id, include_deleted=True, load_relations=False
+            )
             task_id = str(task.id)
         except TaskServiceError as exc:
             if exc.status_code == 404:
@@ -1623,6 +1745,7 @@ class TaskService:
         task.updated_at = datetime.now(timezone.utc)
         try:
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except SQLAlchemyError as exc:
             await self.db.rollback()
             raise TaskServiceError(500, "INTERNAL_SERVER_ERROR", "Failed to restore task") from exc
@@ -1653,7 +1776,7 @@ class TaskService:
             raise TaskServiceError(
                 403, "FORBIDDEN", "You do not have permission to clone tasks in this project"
             )
-        original = await self._task(task_id, project_id, include_deleted=True)
+        original = await self._task(task_id, project_id, include_deleted=True, load_relations=False)
         statuses = await self._statuses(project_id)
         try:
             status_id, status_name = await self._resolve_status(
@@ -1689,6 +1812,7 @@ class TaskService:
         try:
             self.db.add(cloned)
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except IntegrityError as exc:
             await self.db.rollback()
             raise TaskServiceError(409, "CONFLICT", "Task key already exists") from exc
@@ -1721,8 +1845,6 @@ class TaskService:
         organization_id: str,
         role: str = "",
     ) -> TaskResponse:
-        task = await self._task(task_id, project_id)
-        task_id = str(task.id)
         project, actor = await self._check_authorization(
             project_id, user_id, "You do not have permission to view tasks in this project"
         )
@@ -1736,16 +1858,19 @@ class TaskService:
                 "FORBIDDEN",
                 "You must be an active project member to assign tasks to yourself",
             )
+        task = await self._task(task_id, project_id)
+        task_id = str(task.id)
         if task.assignee_id != user_id:
             old_assignee = task.assignee_id or "nil"
             task.assignee_id = user_id
+            task.assignee = actor
             task.updated_at = datetime.now(timezone.utc)
             try:
                 await self.db.commit()
+                await bump_project_version(self.redis, project_id)
             except SQLAlchemyError as exc:
                 await self.db.rollback()
                 raise TaskServiceError(500, "INTERNAL_SERVER_ERROR", "Failed to update task") from exc
-            task = await self._task(task_id, project_id)
             changed_by = actor.username or actor.full_name or actor.email or user_id
             await self._audit(
                 user_id=user_id,
@@ -1792,6 +1917,7 @@ class TaskService:
         task.labels.append(label)
         try:
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except SQLAlchemyError as exc:
             await self.db.rollback()
             raise TaskServiceError(
@@ -1834,6 +1960,7 @@ class TaskService:
         task.labels.remove(attached)
         try:
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except SQLAlchemyError as exc:
             await self.db.rollback()
             raise TaskServiceError(
@@ -2184,6 +2311,7 @@ class TaskService:
                 self.db.add(attachment)
                 attachments.append(attachment)
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except TaskServiceError:
             await self.db.rollback()
             raise
@@ -2288,7 +2416,7 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        requested_task = await self._task(task_id, project_id)
+        requested_task = await self._task(task_id, project_id, load_relations=False)
         if str(attachment.task_id) != str(requested_task.id):
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified task"
@@ -2344,7 +2472,7 @@ class TaskService:
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified project"
             )
-        requested_task = await self._task(task_id, project_id)
+        requested_task = await self._task(task_id, project_id, load_relations=False)
         if str(attachment.task_id) != str(requested_task.id):
             raise TaskServiceError(
                 400, "BAD_REQUEST", "Attachment does not belong to the specified task"
@@ -2380,6 +2508,7 @@ class TaskService:
             await self.db.delete(attachment)
             self.db.add(orphaned_file)
             await self.db.commit()
+            await bump_project_version(self.redis, project_id)
         except SQLAlchemyError as exc:
             await self.db.rollback()
             raise TaskServiceError(

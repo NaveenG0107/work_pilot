@@ -10,7 +10,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
-from src.database import get_db
+from src.database import get_db, get_redis
 from src.task.schema import (
     TASK_PRIORITIES,
     TASK_TYPES,
@@ -57,8 +57,11 @@ router = APIRouter(
 )
 
 
-def get_task_service(db: AsyncSession = Depends(get_db)) -> TaskService:
-    return TaskService(db)
+def get_task_service(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> TaskService:
+    return TaskService(db, redis)
 
 
 def field_label(field: object) -> str:
@@ -285,6 +288,7 @@ async def get_tasks(
     labels: str | None = Query(default=None),
     is_deleted: bool = Query(default=False),
     unassigned_task: bool = Query(default=False),
+    storyless_task: bool = Query(default=False),
     match: str = Query(default="", json_schema_extra={"enum": ["any", "all"]}),
     service: TaskService = Depends(get_task_service),
 ):
@@ -324,6 +328,7 @@ async def get_tasks(
             labels=multi_query(request, "labels"),
             is_deleted=is_deleted,
             unassigned_task=unassigned_task,
+            storyless_task=storyless_task,
             match=match,
             sequence_number=hidden_int_query(request, "sequence_number"),
             serial_number=hidden_int_query(request, "serial_number"),

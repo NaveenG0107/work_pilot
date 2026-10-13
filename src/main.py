@@ -7,6 +7,7 @@ API_PREFIX = "/api/v1"
 
 from src.audit.api import router as audit_router
 from src.auth.api import router as auth_router
+from src.board.api import router as board_router
 from src.comments.api import router as comments_router
 from src.custom_status.api import router as custom_status_router
 from src.favorite.api import router as favorite_router
@@ -70,6 +71,7 @@ app.include_router(dashboard_router, prefix=API_PREFIX)
 app.include_router(task_router, prefix=API_PREFIX)
 app.include_router(work_item_router, prefix=API_PREFIX)
 app.include_router(search_router, prefix=API_PREFIX)
+app.include_router(board_router, prefix=API_PREFIX)
 
 
 @app.get("/health_check")

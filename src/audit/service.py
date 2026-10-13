@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.audit.models import AuditLog, AuditLogType
 from src.audit.schema import (
@@ -221,6 +221,28 @@ class AuditService:
                     )
                 )
 
+            if filters.sprint_id:
+                conditions.append(
+                    or_(
+                        AuditLog.sprint_id == filters.sprint_id,
+                        (
+                            func.lower(AuditLog.resource_type).in_(
+                                [
+                                    "sprint",
+                                    "sprints",
+                                ]
+                            )
+                            & (AuditLog.resource_id == filters.sprint_id)
+                        ),
+                        AuditLog.task_id.in_(
+                            select(Task.id).where(Task.sprint_id == filters.sprint_id)
+                        ),
+                        AuditLog.user_story_id.in_(
+                            select(UserStory.id).where(UserStory.sprint_id == filters.sprint_id)
+                        ),
+                    )
+                )
+
             if filters.resource_type:
                 resource_type = filters.resource_type.strip().lower()
 
@@ -393,7 +415,7 @@ class AuditService:
         try:
             user = (
                 await self.db.execute(
-                    select(User).where(User.id == user_id).options(selectinload(User.role))
+                    select(User).where(User.id == user_id).options(joinedload(User.role))
                 )
             ).scalar_one_or_none()
 
@@ -757,7 +779,7 @@ class AuditService:
             await self.db.execute(
                 select(User)
                 .where(User.id.in_(ids))
-                .options(selectinload(User.role))
+                .options(joinedload(User.role))
             )
         ).scalars().all()
 
