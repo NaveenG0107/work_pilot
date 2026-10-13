@@ -6,8 +6,6 @@ from pydantic import BaseModel, Field
 class CreateSprint(BaseModel):
     name: str = Field(..., min_length=2, max_length=1000)
     goal: str = ""
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
 
 
 class CreateSprintRequest(BaseModel):
@@ -15,10 +13,16 @@ class CreateSprintRequest(BaseModel):
 
 
 class StartSprintRequest(BaseModel):
-    project_id: Optional[str] = None
-
-    start_date: str
-    end_date: str
+    start_date: str = Field(
+        ...,
+        description="Sprint start UTC datetime in format YYYY-MM-DDTHH:MM:SSZ",
+        examples=["YYYY-MM-DDTHH:MM:SSZ"],
+    )
+    end_date: str = Field(
+        ...,
+        description="Sprint end UTC datetime in format YYYY-MM-DDTHH:MM:SSZ",
+        examples=["YYYY-MM-DDTHH:MM:SSZ"],
+    )
 
 
 class UpdateSprintRequest(BaseModel):
