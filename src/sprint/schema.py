@@ -35,7 +35,6 @@ class UpdateSprintRequest(BaseModel):
         default=None,
         max_length=500,
     )
-    start_date: str | None = None
     end_date: str | None = None
     status: Literal[
         "planned",
