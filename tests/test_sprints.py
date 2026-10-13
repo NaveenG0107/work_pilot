@@ -220,3 +220,38 @@ async def test_start_sprint_validation_and_utc_datetime(client: AsyncClient, app
     assert start_body["data"]["status"] == "active"
     assert start_body["data"]["start_date"] == "2026-11-01T04:30:12Z"
     assert start_body["data"]["end_date"] == "2026-11-01T07:30:12Z"
+
+    # 7. Verify GET /sprint/{sprint_id} preserves exact UTC datetime with time
+    detail_resp = await client.get(
+        f"/api/v1/projects/{project_id}/sprint/{sprint_id}",
+        headers=headers,
+    )
+    assert detail_resp.status_code == 200
+    detail_data = detail_resp.json()
+    assert detail_data.get("success") is True
+    assert detail_data["data"]["start_date"] == "2026-11-01T04:30:12Z"
+    assert detail_data["data"]["end_date"] == "2026-11-01T07:30:12Z"
+
+    # 8. Verify GET /sprint/{sprint_id}/burndown does not raise 500
+    burndown_resp = await client.get(
+        f"/api/v1/projects/{project_id}/sprint/{sprint_id}/burndown",
+        headers=headers,
+    )
+    assert burndown_resp.status_code == 200
+    bd_data = burndown_resp.json()
+    assert bd_data.get("success") is True
+    assert "burndown_data" in bd_data["data"]
+
+    # 9. Verify PATCH /sprint/{sprint_id} update works for active sprint with timestamps
+    update_resp = await client.patch(
+        f"/api/v1/projects/{project_id}/sprint/{sprint_id}",
+        headers=headers,
+        json={
+            "name": "Updated Sprint Name",
+            "end_date": "2026-11-05T12:00:00Z",
+        },
+    )
+    assert update_resp.status_code == 200
+    update_data = update_resp.json()
+    assert update_data.get("success") is True
+

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, Any
 from math import ceil
 
 from sqlalchemy import select, update, func, text, delete, bindparam, or_, case
@@ -21,6 +22,8 @@ from src.custom_status.models import CustomStatus
 from src.sprint.schema import (
     CreateSprintRequest, StartSprintRequest, UpdateSprintRequest)
 from src.utils.core import ErrorCode, error_response
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -425,6 +428,20 @@ class SprintService:
         value: str,
     ) -> date:
         return cls._parse_datetime(value).date()
+
+    @staticmethod
+    def _format_datetime_utc(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            else:
+                value = value.astimezone(timezone.utc)
+            return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if isinstance(value, date):
+            return f"{value.isoformat()}T00:00:00Z"
+        return str(value)
 
 
     # CREATE SPRINT
@@ -862,8 +879,8 @@ class SprintService:
                 )
 
             now_utc = datetime.now(timezone.utc)
-            # Allow a tolerance buffer (2 minutes) for client-server clock drift and network latency
-            tolerance = timedelta(minutes=2)
+            # Allow a tolerance buffer (30 minutes) for client-server clock drift and network latency
+            tolerance = timedelta(minutes=30)
             if parsed_start_dt < (now_utc - tolerance):
                 return None, error_response(
                     ErrorCode.ErrBadRequest,
@@ -881,9 +898,6 @@ class SprintService:
                     status_code=400,
                 )
 
-            parsed_start_date = parsed_start_dt.date()
-            parsed_end_date = parsed_end_dt.date()
-
             result = await self.db.execute(
                 update(Sprint)
                 .where(
@@ -892,8 +906,8 @@ class SprintService:
                 )
                 .values(
                     status="active",
-                    start_date=parsed_start_date,
-                    end_date=parsed_end_date,
+                    start_date=parsed_start_dt,
+                    end_date=parsed_end_dt,
                     updated_at=datetime.now(
                         timezone.utc
                     ),
@@ -1061,13 +1075,11 @@ class SprintService:
                 "name": sprint.name,
                 "goal": sprint.goal or "",
                 "status": "completed",
-                "start_date": (
-                    sprint.start_date.isoformat() + "T00:00:00Z"
-                    if sprint.start_date else None
+                "start_date": self._format_datetime_utc(
+                    sprint.start_date
                 ),
-                "end_date": (
-                    sprint.end_date.isoformat() + "T00:00:00Z"
-                    if sprint.end_date else None
+                "end_date": self._format_datetime_utc(
+                    sprint.end_date
                 ),
                 "actual_end_date": actual_end_date.isoformat().replace(
                     "+00:00", "Z"
@@ -1255,15 +1267,11 @@ class SprintService:
                         "name": sprint.name,
                         "goal": sprint.goal,
                         "status": sprint.status,
-                        "start_date": (
-                            f"{sprint.start_date.isoformat()}T00:00:00Z"
-                            if sprint.start_date
-                            else None
+                        "start_date": self._format_datetime_utc(
+                            sprint.start_date
                         ),
-                        "end_date": (
-                            f"{sprint.end_date.isoformat()}T00:00:00Z"
-                            if sprint.end_date
-                            else None
+                        "end_date": self._format_datetime_utc(
+                            sprint.end_date
                         ),
                         "total_stories": story_counts.get(str(sprint.id), 0),
                     }
@@ -1372,15 +1380,11 @@ class SprintService:
                 "name": sprint.name,
                 "goal": sprint.goal,
                 "status": sprint.status,
-                "start_date": (
-                    f"{sprint.start_date.isoformat()}T00:00:00Z"
-                    if sprint.start_date
-                    else None
+                "start_date": self._format_datetime_utc(
+                    sprint.start_date
                 ),
-                "end_date": (
-                    f"{sprint.end_date.isoformat()}T00:00:00Z"
-                    if sprint.end_date
-                    else None
+                "end_date": self._format_datetime_utc(
+                    sprint.end_date
                 ),
                 "total_stories": int(story_count),
             }
@@ -1498,7 +1502,7 @@ class SprintService:
 
             today = datetime.now(timezone.utc).date()
 
-            if req.start_date is not None:
+            if getattr(req, "start_date", None) is not None:
 
                 if not req.start_date.strip():
                     return error_response(
@@ -1508,8 +1512,8 @@ class SprintService:
                     )
 
                 try:
-                    parsed_start_date = (
-                        self._parse_date_string(
+                    parsed_start_dt = (
+                        self._parse_datetime(
                             req.start_date
                         )
                     )
@@ -1521,30 +1525,35 @@ class SprintService:
                         status_code=400,
                     )
 
-                if parsed_start_date < today:
+                if parsed_start_dt.date() < today:
                     return error_response(
                         ErrorCode.ErrBadRequest,
                         "Past start date is not allowed",
                         status_code=400,
                     )
 
-                if (
-                    end_date is not None
-                    and parsed_start_date > end_date
-                ):
-                    return error_response(
-                        ErrorCode.ErrBadRequest,
-                        "Start date cannot be after end date",
-                        status_code=400,
+                if end_date is not None:
+                    end_dt = (
+                        end_date
+                        if isinstance(end_date, datetime)
+                        else datetime.combine(
+                            end_date, datetime.max.time(), tzinfo=timezone.utc
+                        )
                     )
+                    if parsed_start_dt >= end_dt:
+                        return error_response(
+                            ErrorCode.ErrBadRequest,
+                            "Start date cannot be after or equal to end date",
+                            status_code=400,
+                        )
 
                 old_date = (
-                    existing_sprint.start_date.isoformat()
+                    self._format_datetime_utc(existing_sprint.start_date)
                     if existing_sprint.start_date
                     else "NULL"
                 )
 
-                new_date = parsed_start_date.isoformat()
+                new_date = self._format_datetime_utc(parsed_start_dt)
 
                 if old_date != new_date:
                     changes.append(
@@ -1552,8 +1561,8 @@ class SprintService:
                         f"to '{new_date}'"
                     )
 
-                start_date = parsed_start_date
-                updates["start_date"] = parsed_start_date
+                start_date = parsed_start_dt
+                updates["start_date"] = parsed_start_dt
 
             if req.end_date is not None:
 
@@ -1565,8 +1574,8 @@ class SprintService:
                     )
 
                 try:
-                    parsed_end_date = (
-                        self._parse_date_string(
+                    parsed_end_dt = (
+                        self._parse_datetime(
                             req.end_date
                         )
                     )
@@ -1578,30 +1587,35 @@ class SprintService:
                         status_code=400,
                     )
 
-                if parsed_end_date < today:
+                if parsed_end_dt.date() < today:
                     return error_response(
                         ErrorCode.ErrBadRequest,
                         "Past end date is not allowed",
                         status_code=400,
                     )
 
-                if (
-                    start_date is not None
-                    and parsed_end_date < start_date
-                ):
-                    return error_response(
-                        ErrorCode.ErrBadRequest,
-                        "End date cannot be before start date",
-                        status_code=400,
+                if start_date is not None:
+                    start_dt = (
+                        start_date
+                        if isinstance(start_date, datetime)
+                        else datetime.combine(
+                            start_date, datetime.min.time(), tzinfo=timezone.utc
+                        )
                     )
+                    if parsed_end_dt <= start_dt:
+                        return error_response(
+                            ErrorCode.ErrBadRequest,
+                            "End date cannot be before or equal to start date",
+                            status_code=400,
+                        )
 
                 old_date = (
-                    existing_sprint.end_date.isoformat()
+                    self._format_datetime_utc(existing_sprint.end_date)
                     if existing_sprint.end_date
                     else "NULL"
                 )
 
-                new_date = parsed_end_date.isoformat()
+                new_date = self._format_datetime_utc(parsed_end_dt)
 
                 if old_date != new_date:
                     changes.append(
@@ -1609,8 +1623,8 @@ class SprintService:
                         f"to '{new_date}'"
                     )
 
-                end_date = parsed_end_date
-                updates["end_date"] = parsed_end_date
+                end_date = parsed_end_dt
+                updates["end_date"] = parsed_end_dt
 
             if req.name is not None:
                 updates["name"] = req.name
@@ -1780,8 +1794,9 @@ class SprintService:
                 status_code=409,
             )
 
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
             await self.db.rollback()
+            logger.exception("UPDATE SPRINT SQL ERROR: %s", exc)
 
             return error_response(
                 ErrorCode.ErrInternalServerError,
@@ -1789,8 +1804,9 @@ class SprintService:
                 status_code=500,
             )
 
-        except Exception:
+        except Exception as exc:
             await self.db.rollback()
+            logger.exception("UPDATE SPRINT ERROR: %s", exc)
 
             return error_response(
                 ErrorCode.ErrInternalServerError,
@@ -2116,11 +2132,19 @@ class SprintService:
                 for snapshot in snapshots
             }
 
-            start_date = sprint.start_date
-            end_date = sprint.end_date
+            start_d = (
+                sprint.start_date.date()
+                if isinstance(sprint.start_date, datetime)
+                else sprint.start_date
+            )
+            end_d = (
+                sprint.end_date.date()
+                if isinstance(sprint.end_date, datetime)
+                else sprint.end_date
+            )
 
             total_days = (
-                end_date - start_date
+                end_d - start_d
             ).days
 
 
@@ -2135,7 +2159,7 @@ class SprintService:
 
             for i in range(total_days + 1):
                 current_date = (
-                    start_date
+                    start_d
                     + timedelta(days=i)
                 )
 
@@ -2658,15 +2682,11 @@ class SprintService:
                 "name": updated_sprint.name,
                 "goal": updated_sprint.goal,
                 "status": updated_sprint.status,
-                "start_date": (
-                    f"{updated_sprint.start_date.isoformat()}T00:00:00Z"
-                    if updated_sprint.start_date
-                    else None
+                "start_date": self._format_datetime_utc(
+                    updated_sprint.start_date
                 ),
-                "end_date": (
-                    f"{updated_sprint.end_date.isoformat()}T00:00:00Z"
-                    if updated_sprint.end_date
-                    else None
+                "end_date": self._format_datetime_utc(
+                    updated_sprint.end_date
                 ),
                 "actual_end_date": (
                     updated_sprint.actual_end_date.isoformat()
