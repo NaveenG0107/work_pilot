@@ -337,51 +337,94 @@ class SprintService:
         return False, None
 
     @staticmethod
-    def _parse_date_string(
+    def _parse_utc_datetime(
         value: str,
-    ) -> date:
+    ) -> datetime:
         """
-        Go parseDateString equivalent.
-
-        Accepted:
-        - RFC3339
-        - RFC3339Nano
-        - YYYY-MM-DD
-        - YYYY-MM-DD HH:MM:SS
+        Parses UTC datetime strictly in format YYYY-MM-DDTHH:MM:SSZ.
+        Date-only format (YYYY-MM-DD) is rejected.
         """
+        if not isinstance(value, str):
+            raise ValueError("expected format: YYYY-MM-DDTHH:MM:SSZ")
 
         raw = value.strip()
+        if not raw:
+            raise ValueError("cannot be empty")
+
+        if not raw.endswith("Z") or "T" not in raw:
+            raise ValueError("expected format: YYYY-MM-DDTHH:MM:SSZ")
+
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        ):
+            try:
+                return datetime.strptime(raw, fmt).replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                continue
+
+        raise ValueError("expected format: YYYY-MM-DDTHH:MM:SSZ")
+
+    @staticmethod
+    def _parse_datetime(
+        value: str,
+    ) -> datetime:
+        """
+        Parses UTC-like datetime or date string into a UTC-aware datetime.
+
+        Accepted:
+        - RFC3339 / ISO 8601 (e.g., 2026-10-13T10:00:00Z, 2026-10-13T10:00:00.000Z)
+        - ISO 8601 with offset (e.g., 2026-10-13T15:30:00+05:30)
+        - Naive ISO 8601 datetime (e.g., 2026-10-13T10:00:00)
+        - Date and time with space (e.g., 2026-10-13 10:00:00)
+        - Date only (e.g., 2026-10-13)
+        """
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+
+        raw = value.strip()
+        if not raw:
+            raise ValueError("cannot be empty")
+
+        normalized = raw
+        if normalized.endswith("Z") or normalized.endswith("z"):
+            normalized = normalized[:-1] + "+00:00"
 
         try:
-            if raw.endswith("Z"):
-                return datetime.fromisoformat(
-                    raw[:-1] + "+00:00"
-                ).date()
-
-            if "T" in raw:
-                return datetime.fromisoformat(
-                    raw
-                ).date()
-
+            dt = datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
         except ValueError:
             pass
 
         for fmt in (
             "%Y-%m-%d",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S.%f",
         ):
             try:
-                return datetime.strptime(
-                    raw,
-                    fmt,
-                ).date()
-
+                dt = datetime.strptime(raw, fmt)
+                return dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
 
         raise ValueError(
-            "expected format: YYYY-MM-DD"
+            "expected ISO 8601 UTC datetime or YYYY-MM-DD date"
         )
+
+    @classmethod
+    def _parse_date_string(
+        cls,
+        value: str,
+    ) -> date:
+        return cls._parse_datetime(value).date()
 
 
     # CREATE SPRINT
@@ -791,8 +834,8 @@ class SprintService:
                 )
 
             try:
-                parsed_start_date = (
-                    self._parse_date_string(
+                parsed_start_dt = (
+                    self._parse_utc_datetime(
                         req.start_date
                     )
                 )
@@ -805,8 +848,8 @@ class SprintService:
                 )
 
             try:
-                parsed_end_date = (
-                    self._parse_date_string(
+                parsed_end_dt = (
+                    self._parse_utc_datetime(
                         req.end_date
                     )
                 )
@@ -818,7 +861,15 @@ class SprintService:
                     status_code=400,
                 )
 
-            if parsed_end_date <= parsed_start_date:
+            now_utc = datetime.now(timezone.utc)
+            if parsed_start_dt < now_utc:
+                return None, error_response(
+                    ErrorCode.ErrBadRequest,
+                    "start_date cannot be in the past",
+                    status_code=400,
+                )
+
+            if parsed_end_dt <= parsed_start_dt:
                 return None, error_response(
                     ErrorCode.ErrBadRequest,
                     (
@@ -827,6 +878,9 @@ class SprintService:
                     ),
                     status_code=400,
                 )
+
+            parsed_start_date = parsed_start_dt.date()
+            parsed_end_date = parsed_end_dt.date()
 
             result = await self.db.execute(
                 update(Sprint)
@@ -871,13 +925,11 @@ class SprintService:
                 "name": sprint.name,
                 "goal": sprint.goal,
                 "status": "active",
-                "start_date": (
-                    parsed_start_date.isoformat()
-                    + "T00:00:00Z"
+                "start_date": parsed_start_dt.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
                 ),
-                "end_date": (
-                    parsed_end_date.isoformat()
-                    + "T00:00:00Z"
+                "end_date": parsed_end_dt.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
                 ),
                 "total_stories": int(story_count),
             }
@@ -1442,7 +1494,7 @@ class SprintService:
             start_date = existing_sprint.start_date
             end_date = existing_sprint.end_date
 
-            today = datetime.now().date()
+            today = datetime.now(timezone.utc).date()
 
             if req.start_date is not None:
 
@@ -1454,15 +1506,16 @@ class SprintService:
                     )
 
                 try:
-                    parsed_start_date = datetime.strptime(
-                        req.start_date,
-                        "%Y-%m-%d",
-                    ).date()
+                    parsed_start_date = (
+                        self._parse_date_string(
+                            req.start_date
+                        )
+                    )
 
-                except ValueError:
+                except ValueError as exc:
                     return error_response(
                         ErrorCode.ErrBadRequest,
-                        "Invalid start_date. Expected format: YYYY-MM-DD",
+                        f"Invalid start_date: {exc}",
                         status_code=400,
                     )
 
@@ -1510,15 +1563,16 @@ class SprintService:
                     )
 
                 try:
-                    parsed_end_date = datetime.strptime(
-                        req.end_date,
-                        "%Y-%m-%d",
-                    ).date()
+                    parsed_end_date = (
+                        self._parse_date_string(
+                            req.end_date
+                        )
+                    )
 
-                except ValueError:
+                except ValueError as exc:
                     return error_response(
                         ErrorCode.ErrBadRequest,
-                        "Invalid end_date. Expected format: YYYY-MM-DD",
+                        f"Invalid end_date: {exc}",
                         status_code=400,
                     )
 
