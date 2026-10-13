@@ -509,12 +509,12 @@ class SprintService:
             ] = []
 
             for sprint_request in req.sprints:
-                start_raw = (
-                    sprint_request.start_date
+                start_raw = getattr(
+                    sprint_request, "start_date", None
                 )
 
-                end_raw = (
-                    sprint_request.end_date
+                end_raw = getattr(
+                    sprint_request, "end_date", None
                 )
 
                 has_start = (
@@ -862,7 +862,9 @@ class SprintService:
                 )
 
             now_utc = datetime.now(timezone.utc)
-            if parsed_start_dt < now_utc:
+            # Allow a tolerance buffer (2 minutes) for client-server clock drift and network latency
+            tolerance = timedelta(minutes=2)
+            if parsed_start_dt < (now_utc - tolerance):
                 return None, error_response(
                     ErrorCode.ErrBadRequest,
                     "start_date cannot be in the past",
