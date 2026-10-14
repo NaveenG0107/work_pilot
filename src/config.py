@@ -46,3 +46,15 @@ if CORS_ORIGINS_RAW.strip() == "*":
     CORS_ORIGINS = ["*"]
 else:
     CORS_ORIGINS = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip()]
+
+# AI Assistant configuration
+AI_ENABLED = os.getenv("AI_ENABLED", "").lower() in ("true", "1", "yes")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").lower()
+AI_MODEL = os.getenv("AI_MODEL", "")
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "")
+AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE")) if os.getenv("AI_TEMPERATURE") else 0.2
+AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS")) if os.getenv("AI_REQUEST_TIMEOUT_SECONDS") else 30.0
+AI_MAX_OUTPUT_TOKENS = int(os.getenv("AI_MAX_OUTPUT_TOKENS")) if os.getenv("AI_MAX_OUTPUT_TOKENS") else 1200
+AI_MAX_TOOL_ROUNDS = int(os.getenv("AI_MAX_TOOL_ROUNDS")) if os.getenv("AI_MAX_TOOL_ROUNDS") else 3
+AI_ENABLE_WRITE_TOOLS = os.getenv("AI_ENABLE_WRITE_TOOLS", "").lower() in ("true", "1", "yes")
