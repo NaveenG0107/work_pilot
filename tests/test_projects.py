@@ -128,3 +128,29 @@ async def test_recent_projects_pagination(client: AsyncClient, app_context: dict
     assert body["meta"]["page"] == 1
     assert body["meta"]["page_size"] == 5
 
+
+@pytest.mark.anyio
+async def test_user_projects_status_sorting(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    user_id = app_context["user_a_admin_id"]
+    resp = await client.get(f"/api/v1/project/user/{user_id}?page=1&page_size=50", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    projects = body["data"]["project"]
+
+    priority_map = {
+        "active": 0,
+        "planning": 1,
+        "on_hold": 2,
+        "on hold": 2,
+        "completed": 3,
+        "cancelled": 4,
+        "archived": 5,
+    }
+
+    if len(projects) > 1:
+        ranks = [priority_map.get(p["status"].lower(), 6) for p in projects]
+        assert ranks == sorted(ranks), f"Projects not sorted by status priority: {[p['status'] for p in projects]}"
+
+
