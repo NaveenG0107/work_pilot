@@ -1184,7 +1184,21 @@ class ProjectService:
             # created. Requiring a task made valid assigned projects disappear.
             stmt = stmt.order_by(Project.updated_at.desc(), Project.created_at.desc())
         else:
-            stmt = stmt.order_by(Project.created_at.desc(), Project.id.desc())
+            status_priority = case(
+                (func.lower(Project.status) == "active", 0),
+                (func.lower(Project.status) == "planning", 1),
+                (func.lower(func.replace(Project.status, " ", "_")) == "on_hold", 2),
+                (func.lower(Project.status) == "completed", 3),
+                (func.lower(Project.status) == "cancelled", 4),
+                (func.lower(Project.status) == "archived", 5),
+                else_=6,
+            )
+            stmt = stmt.order_by(
+                status_priority.asc(),
+                Project.created_at.desc(),
+                Project.id.desc(),
+            )
+
 
         stmt = stmt.offset((page - 1) * page_size).limit(page_size)
         rows = (await self.db.execute(stmt)).all()
