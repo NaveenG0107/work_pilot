@@ -627,13 +627,19 @@ async def reopen_project(
 
 @router.get(
     "/user/{user_id}",
-    response_model=SuccessResponse[UserProjectsResponse],
+    response_model=PaginatedSuccessResponse[UserProjectsResponse],
     tags=["Projects"],
 )
 @require_jwt
 async def projects_by_user(
     user_id: str,
     request: Request,
+    page: int = 1,
+    page_size: int = 10,
+    search_query: str = "",
+    status_filter: str = Query(
+        "", alias="status", json_schema_extra={"enum": PROJECT_STATUSES}
+    ),
     service: ProjectService = Depends(get_project_service),
 ):
     try:
@@ -641,16 +647,35 @@ async def projects_by_user(
         org_id = request.state.organization_id
         caller_id = request.state.user_id
         caller_role = request.state.role
+
+        search = (
+            search_query
+            or request.query_params.get("search")
+            or request.query_params.get("search_query")
+            or ""
+        )
+        status_value = (
+            status_filter
+            or request.query_params.get("status")
+            or request.query_params.get("filter")
+            or ""
+        )
+        status_value = validate_status(status_value)
+
+        data, meta = await service.user_projects(
+            user_id,
+            org_id,
+            caller_id=caller_id,
+            caller_role=caller_role,
+            search_query=search,
+            status=status_value,
+            page=page,
+            page_size=page_size,
+        )
         return success(
             "Project retrieved successfully.",
-            dumped(
-                await service.user_projects(
-                    user_id,
-                    org_id,
-                    caller_id=caller_id,
-                    caller_role=caller_role,
-                )
-            ),
+            dumped(data),
+            meta=meta.model_dump(mode="json"),
         )
     except Exception as exc:
         return failure(exc)
@@ -658,19 +683,30 @@ async def projects_by_user(
 
 @router.get(
     "/recent",
-    response_model=SuccessResponse[UserProjectsResponse],
+    response_model=PaginatedSuccessResponse[UserProjectsResponse],
     tags=["Projects"],
 )
 @require_jwt
 async def recent_projects(
-    request: Request, service: ProjectService = Depends(get_project_service)
+    request: Request,
+    page: int = 1,
+    page_size: int = 10,
+    service: ProjectService = Depends(get_project_service),
 ):
     try:
         user_id = request.state.user_id
         org_id = request.state.organization_id
+        data, meta = await service.user_projects(
+            user_id,
+            org_id,
+            recent=True,
+            page=page,
+            page_size=page_size,
+        )
         return success(
             "Recent projects retrieved successfully.",
-            dumped(await service.user_projects(user_id, org_id, recent=True)),
+            dumped(data),
+            meta=meta.model_dump(mode="json"),
         )
     except Exception as exc:
         return failure(exc)
