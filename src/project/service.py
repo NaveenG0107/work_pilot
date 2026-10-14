@@ -1118,7 +1118,11 @@ class ProjectService:
         recent: bool = False,
         caller_id: str | None = None,
         caller_role: str = "",
-    ) -> UserProjectsResponse:
+        search_query: str = "",
+        status: str = "",
+        page: int = 1,
+        page_size: int = 10,
+    ) -> tuple[UserProjectsResponse, PaginationResponse]:
         user = (
             await self.db.execute(
                 select(User)
@@ -1138,19 +1142,56 @@ class ProjectService:
                 "FORBIDDEN",
                 "You do not have permission to view this user's projects",
             )
-        stmt = select(ProjectMember, Project, Role).join(Project,
-            Project.id == ProjectMember.project_id).join(Role,
-            Role.id == ProjectMember.role_id).where(ProjectMember.user_id == target_id,
-            ProjectMember.deleted_at.is_(None), Project.deleted_at.is_(None),
-            Project.organization_id == organization_id)
+
+        page = max(1, page or 1)
+        page_size = page_size if (page_size and page_size > 0) else 10
+
+        stmt = (
+            select(ProjectMember, Project, Role, Organization)
+            .join(Project, Project.id == ProjectMember.project_id)
+            .join(Role, Role.id == ProjectMember.role_id)
+            .join(Organization, Organization.id == Project.organization_id)
+            .where(
+                ProjectMember.user_id == target_id,
+                ProjectMember.deleted_at.is_(None),
+                Project.deleted_at.is_(None),
+                Project.organization_id == organization_id,
+                Organization.deleted_at.is_(None),
+            )
+        )
+
+        if search_query:
+            term = f"%{search_query.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Project.name.ilike(term),
+                    Organization.name.ilike(term),
+                )
+            )
+
+        if status:
+            statuses = [s.strip().lower() for s in status.split(",") if s.strip()]
+            if len(statuses) == 1:
+                stmt = stmt.where(func.lower(Project.status) == statuses[0])
+            elif len(statuses) > 1:
+                stmt = stmt.where(func.lower(Project.status).in_(statuses))
+
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total_items = (await self.db.execute(count_stmt)).scalar_one()
+
         if recent:
             # A project is still recent/available even before its first task is
             # created. Requiring a task made valid assigned projects disappear.
             stmt = stmt.order_by(Project.updated_at.desc(), Project.created_at.desc())
+        else:
+            stmt = stmt.order_by(Project.created_at.desc(), Project.id.desc())
+
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
         rows = (await self.db.execute(stmt)).all()
+
         task_counts: dict[str, int] = {}
         if recent and rows:
-            project_ids = [project.id for _, project, _ in rows]
+            project_ids = [project.id for _, project, _, _ in rows]
             task_counts = {
                 str(project_id): count
                 for project_id, count in (
@@ -1171,13 +1212,33 @@ class ProjectService:
                 project_name=project.name,
                 status=project.status,
                 project_slug=project.slug if recent else None,
+                organization_name=org.name if org else None,
             )
-            for _, project, role in rows
+            for _, project, role, org in rows
             if not recent or task_counts.get(str(project.id), 0) > 0
         ]
-        return UserProjectsResponse(user_id=str(user.id), user_name=user.username,
-            full_name=user.full_name, email=user.email, avatar_url=user.avatar_url or None,
-            color=user.color, role=getattr(user.role, "name", None), project=projects)
+
+        total_pages = math.ceil(total_items / page_size) if total_items > 0 else 1
+        meta = PaginationResponse(
+            page=page,
+            page_size=page_size,
+            total_items=total_items,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_previous=page > 1,
+        )
+
+        user_data = UserProjectsResponse(
+            user_id=str(user.id),
+            user_name=user.username,
+            full_name=user.full_name,
+            email=user.email,
+            avatar_url=user.avatar_url or None,
+            color=user.color,
+            role=getattr(user.role, "name", None),
+            project=projects,
+        )
+        return user_data, meta
 
     async def user_role(self, project_id: str, user_id: str,
                         organization_id: str) -> UserProjectRoleResponse:

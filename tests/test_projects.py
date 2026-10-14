@@ -72,3 +72,59 @@ async def test_project_unauthorized(client: AsyncClient, app_context: dict):
     project_id = app_context["project_a_id"]
     resp = await client.get(f"/api/v1/project/{project_id}/detail")
     assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_user_projects_pagination_and_search(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    user_id = app_context["user_a_admin_id"]
+
+    # 1. Base paginated request
+    resp = await client.get(f"/api/v1/project/user/{user_id}?page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert "data" in body
+    assert "project" in body["data"]
+    assert "meta" in body
+    assert body["meta"]["page"] == 1
+    assert body["meta"]["page_size"] == 5
+    assert "total_items" in body["meta"]
+    assert "total_pages" in body["meta"]
+
+    # 2. Search query by project name
+    if body["data"]["project"]:
+        first_proj_name = body["data"]["project"][0]["project_name"]
+        search_query = first_proj_name[:4]
+        search_resp = await client.get(
+            f"/api/v1/project/user/{user_id}?search_query={search_query}",
+            headers=headers,
+        )
+        assert search_resp.status_code == 200
+        search_body = search_resp.json()
+        assert search_body["success"] is True
+        assert len(search_body["data"]["project"]) >= 1
+        assert "meta" in search_body
+
+    # 3. Filter by status
+    status_resp = await client.get(
+        f"/api/v1/project/user/{user_id}?status=active",
+        headers=headers,
+    )
+    assert status_resp.status_code == 200
+    status_body = status_resp.json()
+    assert status_body["success"] is True
+    assert all(p["status"].lower() == "active" for p in status_body["data"]["project"])
+
+
+@pytest.mark.anyio
+async def test_recent_projects_pagination(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/project/recent?page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert "meta" in body
+    assert body["meta"]["page"] == 1
+    assert body["meta"]["page_size"] == 5
+
