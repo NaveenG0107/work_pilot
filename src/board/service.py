@@ -423,6 +423,7 @@ class BoardService:
         conditions = [
             UserStory.project_id == project_id,
             UserStory.deleted_at.is_(None),
+            UserStory.sprint_id.is_not(None),
         ]
         if sprint_id:
             conditions.append(UserStory.sprint_id == sprint_id)

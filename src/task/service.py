@@ -35,7 +35,7 @@ from src.custom_status.models import CustomStatus
 from src.favorite.models import Favorite
 from src.label.models import Label
 from src.organization.models import OrphanedFile, Role
-from src.project.models import Project, ProjectMember
+from src.project.models import Project, ProjectKeyHistory, ProjectMember
 from src.sprint.models import Sprint
 from src.task.models import (
     DEFAULT_STATUS_COLORS,
@@ -374,7 +374,56 @@ class TaskService:
             uuid.UUID(str(task_id))
             identifier_condition = Task.id == task_id
         except (ValueError, TypeError, AttributeError):
-            identifier_condition = func.upper(Task.key) == str(task_id).strip().upper()
+            clean_key = str(task_id).strip().upper()
+            conditions_or = [func.upper(Task.key) == clean_key]
+            if "-" in clean_key:
+                parts = clean_key.rsplit("-", 1)
+                if parts[1].isdigit():
+                    prefix = parts[0]
+                    seq = int(parts[1])
+                    if project_id is not None:
+                        prefix_match = (
+                            await self.db.execute(
+                                select(Project.id).where(
+                                    Project.id == project_id,
+                                    or_(
+                                        Project.key == prefix,
+                                        Project.id.in_(
+                                            select(ProjectKeyHistory.project_id).where(
+                                                ProjectKeyHistory.project_id == project_id,
+                                                ProjectKeyHistory.key == prefix,
+                                            )
+                                        ),
+                                    ),
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if prefix_match:
+                            conditions_or.append(
+                                and_(Task.project_id == project_id, Task.sequence_number == seq)
+                            )
+                    else:
+                        matching_pids = list(
+                            (
+                                await self.db.execute(
+                                    select(Project.id).where(
+                                        or_(
+                                            Project.key == prefix,
+                                            Project.id.in_(
+                                                select(ProjectKeyHistory.project_id).where(
+                                                    ProjectKeyHistory.key == prefix,
+                                                )
+                                            ),
+                                        )
+                                    )
+                                )
+                            ).scalars()
+                        )
+                        if matching_pids:
+                            conditions_or.append(
+                                and_(Task.project_id.in_(matching_pids), Task.sequence_number == seq)
+                            )
+            identifier_condition = or_(*conditions_or)
 
         conditions = [identifier_condition]
         if project_id is not None:
@@ -813,6 +862,7 @@ class TaskService:
         )
         labels = await self._verify_labels(project_id, body.label_ids)
         project_name = project.name
+        project_key = getattr(project, "key", None) or _project_prefix(project_name)
         sequence = await self._next_sequence(project_id)
         serial_number = await self._next_global_serial()
         reporter_id = _uuid_string(body.reporter_id) if (body.reporter_id and not _is_nil(body.reporter_id)) else user_id
@@ -820,7 +870,7 @@ class TaskService:
             project_id=project_id,
             sprint_id=_uuid_string(body.sprint_id),
             user_story_id=_uuid_string(body.user_story_id),
-            key=f"{_project_prefix(project_name)}-{sequence}",
+            key=f"{project_key}-{sequence}",
             sequence_number=sequence,
             serial_number=serial_number,
             title=body.title,
@@ -1017,14 +1067,35 @@ class TaskService:
             conditions.append(Task.serial_number == serial_number)
         if search:
             cleaned = search.strip().removeprefix("#")
-            conditions.append(
-                or_(
-                    Task.title.ilike(f"%{search}%"),
-                    Task.description.ilike(f"%{search}%"),
-                    Task.key.ilike(f"%{search}%"),
-                    cast(Task.serial_number, String).ilike(f"%{cleaned}%"),
-                )
-            )
+            search_conds = [
+                Task.title.ilike(f"%{search}%"),
+                Task.description.ilike(f"%{search}%"),
+                Task.key.ilike(f"%{search}%"),
+                cast(Task.serial_number, String).ilike(f"%{cleaned}%"),
+            ]
+            m = re.match(r"^([A-Za-z0-9]+)-(\d+)$", search.strip())
+            if m:
+                s_prefix = m.group(1).upper()
+                s_seq = int(m.group(2))
+                prefix_match = (
+                    await self.db.execute(
+                        select(Project.id).where(
+                            Project.id == project_id,
+                            or_(
+                                Project.key == s_prefix,
+                                Project.id.in_(
+                                    select(ProjectKeyHistory.project_id).where(
+                                        ProjectKeyHistory.project_id == project_id,
+                                        ProjectKeyHistory.key == s_prefix,
+                                    )
+                                ),
+                            ),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if prefix_match:
+                    search_conds.append(Task.sequence_number == s_seq)
+            conditions.append(or_(*search_conds))
 
         if labels:
             unique_items = list(dict.fromkeys(value.lower() for value in labels))
@@ -1793,11 +1864,12 @@ class TaskService:
         sequence = await self._next_sequence(project_id)
         serial_number = await self._next_global_serial()
         title = f"{original.title} (Cloned)"[:200]
+        project_key = getattr(project, "key", None) or _project_prefix(project.name)
         cloned = Task(
             project_id=project_id,
             sprint_id=original.sprint_id,
             user_story_id=original.user_story_id,
-            key=f"{_project_prefix(project.name)}-{sequence}",
+            key=f"{project_key}-{sequence}",
             sequence_number=sequence,
             serial_number=serial_number,
             title=title,
