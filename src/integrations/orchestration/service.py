@@ -6,6 +6,7 @@ and user permissions.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
@@ -34,7 +35,131 @@ logger = get_logger(__name__)
 
 # Fallback in-memory store for pending actions if Redis is not configured or offline
 _MEMORY_ACTION_STORE: dict[str, dict[str, Any]] = {}
+_MEMORY_STORE_LOCK = asyncio.Lock()
 CONFIRMATION_TTL_SECONDS = 900  # 15 minutes
+DEFAULT_CLAIM_TTL_SECONDS = 30  # 30 seconds claim execution lock
+
+LUA_CLAIM_ACTION = """
+local key = KEYS[1]
+local raw = redis.call('GET', key)
+if not raw then
+    return cjson.encode({result = 'not_found'})
+end
+
+local data = cjson.decode(raw)
+if data.status == 'completed' then
+    return cjson.encode({result = 'already_completed'})
+end
+if data.status == 'cancelled' then
+    return cjson.encode({result = 'already_cancelled'})
+end
+
+local now = tonumber(ARGV[1])
+local claim_ttl = tonumber(ARGV[2])
+local token = ARGV[3]
+
+if data.expires_at_ts and now > tonumber(data.expires_at_ts) then
+    return cjson.encode({result = 'expired'})
+end
+
+if data.status == 'executing' then
+    local claim_expires = tonumber(data.claim_expires or 0)
+    if now < claim_expires then
+        return cjson.encode({result = 'already_executing'})
+    end
+end
+
+if data.status ~= 'pending' and data.status ~= 'executing' then
+    return cjson.encode({result = 'invalid_status', current_status = data.status})
+end
+
+data.status = 'executing'
+data.claim_token = token
+data.claim_expires = now + claim_ttl
+
+local ttl = redis.call('TTL', key)
+if ttl <= 0 then
+    ttl = 900
+end
+redis.call('SET', key, cjson.encode(data), 'EX', ttl)
+
+return cjson.encode({result = 'claimed', data = data})
+"""
+
+LUA_RELEASE_CLAIM = """
+local key = KEYS[1]
+local token = ARGV[1]
+local raw = redis.call('GET', key)
+if not raw then return 0 end
+local data = cjson.decode(raw)
+if data.status == 'executing' then
+    if token == '' or data.claim_token == token then
+        data.status = 'pending'
+        data.claim_token = nil
+        data.claim_expires = nil
+        local ttl = redis.call('TTL', key)
+        if ttl <= 0 then ttl = 900 end
+        redis.call('SET', key, cjson.encode(data), 'EX', ttl)
+        return 1
+    end
+end
+return 0
+"""
+
+LUA_COMPLETE_ACTION = """
+local key = KEYS[1]
+local token = ARGV[1]
+local result_json = ARGV[2]
+local raw = redis.call('GET', key)
+if not raw then return 0 end
+local data = cjson.decode(raw)
+if data.status == 'executing' or data.status == 'pending' then
+    if token == '' or not data.claim_token or data.claim_token == token then
+        data.status = 'completed'
+        data.result = cjson.decode(result_json)
+        data.claim_token = nil
+        data.claim_expires = nil
+        local ttl = redis.call('TTL', key)
+        if ttl <= 0 then ttl = 900 end
+        redis.call('SET', key, cjson.encode(data), 'EX', ttl)
+        return 1
+    end
+end
+return 0
+"""
+
+LUA_CANCEL_ACTION = """
+local key = KEYS[1]
+local user_id = ARGV[1]
+local organization_id = ARGV[2]
+local now = tonumber(ARGV[3])
+
+local raw = redis.call('GET', key)
+if not raw then
+    return cjson.encode({result = 'not_found'})
+end
+local data = cjson.decode(raw)
+
+if tostring(data.user_id) ~= tostring(user_id) or tostring(data.organization_id) ~= tostring(organization_id) then
+    return cjson.encode({result = 'forbidden'})
+end
+
+if data.status == 'completed' then
+    return cjson.encode({result = 'already_completed'})
+end
+if data.status == 'executing' then
+    local claim_expires = tonumber(data.claim_expires or 0)
+    if now < claim_expires then
+        return cjson.encode({result = 'already_executing'})
+    end
+end
+
+data.status = 'cancelled'
+local ttl = redis.call('TTL', key)
+if ttl <= 0 then ttl = 900 end
+redis.call('SET', key, cjson.encode(data), 'EX', ttl)
+return cjson.encode({result = 'cancelled'})
+"""
 
 
 class ActionStore:
@@ -58,7 +183,8 @@ class ActionStore:
                 logger.warning("Failed to store action in Redis, falling back to memory: %s", exc)
 
         # In-memory store fallback
-        _MEMORY_ACTION_STORE[action_id] = data
+        async with _MEMORY_STORE_LOCK:
+            _MEMORY_ACTION_STORE[action_id] = data
 
     async def get_action(self, action_id: str) -> dict[str, Any] | None:
         if self.redis is not None:
@@ -69,15 +195,16 @@ class ActionStore:
             except Exception as exc:
                 logger.warning("Failed to retrieve action from Redis: %s", exc)
 
-        action = _MEMORY_ACTION_STORE.get(action_id)
-        if action:
-            # Check expiration
-            expires_at = datetime.fromisoformat(action["expires_at"])
-            if datetime.now(timezone.utc) > expires_at:
-                _MEMORY_ACTION_STORE.pop(action_id, None)
-                return None
-            return action
-        return None
+        async with _MEMORY_STORE_LOCK:
+            action = _MEMORY_ACTION_STORE.get(action_id)
+            if action:
+                if action.get("expires_at"):
+                    expires_at = datetime.fromisoformat(action["expires_at"])
+                    if datetime.now(timezone.utc) > expires_at:
+                        _MEMORY_ACTION_STORE.pop(action_id, None)
+                        return None
+                return action
+            return None
 
     async def update_action(
         self,
@@ -86,6 +213,149 @@ class ActionStore:
         ttl_seconds: int = CONFIRMATION_TTL_SECONDS,
     ) -> None:
         await self.save_pending_action(action_id, data, ttl_seconds=ttl_seconds)
+
+    async def claim_action(
+        self,
+        action_id: str,
+        token: str,
+        claim_ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
+    ) -> dict[str, Any]:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if self.redis is not None:
+            try:
+                res = await self.redis.eval(
+                    LUA_CLAIM_ACTION,
+                    1,
+                    f"ai_action:{action_id}",
+                    now_ts,
+                    claim_ttl_seconds,
+                    token,
+                )
+                if res:
+                    return json.loads(res)
+            except Exception as exc:
+                logger.warning("Redis Lua claim failed, using in-memory store: %s", exc)
+
+        async with _MEMORY_STORE_LOCK:
+            data = _MEMORY_ACTION_STORE.get(action_id)
+            if not data:
+                return {"result": "not_found"}
+
+            if data.get("expires_at"):
+                expires_at = datetime.fromisoformat(data["expires_at"])
+                if datetime.now(timezone.utc) > expires_at:
+                    data["status"] = "expired"
+                    return {"result": "expired"}
+
+            status = data.get("status")
+            if status == "completed":
+                return {"result": "already_completed"}
+            if status == "cancelled":
+                return {"result": "already_cancelled"}
+            if status == "executing":
+                claim_expires = data.get("claim_expires", 0)
+                if now_ts < claim_expires:
+                    return {"result": "already_executing"}
+
+            if status not in ("pending", "executing"):
+                return {"result": "invalid_status", "current_status": status}
+
+            data["status"] = "executing"
+            data["claim_token"] = token
+            data["claim_expires"] = now_ts + claim_ttl_seconds
+            return {"result": "claimed", "data": dict(data)}
+
+    async def release_claim(self, action_id: str, token: str) -> None:
+        if self.redis is not None:
+            try:
+                await self.redis.eval(
+                    LUA_RELEASE_CLAIM,
+                    1,
+                    f"ai_action:{action_id}",
+                    token,
+                )
+                return
+            except Exception as exc:
+                logger.warning("Redis release_claim failed, using in-memory: %s", exc)
+
+        async with _MEMORY_STORE_LOCK:
+            data = _MEMORY_ACTION_STORE.get(action_id)
+            if data and data.get("status") == "executing":
+                if not token or data.get("claim_token") == token:
+                    data["status"] = "pending"
+                    data.pop("claim_token", None)
+                    data.pop("claim_expires", None)
+
+    async def complete_action(self, action_id: str, token: str, result_data: dict[str, Any]) -> None:
+        serialized = json.dumps(result_data)
+        if self.redis is not None:
+            try:
+                await self.redis.eval(
+                    LUA_COMPLETE_ACTION,
+                    1,
+                    f"ai_action:{action_id}",
+                    token,
+                    serialized,
+                )
+                return
+            except Exception as exc:
+                logger.warning("Redis complete_action failed, using in-memory: %s", exc)
+
+        async with _MEMORY_STORE_LOCK:
+            data = _MEMORY_ACTION_STORE.get(action_id)
+            if data:
+                data["status"] = "completed"
+                data["result"] = result_data
+                data.pop("claim_token", None)
+                data.pop("claim_expires", None)
+
+    async def cancel_action_atomic(
+        self,
+        action_id: str,
+        *,
+        user_id: str,
+        organization_id: str,
+    ) -> dict[str, Any]:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if self.redis is not None:
+            try:
+                res = await self.redis.eval(
+                    LUA_CANCEL_ACTION,
+                    1,
+                    f"ai_action:{action_id}",
+                    str(user_id),
+                    str(organization_id),
+                    now_ts,
+                )
+                if res:
+                    return json.loads(res)
+            except Exception as exc:
+                logger.warning("Redis Lua cancel failed, using in-memory store: %s", exc)
+
+        async with _MEMORY_STORE_LOCK:
+            data = _MEMORY_ACTION_STORE.get(action_id)
+            if not data:
+                return {"result": "not_found"}
+
+            if str(data.get("user_id")) != str(user_id) or str(data.get("organization_id")) != str(organization_id):
+                return {"result": "forbidden"}
+
+            status = data.get("status")
+            if status == "completed":
+                return {"result": "already_completed"}
+            if status == "executing":
+                claim_expires = data.get("claim_expires", 0)
+                if now_ts < claim_expires:
+                    return {"result": "already_executing"}
+
+            data["status"] = "cancelled"
+            return {"result": "cancelled"}
+
+    async def mark_expired(self, action_id: str) -> None:
+        action = await self.get_action(action_id)
+        if action:
+            action["status"] = "expired"
+            await self.update_action(action_id, action)
 
 
 class AIOrchestrationService:
@@ -166,6 +436,26 @@ class AIOrchestrationService:
                         action_state="NONE",
                     )
 
+                # Ensure user provides a meaningful name/title before task creation
+                raw_title = args.get("title")
+                title = str(raw_title).strip() if raw_title is not None else ""
+                generic_titles = {
+                    "task",
+                    "a task",
+                    "the task",
+                    "new task",
+                    "create task",
+                    "create a task",
+                    "untitled",
+                    "untitled task",
+                }
+                if raw_title is None or title == "" or title.lower() in generic_titles:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message="Please provide a meaningful name for the task before creation.",
+                        action_state="NONE",
+                    )
+
             tool_result = await self.executor.execute_or_prepare(
                 tool_name,
                 args,
@@ -194,6 +484,7 @@ class AIOrchestrationService:
                     "status": "pending",
                     "created_at": now.isoformat(),
                     "expires_at": expires_at.isoformat(),
+                    "expires_at_ts": int(expires_at.timestamp()),
                 }
                 await self.action_store.save_pending_action(action_id, action_record)
 
@@ -264,39 +555,44 @@ class AIOrchestrationService:
         role: str,
     ) -> dict[str, Any]:
         """Execute a previously prepared action upon explicit user confirmation."""
-        action = await self.action_store.get_action(action_id)
-        if not action:
-            raise TaskServiceError(404, "RESOURCE_NOT_FOUND", "Confirmation action not found or expired.")
+        # 1. Atomically claim the action using Redis Lua or in-memory lock
+        claim_token = str(uuid4())
+        claim_res = await self.action_store.claim_action(action_id, claim_token)
 
-        # Re-verify tenant and user authorization
+        res_type = claim_res.get("result")
+        if res_type == "not_found":
+            raise TaskServiceError(404, "RESOURCE_NOT_FOUND", "Confirmation action not found or expired.")
+        elif res_type == "already_completed":
+            raise TaskServiceError(409, "CONFLICT", "This action has already been executed.")
+        elif res_type == "already_cancelled":
+            raise TaskServiceError(409, "CONFLICT", "This action has been cancelled.")
+        elif res_type == "already_executing":
+            raise TaskServiceError(409, "CONFLICT", "This action is currently being executed by another confirmation request.")
+        elif res_type == "expired":
+            await self.action_store.mark_expired(action_id)
+            raise TaskServiceError(410, "GONE", "This confirmation request has expired.")
+        elif res_type != "claimed":
+            raise TaskServiceError(400, "BAD_REQUEST", f"Cannot execute action in status '{res_type}'.")
+
+        action = claim_res["data"]
+
+        # 2. Re-verify tenant and user authorization
         if action["user_id"] != user_id or action["organization_id"] != organization_id:
+            await self.action_store.release_claim(action_id, claim_token)
             raise TaskServiceError(403, "FORBIDDEN", "You are not authorized to confirm this action.")
 
-        # Check action status and enforce idempotency
-        current_status = action.get("status")
-        if current_status == "completed":
-            raise TaskServiceError(409, "CONFLICT", "This action has already been executed.")
-        elif current_status == "cancelled":
-            raise TaskServiceError(409, "CONFLICT", "This action has been cancelled.")
-        elif current_status != "pending":
-            raise TaskServiceError(400, "BAD_REQUEST", f"Cannot execute action in status '{current_status}'.")
-
-        # Check expiration
-        expires_at = datetime.fromisoformat(action["expires_at"])
-        if datetime.now(timezone.utc) > expires_at:
-            action["status"] = "expired"
-            await self.action_store.update_action(action_id, action)
-            raise TaskServiceError(410, "GONE", "This confirmation request has expired.")
-
-        # Atomic status transition to prevent concurrent double-execution
-        action["status"] = "executing"
-        await self.action_store.update_action(action_id, action)
+        # 3. Check expiration timestamp if present
+        if action.get("expires_at"):
+            expires_at = datetime.fromisoformat(action["expires_at"])
+            if datetime.now(timezone.utc) > expires_at:
+                await self.action_store.mark_expired(action_id)
+                raise TaskServiceError(410, "GONE", "This confirmation request has expired.")
 
         tool_name = action["action_type"]
         arguments = action["arguments"]
 
         try:
-            # Execute tool directly
+            # 4. Execute tool directly
             tool_result = await self.executor.execute_or_prepare(
                 tool_name,
                 arguments,
@@ -308,24 +604,22 @@ class AIOrchestrationService:
                 skip_confirmation=True,
             )
         except Exception:
-            # Revert status on failure so it doesn't stay stuck in executing
-            action["status"] = "pending"
-            await self.action_store.update_action(action_id, action)
+            # Rollback database transaction and safely release claim on failure
+            await self.db.rollback()
+            await self.action_store.release_claim(action_id, claim_token)
             raise
 
         if not tool_result.is_success:
-            action["status"] = "pending"
-            await self.action_store.update_action(action_id, action)
+            await self.db.rollback()
+            await self.action_store.release_claim(action_id, claim_token)
             raise TaskServiceError(
                 tool_result.status_code,
                 "EXECUTION_FAILED",
                 tool_result.error_message or "Failed to execute action.",
             )
 
-        # Mark completed and record output
-        action["status"] = "completed"
-        action["result"] = tool_result.data
-        await self.action_store.update_action(action_id, action)
+        # 5. Mark completed and durably record output
+        await self.action_store.complete_action(action_id, claim_token, tool_result.data)
 
         task_res = CreatedTaskResult(**tool_result.data)
         return {
@@ -343,18 +637,23 @@ class AIOrchestrationService:
         organization_id: str,
     ) -> dict[str, Any]:
         """Cancel a pending action."""
-        action = await self.action_store.get_action(action_id)
-        if not action:
+        cancel_res = await self.action_store.cancel_action_atomic(
+            action_id,
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+        res_type = cancel_res.get("result")
+        if res_type == "not_found":
             raise TaskServiceError(404, "RESOURCE_NOT_FOUND", "Confirmation action not found or expired.")
-
-        if action["user_id"] != user_id or action["organization_id"] != organization_id:
+        elif res_type == "forbidden":
             raise TaskServiceError(403, "FORBIDDEN", "You are not authorized to cancel this action.")
-
-        if action.get("status") == "completed":
+        elif res_type == "already_completed":
             raise TaskServiceError(409, "CONFLICT", "Cannot cancel an action that has already been executed.")
+        elif res_type == "already_executing":
+            raise TaskServiceError(409, "CONFLICT", "Cannot cancel an action that is currently being executed.")
+        elif res_type != "cancelled":
+            raise TaskServiceError(400, "BAD_REQUEST", f"Cannot cancel action in status '{res_type}'.")
 
-        action["status"] = "cancelled"
-        await self.action_store.update_action(action_id, action)
         return {
             "action_id": action_id,
             "status": "cancelled",

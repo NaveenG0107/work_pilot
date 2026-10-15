@@ -54,6 +54,8 @@ class ProposedTask(BaseModel):
     story_points: int = 0
     assignee_id: str | None = None
     assignee_name: str | None = None
+    reporter_id: str | None = None
+    reporter_name: str | None = None
     sprint_id: str | None = None
     sprint_name: str | None = None
     user_story_id: str | None = None
@@ -84,6 +86,8 @@ class CreatedTaskResult(BaseModel):
     project_id: str
     type: str
     priority: str
+    assignee_id: str | None = None
+    reporter_id: str | None = None
 
 
 class ChatResponseData(BaseModel):

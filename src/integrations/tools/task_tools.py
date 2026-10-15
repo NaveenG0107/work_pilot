@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_logger
@@ -64,12 +64,24 @@ class CreateTaskToolArgs(BaseModel):
         description=f"Type of the task. Allowed: {', '.join(TASK_TYPES)}.",
     )
     priority: TaskPriority = Field(
-        default="medium",
-        description=f"Priority level. Allowed: {', '.join(TASK_PRIORITIES)}.",
+        default="low",
+        description=f"Priority level. Allowed: {', '.join(TASK_PRIORITIES)}. Default is low.",
     )
     assignee_id: UUID | None = Field(
         default=None,
         description="Optional UUID of the user assigned to this task.",
+    )
+    assignee: str | None = Field(
+        default=None,
+        description="Optional username, full name, or email of the assignee (e.g. 'demi').",
+    )
+    reporter_id: UUID | None = Field(
+        default=None,
+        description="Optional UUID of the reporter for this task.",
+    )
+    reporter: str | None = Field(
+        default=None,
+        description="Optional username, full name, or email of the reporter (e.g. 'demi').",
     )
     sprint_id: UUID | None = Field(
         default=None,
@@ -89,10 +101,52 @@ class CreateTaskToolArgs(BaseModel):
         description="Optional due date/time for the task.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_user_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # If assignee_id is not a valid UUID string (e.g. "demi"), treat as assignee name
+        if data.get("assignee_id"):
+            val = str(data["assignee_id"]).strip()
+            try:
+                UUID(val)
+            except ValueError:
+                if not data.get("assignee"):
+                    data["assignee"] = val
+                data["assignee_id"] = None
+
+        # If reporter_id is not a valid UUID string (e.g. "demi"), treat as reporter name
+        if data.get("reporter_id"):
+            val = str(data["reporter_id"]).strip()
+            try:
+                UUID(val)
+            except ValueError:
+                if not data.get("reporter"):
+                    data["reporter"] = val
+                data["reporter_id"] = None
+        return data
+
     @field_validator("title")
     @classmethod
     def validate_title(cls, v: str) -> str:
         clean = v.strip()
+        generic_titles = {
+            "task",
+            "a task",
+            "the task",
+            "new task",
+            "create task",
+            "create a task",
+            "untitled",
+            "untitled task",
+            "none",
+            "no title",
+            "test",
+        }
+        if clean.lower() in generic_titles:
+            raise ValueError("Please provide a meaningful name for the task before creation.")
         if not (3 <= len(clean) <= 200):
             raise ValueError("Task title must be between 3 and 200 characters.")
         return clean
@@ -146,11 +200,23 @@ class CreateTaskTool:
                         "priority": {
                             "type": "string",
                             "enum": TASK_PRIORITIES,
-                            "description": "Priority level (low, medium, high, critical). Default: medium.",
+                            "description": "Priority level (low, medium, high, critical). Default: low.",
+                        },
+                        "assignee": {
+                            "type": "string",
+                            "description": "Optional name, username, or email of the team member to assign the task to (e.g. 'demi').",
                         },
                         "assignee_id": {
                             "type": "string",
-                            "description": "Optional UUID of the assigned team member.",
+                            "description": "Optional UUID or username of the assigned team member.",
+                        },
+                        "reporter": {
+                            "type": "string",
+                            "description": "Optional name, username, or email of the reporter for this task (e.g. 'demi').",
+                        },
+                        "reporter_id": {
+                            "type": "string",
+                            "description": "Optional UUID or username of the reporter.",
                         },
                         "sprint_id": {
                             "type": "string",
@@ -174,6 +240,111 @@ class CreateTaskTool:
     def parse_arguments(raw_args: dict[str, Any]) -> CreateTaskToolArgs:
         """Parse and validate raw tool arguments strictly."""
         return CreateTaskToolArgs.model_validate(raw_args)
+
+    async def _resolve_user(
+        self,
+        identifier: str,
+        project: Any,
+        organization_id: str,
+        db: AsyncSession,
+        field_name: str = "assignee",
+    ) -> Any:
+        """Resolve a user by UUID, username, full name, or email within organization and project."""
+        from src.auth.models import User
+        from sqlalchemy import select, or_, func
+        from sqlalchemy.orm import joinedload
+        import uuid
+
+        clean = str(identifier).strip()
+        task_service = TaskService(db)
+
+        # 1. Try UUID lookup
+        try:
+            target_uuid = str(uuid.UUID(clean))
+            user = (
+                await db.execute(
+                    select(User)
+                    .where(
+                        User.id == target_uuid,
+                        User.organization_id == str(organization_id),
+                        User.deleted_at.is_(None),
+                    )
+                    .options(joinedload(User.role))
+                )
+            ).scalar_one_or_none()
+            if user:
+                if not user.is_active:
+                    raise TaskServiceError(400, "VALIDATION_ERROR", f"{field_name.capitalize()} user is not active")
+                if not await task_service._is_project_member(project, user):
+                    raise TaskServiceError(400, "VALIDATION_ERROR", f"{field_name.capitalize()} must be a member of the project")
+                return user
+        except ValueError:
+            pass
+
+        # 2. Try exact match by username, full_name, or email
+        stmt = (
+            select(User)
+            .where(
+                User.organization_id == str(organization_id),
+                User.deleted_at.is_(None),
+                or_(
+                    func.lower(User.username) == clean.lower(),
+                    func.lower(User.full_name) == clean.lower(),
+                    func.lower(User.email) == clean.lower(),
+                ),
+            )
+            .options(joinedload(User.role))
+        )
+        users = (await db.execute(stmt)).scalars().all()
+        if len(users) > 1:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Multiple users match '{clean}' for {field_name}. Please provide a specific email or UUID.",
+            )
+        user = users[0] if users else None
+
+        # 3. If no exact match, try prefix/contains match on username or full_name
+        if not user:
+            stmt_like = (
+                select(User)
+                .where(
+                    User.organization_id == str(organization_id),
+                    User.deleted_at.is_(None),
+                    or_(
+                        User.username.ilike(f"%{clean}%"),
+                        User.full_name.ilike(f"%{clean}%"),
+                    ),
+                )
+                .options(joinedload(User.role))
+            )
+            users_like = (await db.execute(stmt_like)).scalars().all()
+            if len(users_like) > 1:
+                raise TaskServiceError(
+                    400,
+                    "VALIDATION_ERROR",
+                    f"Multiple users match '{clean}' for {field_name}. Please provide a specific email or UUID.",
+                )
+            user = users_like[0] if users_like else None
+
+        if not user:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"User '{clean}' for {field_name} not found in this organization",
+            )
+
+        if not user.is_active:
+            raise TaskServiceError(400, "VALIDATION_ERROR", f"{field_name.capitalize()} user '{clean}' is not active")
+
+        if not await task_service._is_project_member(project, user):
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"User '{user.full_name or user.username}' must be a member of project '{project.name}'",
+            )
+
+        return user
 
     async def validate_preconditions(
         self,
@@ -215,13 +386,25 @@ class CreateTaskTool:
                 "Project belongs to a different organization",
             )
 
-        # 4. Check assignee if provided
+        # 4. Check and resolve assignee if provided by ID or name
         assignee_name: str | None = None
-        if args.assignee_id:
-            assignee = await task_service._validate_assignee(
-                project, str(args.assignee_id), organization_id
+        assignee_target = args.assignee or (str(args.assignee_id) if args.assignee_id else None)
+        if assignee_target:
+            assignee_user = await self._resolve_user(
+                assignee_target, project, organization_id, db, field_name="assignee"
             )
-            assignee_name = assignee.full_name or assignee.username
+            args.assignee_id = UUID(str(assignee_user.id))
+            assignee_name = assignee_user.full_name or assignee_user.username
+
+        # 4b. Check and resolve reporter if provided by ID or name
+        reporter_name: str | None = None
+        reporter_target = args.reporter or (str(args.reporter_id) if args.reporter_id else None)
+        if reporter_target:
+            reporter_user = await self._resolve_user(
+                reporter_target, project, organization_id, db, field_name="reporter"
+            )
+            args.reporter_id = UUID(str(reporter_user.id))
+            reporter_name = reporter_user.full_name or reporter_user.username
 
         # 5. Check sprint if provided
         sprint_name: str | None = None
@@ -250,6 +433,8 @@ class CreateTaskTool:
             "story_points": args.story_points,
             "assignee_id": str(args.assignee_id) if args.assignee_id else None,
             "assignee_name": assignee_name,
+            "reporter_id": str(args.reporter_id) if args.reporter_id else None,
+            "reporter_name": reporter_name,
             "sprint_id": str(args.sprint_id) if args.sprint_id else None,
             "sprint_name": sprint_name,
             "user_story_id": str(args.user_story_id) if args.user_story_id else None,
@@ -278,6 +463,7 @@ class CreateTaskTool:
             type=args.type,
             priority=args.priority,
             assignee_id=args.assignee_id,
+            reporter_id=args.reporter_id,
             sprint_id=args.sprint_id,
             user_story_id=args.user_story_id,
             story_points=args.story_points,
@@ -302,4 +488,6 @@ class CreateTaskTool:
             "project_id": str(task.project_id),
             "type": task.type,
             "priority": task.priority,
+            "assignee_id": str(task.assignee_id) if task.assignee_id else None,
+            "reporter_id": str(task.reporter_id) if task.reporter_id else None,
         }

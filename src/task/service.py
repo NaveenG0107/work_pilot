@@ -640,17 +640,18 @@ class TaskService:
         project: Project,
         assignee_id: object,
         organization_id: str,
+        field_name: str = "Assignee",
     ) -> User:
         try:
             assignee = await self._user(str(assignee_id))
         except TaskServiceError as exc:
             if exc.status_code == 404:
-                raise TaskServiceError(400, "BAD_REQUEST", "Assignee user not found") from exc
+                raise TaskServiceError(400, "BAD_REQUEST", f"{field_name} user not found") from exc
             raise
         if not assignee.is_active:
-            raise TaskServiceError(400, "BAD_REQUEST", "Assignee must be an active user")
+            raise TaskServiceError(400, "BAD_REQUEST", f"{field_name} must be an active user")
         if not await self._is_project_member(project, assignee):
-            raise TaskServiceError(400, "BAD_REQUEST", "Assignee must be a member of the project")
+            raise TaskServiceError(400, "BAD_REQUEST", f"{field_name} must be a member of the project")
         return assignee
 
     async def _validate_sprint(self, sprint_id: str, project_id: str | None = None) -> Sprint:
@@ -785,6 +786,8 @@ class TaskService:
             )
         if body.assignee_id is not None and not _is_nil(body.assignee_id):
             await self._validate_assignee(project, body.assignee_id, organization_id)
+        if body.reporter_id is not None and not _is_nil(body.reporter_id):
+            await self._validate_assignee(project, body.reporter_id, organization_id, field_name="Reporter")
         if body.due_date is not None and _is_backdated(body.due_date):
             if not await self._has_permission(project, actor, "projects", "modify"):
                 raise TaskServiceError(
@@ -812,6 +815,7 @@ class TaskService:
         project_name = project.name
         sequence = await self._next_sequence(project_id)
         serial_number = await self._next_global_serial()
+        reporter_id = _uuid_string(body.reporter_id) if (body.reporter_id and not _is_nil(body.reporter_id)) else user_id
         task = Task(
             project_id=project_id,
             sprint_id=_uuid_string(body.sprint_id),
@@ -826,7 +830,7 @@ class TaskService:
             status_id=status_id,
             status=status_name,
             assignee_id=_uuid_string(body.assignee_id),
-            reporter_id=user_id,
+            reporter_id=reporter_id,
             story_points=body.story_points,
             due_date=body.due_date,
             estimated_hours=body.estimated_hours,
