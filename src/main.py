@@ -23,6 +23,7 @@ from src.user_story.api import router as user_story_router
 from src.user_story_status.api import router as user_story_status_router
 from src.utils.exception_handlers import register_exception_handlers
 from src.work_item.api import router as work_item_router
+from src.integrations.orchestration.api import router as ai_assistant_router
 from src.utils.session_middleware import SlidingSessionMiddleware
 from src.utils.cache_invalidation_middleware import ProjectCacheInvalidationMiddleware
 
@@ -72,6 +73,7 @@ app.include_router(task_router, prefix=API_PREFIX)
 app.include_router(work_item_router, prefix=API_PREFIX)
 app.include_router(search_router, prefix=API_PREFIX)
 app.include_router(board_router, prefix=API_PREFIX)
+app.include_router(ai_assistant_router, prefix=API_PREFIX)
 
 
 @app.get("/health_check")

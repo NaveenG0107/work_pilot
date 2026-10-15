@@ -1,3 +1,5 @@
+"""Supabase / S3 storage integration service."""
+
 from __future__ import annotations
 
 import logging
@@ -5,7 +7,6 @@ import os
 from typing import Optional
 
 from src.utils.setting import get_settings
-
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,7 @@ def _public_url(key: str) -> Optional[str]:
 
 
 def upload_avatar(file_bytes: bytes, filename: str, content_type: str | None = None) -> Optional[str]:
-    """
-    Upload an avatar image to S3/Supabase storage.
+    """Upload an avatar image to S3/Supabase storage.
 
     Returns the public URL, or None when storage is not configured (so callers
     can continue without an avatar).

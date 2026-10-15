@@ -1,10 +1,11 @@
+"""Email delivery service (Brevo primary, Resend fallback)."""
+
 import logging
 from typing import Optional
 
 import httpx
 
 from src.utils.setting import get_settings
-
 
 logger = logging.getLogger(__name__)
 
