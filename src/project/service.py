@@ -27,7 +27,7 @@ from src.custom_status.models import CustomStatus
 from src.favorite import models as favorite_models  # noqa: F401
 from src.label import models as label_models  # noqa: F401
 from src.organization.models import Organization, Role
-from src.project.models import Project, ProjectMember
+from src.project.models import Project, ProjectKeyHistory, ProjectMember
 from src.project.schema import (
     CreateProjectMemberRequest,
     CreateProjectRequest,
@@ -130,7 +130,10 @@ class ProjectService:
             project_id = str(uuid.UUID(project_id_or_slug))
             reference = Project.id == project_id
         except (ValueError, TypeError, AttributeError):
-            reference = Project.slug == project_id_or_slug
+            reference = or_(
+                Project.slug == project_id_or_slug,
+                Project.key == project_id_or_slug.upper(),
+            )
 
         project = (
             await self.db.execute(
@@ -146,6 +149,44 @@ class ProjectService:
         if not project:
             raise ProjectServiceError(404, "RESOURCE_NOT_FOUND", "Project not found")
         return project
+
+    async def _check_modify_permission(self, project: Project, user_id: str, organization_id: str) -> None:
+        user = (
+            await self.db.execute(
+                select(User)
+                .options(joinedload(User.role).selectinload(Role.permissions))
+                .where(User.id == user_id, User.deleted_at.is_(None))
+            )
+        ).scalar_one_or_none()
+        if not user:
+            raise ProjectServiceError(404, "NOT_FOUND", "User not found")
+        role_name = (getattr(user.role, "name", "") or "").lower()
+        if role_name in ("superadmin", "super_admin"):
+            raise ProjectServiceError(403, "FORBIDDEN", "Super admins are not allowed to perform organization-level activities")
+        if str(user.organization_id) != str(organization_id) or str(project.organization_id) != str(organization_id):
+            raise ProjectServiceError(403, "FORBIDDEN", "Access denied to this project")
+        if role_name == "org_admin":
+            return
+        if user.role and any(p.resource == "projects" and p.action in ("modify", "manage") for p in user.role.permissions):
+            return
+        member = (
+            await self.db.execute(
+                select(ProjectMember)
+                .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
+                .where(
+                    ProjectMember.project_id == project.id,
+                    ProjectMember.user_id == user_id,
+                    ProjectMember.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if member:
+            member_role_name = (getattr(member.role, "name", "") or getattr(member, "project_role", "") or "").lower()
+            if member_role_name in ("admin", "project_manager", "org_admin", "pm"):
+                return
+            if member.role and any(p.resource == "projects" and p.action in ("modify", "manage") for p in member.role.permissions):
+                return
+        raise ProjectServiceError(403, "FORBIDDEN", "You do not have permission to modify this project")
 
     async def _role(self, role_id: str | None, project_role: str | None,
                     organization_id: str) -> Role:
@@ -236,11 +277,75 @@ class ProjectService:
                 409, "CONFLICT", "Project slug already exists in this organization"
             )
 
+        # 4. Derive or validate project key
+        if getattr(body, "key", None) and str(body.key).strip():
+            raw_key = str(body.key).strip().upper()
+            if not re.match(r"^[A-Z0-9]{2,10}$", raw_key):
+                raise ProjectServiceError(
+                    400, "BAD_REQUEST", "Project key must be 2 to 10 alphanumeric characters (A-Z, 0-9)"
+                )
+            key = raw_key
+            existing_key = (
+                await self.db.execute(
+                    select(Project.id).where(
+                        Project.organization_id == organization_id,
+                        Project.key == key,
+                        Project.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if existing_key:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project key already exists in this organization"
+                )
+            existing_hist = (
+                await self.db.execute(
+                    select(ProjectKeyHistory.id).where(
+                        ProjectKeyHistory.organization_id == organization_id,
+                        ProjectKeyHistory.key == key,
+                    )
+                )
+            ).first()
+            if existing_hist:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project key is already in use as a historical key in this organization"
+                )
+        else:
+            # Derive initial key from slug: first 3 characters of normalized slug
+            clean_slug = re.sub(r"[^A-Za-z0-9]", "", slug).upper()
+            base_key = clean_slug[:3] if len(clean_slug) >= 3 else (clean_slug if len(clean_slug) >= 2 else "WP")
+            key = base_key
+            suffix = 1
+            while True:
+                candidate = key if suffix == 1 else f"{base_key[:7]}{suffix}"
+                conflict_proj = (
+                    await self.db.execute(
+                        select(Project.id).where(
+                            Project.organization_id == organization_id,
+                            Project.key == candidate,
+                            Project.deleted_at.is_(None),
+                        )
+                    )
+                ).first()
+                conflict_hist = (
+                    await self.db.execute(
+                        select(ProjectKeyHistory.id).where(
+                            ProjectKeyHistory.organization_id == organization_id,
+                            ProjectKeyHistory.key == candidate,
+                        )
+                    )
+                ).first()
+                if not conflict_proj and not conflict_hist:
+                    key = candidate
+                    break
+                suffix += 1
+
         role, creator_name = await self._member_role(user_id, organization_id)
         project = Project(
             organization_id=organization_id,
             name=name,
             slug=slug,
+            key=key,
             description=body.description,
             status="planning",
             created_by=user_id,
@@ -338,6 +443,7 @@ class ProjectService:
     async def update(self, project_id: str, body: UpdateProjectRequest,
                      user_id: str, organization_id: str) -> str:
         project = await self._project(project_id, organization_id)
+        await self._check_modify_permission(project, user_id, organization_id)
         updates = body.model_dump(exclude_unset=True, exclude_none=True)
         if not updates:
             raise ProjectServiceError(400, "BAD_REQUEST", "No changes to update")
@@ -387,8 +493,73 @@ class ProjectService:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project slug already exists"
                 )
-        for key, value in updates.items():
-            setattr(project, key, value)
+
+        if "key" in updates:
+            raw_key = updates["key"]
+            if raw_key is None or not str(raw_key).strip():
+                raise ProjectServiceError(400, "BAD_REQUEST", "Project key cannot be empty")
+            new_key = str(raw_key).strip().upper()
+            if not re.match(r"^[A-Z0-9]{2,10}$", new_key):
+                raise ProjectServiceError(
+                    400, "BAD_REQUEST", "Project key must be 2 to 10 alphanumeric characters (A-Z, 0-9)"
+                )
+            if new_key != project.key:
+                # Check uniqueness in projects for this organization
+                existing_key = (
+                    await self.db.execute(
+                        select(Project.id).where(
+                            Project.organization_id == organization_id,
+                            Project.key == new_key,
+                            Project.id != project_id,
+                            Project.deleted_at.is_(None),
+                        )
+                    )
+                ).first()
+                if existing_key:
+                    raise ProjectServiceError(
+                        409, "CONFLICT", "Project key already exists in this organization"
+                    )
+
+                # Check uniqueness in project key history for this organization
+                existing_hist = (
+                    await self.db.execute(
+                        select(ProjectKeyHistory.id).where(
+                            ProjectKeyHistory.organization_id == organization_id,
+                            ProjectKeyHistory.key == new_key,
+                            ProjectKeyHistory.project_id != project_id,
+                        )
+                    )
+                ).first()
+                if existing_hist:
+                    raise ProjectServiceError(
+                        409, "CONFLICT", "Project key is already in use as a historical key in this organization"
+                    )
+
+                # Save current key to history atomically
+                if project.key:
+                    prior_hist = (
+                        await self.db.execute(
+                            select(ProjectKeyHistory.id).where(
+                                ProjectKeyHistory.project_id == project.id,
+                                ProjectKeyHistory.key == project.key,
+                            )
+                        )
+                    ).first()
+                    if not prior_hist:
+                        self.db.add(
+                            ProjectKeyHistory(
+                                project_id=project.id,
+                                organization_id=project.organization_id,
+                                key=project.key,
+                                created_at=datetime.now(timezone.utc),
+                                changed_by=user_id,
+                            )
+                        )
+                project.key = new_key
+            del updates["key"]
+
+        for key_name, value in updates.items():
+            setattr(project, key_name, value)
         project.updated_at = datetime.now(timezone.utc)
         self._audit(user_id, organization_id, project_id, "updated", "project",
                     project_id, f"Updated project {project.name}")
@@ -411,6 +582,10 @@ class ProjectService:
                 "Project update conflict",
                 extra={"project_id": project_id, "organization_id": organization_id, "error": str(exc)},
             )
+            if "key" in err_msg or "idx_projects_org_key" in err_msg or "idx_project_key_history" in err_msg:
+                raise ProjectServiceError(
+                    409, "CONFLICT", "Project key already exists in this organization"
+                ) from exc
             if "name" in err_msg or "idx_projects_org_name" in err_msg:
                 raise ProjectServiceError(
                     409, "CONFLICT", "Project name already exists"
@@ -583,7 +758,7 @@ class ProjectService:
         summaries: list[ProjectSummary] = []
         for project in projects:
             project_id = str(project.id)
-            key = self._project_key(project.name)
+            key = getattr(project, "key", None) or self._project_key(project.name)
             project_sprints = sprints_by_project[project_id]
             summaries.append(
                 ProjectSummary(
@@ -976,8 +1151,8 @@ class ProjectService:
             organization_id=str(project.organization_id),
             organization_name=None,
             name=project.name,
-            key=None,
-            project_key=None,
+            key=getattr(project, "key", None) or self._project_key(project.name),
+            project_key=getattr(project, "key", None) or self._project_key(project.name),
             description=project.description,
             status=project.status,
             created_by=str(project.created_by),
@@ -1225,6 +1400,8 @@ class ProjectService:
                 role=role.name,
                 project_name=project.name,
                 status=project.status,
+                key=getattr(project, "key", None) or self._project_key(project.name),
+                project_key=getattr(project, "key", None) or self._project_key(project.name),
                 project_slug=project.slug if recent else None,
                 organization_name=org.name if org else None,
             )

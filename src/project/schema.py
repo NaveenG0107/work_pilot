@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timezone
+import re
 import uuid
 from typing import Any, Generic, TypeVar
 
@@ -22,20 +23,43 @@ def validate_uuid(value: str | None) -> str | None:
         raise ValueError("Invalid request payload.") from exc
 
 
+def validate_project_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().upper()
+    if not cleaned:
+        raise ValueError("Project key cannot be empty")
+    if not re.match(r"^[A-Z0-9]{2,10}$", cleaned):
+        raise ValueError("Project key must be 2 to 10 alphanumeric characters (A-Z, 0-9)")
+    return cleaned
+
+
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=3, max_length=150)
     slug: str | None = Field(default=None, min_length=3, max_length=150)
+    key: str | None = Field(default=None, min_length=2, max_length=10)
     description: str = ""
+
+    @field_validator("key")
+    @classmethod
+    def validate_key(cls, value: str | None) -> str | None:
+        return validate_project_key(value)
 
 
 class UpdateProjectRequest(BaseModel):
     name: str | None = Field(default=None, min_length=3, max_length=150)
     slug: str | None = Field(default=None, min_length=3, max_length=150)
+    key: str | None = Field(default=None, min_length=2, max_length=10)
     description: str | None = None
     status: str | None = Field(
         default=None,
         json_schema_extra={"enum": PROJECT_STATUSES},
     )
+
+    @field_validator("key")
+    @classmethod
+    def validate_key(cls, value: str | None) -> str | None:
+        return validate_project_key(value)
 
 
 class ProjectMemberRequest(BaseModel):

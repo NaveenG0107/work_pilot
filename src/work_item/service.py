@@ -1,5 +1,6 @@
+import re
 import uuid
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -8,7 +9,7 @@ from src.config import get_logger
 from src.custom_status.models import CustomStatus
 from src.favorite.models import Favorite
 from src.organization.models import Role
-from src.project.models import Project, ProjectMember
+from src.project.models import Project, ProjectKeyHistory, ProjectMember
 from src.task.models import (
     DEFAULT_STATUS_COLORS,
     DEFAULT_STATUS_IS_FINAL,
@@ -51,7 +52,10 @@ class WorkItemService:
             )
         else:
             query = select(Project).where(
-                Project.slug == project_id_or_slug,
+                or_(
+                    Project.slug == project_id_or_slug,
+                    Project.key == project_id_or_slug.upper(),
+                ),
                 Project.deleted_at.is_(None)
             )
 
@@ -169,10 +173,36 @@ class WorkItemService:
                 )
                 story = (await self.db.execute(story_query)).scalar_one_or_none()
             else:
+                task_conditions = [
+                    (Task.key.ilike(upper_key)) | (Task.key.ilike(param_str))
+                ]
+                m = re.match(r"^([A-Za-z0-9]+)-(\d+)$", param_str)
+                if m:
+                    prefix = m.group(1).upper()
+                    seq = int(m.group(2))
+                    prefix_match = (
+                        await self.db.execute(
+                            select(Project.id).where(
+                                Project.id == str(project.id),
+                                or_(
+                                    Project.key == prefix,
+                                    Project.id.in_(
+                                        select(ProjectKeyHistory.project_id).where(
+                                            ProjectKeyHistory.project_id == str(project.id),
+                                            ProjectKeyHistory.key == prefix,
+                                        )
+                                    ),
+                                ),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if prefix_match:
+                        task_conditions.append(Task.sequence_number == seq)
+
                 task_query = select(Task).where(
                     Task.project_id == str(project.id),
                     Task.deleted_at.is_(None),
-                    (Task.key.ilike(upper_key)) | (Task.key.ilike(param_str))
+                    or_(*task_conditions),
                 ).options(
                     joinedload(Task.project),
                     joinedload(Task.sprint),
@@ -300,10 +330,34 @@ class WorkItemService:
         project = await self._get_project(project_id_or_slug)
         await self._check_authorization(project, user_id)
 
+        task_conditions = [Task.key.ilike(key.strip())]
+        m = re.match(r"^([A-Za-z0-9]+)-(\d+)$", key.strip())
+        if m:
+            prefix = m.group(1).upper()
+            seq = int(m.group(2))
+            prefix_match = (
+                await self.db.execute(
+                    select(Project.id).where(
+                        Project.id == str(project.id),
+                        or_(
+                            Project.key == prefix,
+                            Project.id.in_(
+                                select(ProjectKeyHistory.project_id).where(
+                                    ProjectKeyHistory.project_id == str(project.id),
+                                    ProjectKeyHistory.key == prefix,
+                                )
+                            ),
+                        ),
+                    )
+                )
+            ).scalar_one_or_none()
+            if prefix_match:
+                task_conditions.append(Task.sequence_number == seq)
+
         task_query = select(Task).where(
             Task.project_id == str(project.id),
             Task.deleted_at.is_(None),
-            Task.key.ilike(key.strip())
+            or_(*task_conditions),
         ).options(
             joinedload(Task.project),
             joinedload(Task.sprint),

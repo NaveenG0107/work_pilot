@@ -10,7 +10,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from src.auth.models import User
 from src.label.models import Label as _Label  # noqa: F401
 from src.organization.models import Role
-from src.project.models import Project, ProjectMember
+from src.project.models import Project, ProjectKeyHistory, ProjectMember
 from src.search.schema import GlobalSearchResponse, SearchResult
 from src.sprint.models import Sprint
 from src.task.models import Task
@@ -163,10 +163,37 @@ class SearchService:
     ) -> list[SearchResult]:
         if not project_ids:
             return []
-        predicate = or_(
+        predicates = [
             self._search_predicate(query, Task.title, Task.description, Task.key),
             cast(Task.serial_number, String) == query,
-        )
+        ]
+        m = re.match(r"^([A-Za-z0-9]+)-(\d+)$", query.strip())
+        if m:
+            s_prefix = m.group(1).upper()
+            s_seq = int(m.group(2))
+            matching_pids = list(
+                (
+                    await self.db.execute(
+                        select(Project.id).where(
+                            Project.id.in_(project_ids),
+                            or_(
+                                Project.key == s_prefix,
+                                Project.id.in_(
+                                    select(ProjectKeyHistory.project_id).where(
+                                        ProjectKeyHistory.project_id.in_(project_ids),
+                                        ProjectKeyHistory.key == s_prefix,
+                                    )
+                                ),
+                            ),
+                        )
+                    )
+                ).scalars()
+            )
+            if matching_pids:
+                predicates.append(
+                    and_(Task.project_id.in_(matching_pids), Task.sequence_number == s_seq)
+                )
+        predicate = or_(*predicates)
         tasks = list(
             (
                 await self.db.execute(

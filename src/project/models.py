@@ -18,6 +18,7 @@ class Project(Base):
         Index("idx_projects_deleted_at", "deleted_at"),
         Index("idx_projects_org_name", "organization_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_org_slug", "organization_id", "slug", unique=True, postgresql_where=text("deleted_at IS NULL")),
+        Index("idx_projects_org_key", "organization_id", "key", unique=True, postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_org_status", "organization_id", "status", postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_org_created_at", "organization_id", "created_at", postgresql_where=text("deleted_at IS NULL")),
         Index("idx_projects_fts", text("to_tsvector('english', coalesce(name, '') || ' ' || coalesce(description, '') || ' ' || coalesce(slug, ''))"), postgresql_using="gin"),
@@ -27,6 +28,7 @@ class Project(Base):
     organization_id = Column(UUID(as_uuid=False), ForeignKey("organizations.id", name="fk_projects_organization"), nullable=False)
     name = Column(String(150), nullable=False)
     slug = Column(String(150), nullable=True)
+    key = Column(String(20), nullable=True)
     description = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="active", server_default="active")
     created_by = Column(UUID(as_uuid=False), ForeignKey("users.id", name="fk_projects_creator"), nullable=False)
@@ -36,9 +38,29 @@ class Project(Base):
 
     organization = relationship("Organization", foreign_keys=[organization_id])
     creator = relationship("User", foreign_keys=[created_by])
+    key_history = relationship("ProjectKeyHistory", back_populates="project", cascade="all, delete-orphan")
 
     sprint_count = None
     sprints = None
+
+
+class ProjectKeyHistory(Base):
+    __tablename__ = "project_key_history"
+    __table_args__ = (
+        Index("idx_project_key_history_project_id", "project_id"),
+        Index("idx_project_key_history_org_key", "organization_id", "key", unique=True),
+        Index("idx_project_key_history_proj_key", "project_id", "key", unique=True),
+    )
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid7()))
+    project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE", name="fk_project_key_history_project"), nullable=False)
+    organization_id = Column(UUID(as_uuid=False), ForeignKey("organizations.id", name="fk_project_key_history_org"), nullable=False)
+    key = Column(String(20), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    changed_by = Column(UUID(as_uuid=False), ForeignKey("users.id", name="fk_project_key_history_user"), nullable=True)
+
+    project = relationship("Project", back_populates="key_history")
+    user = relationship("User", foreign_keys=[changed_by])
 
 
 class ProjectMember(Base):
@@ -69,6 +91,12 @@ class ProjectMember(Base):
 
 @event.listens_for(Project, "before_insert")
 def project_before_insert(mapper, connection, target):
+    if not target.id:
+        target.id = str(uuid7())
+
+
+@event.listens_for(ProjectKeyHistory, "before_insert")
+def project_key_history_before_insert(mapper, connection, target):
     if not target.id:
         target.id = str(uuid7())
 
