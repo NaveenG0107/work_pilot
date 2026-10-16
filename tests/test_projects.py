@@ -43,6 +43,20 @@ async def test_project_members_list(client: AsyncClient, app_context: dict):
     assert "organization_id" in member
     assert member["organization_id"] is not None
 
+    # Test filtering by user_id
+    target_user_id = member["user_id"]
+    filter_resp = await client.get(
+        f"/api/v1/project/members/{project_id}?user_id={target_user_id}",
+        headers=headers,
+    )
+    assert filter_resp.status_code == 200
+    filter_body = filter_resp.json()
+    assert filter_body["success"] is True
+    assert len(filter_body["data"]) == 1
+    assert filter_body["data"][0]["user_id"] == target_user_id
+    assert filter_body["data"][0]["email"] == member["email"]
+    assert filter_body["data"][0]["organization_id"] == member["organization_id"]
+
 
 @pytest.mark.anyio
 async def test_project_tenant_isolation_detail(client: AsyncClient, app_context: dict):

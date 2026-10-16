@@ -70,6 +70,7 @@ class RemoveUserRequest(BaseModel):
 
 class InviteOrganizationMemberItem(BaseModel):
     email: str = Field(..., min_length=1, max_length=100)
+    role: Optional[str] = Field(default="member")
 
     @field_validator("email")
     @classmethod

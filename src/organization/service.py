@@ -68,7 +68,7 @@ INDUSTRY_VALUES = {
 
 TEAM_SIZE_VALUES = {"1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"}
 
-GLOBAL_ROLE = "developer"
+GLOBAL_ROLE = "member"
 
 # Default role permission filters. A role starts with '' (all) or a subset.
 DEFAULT_ROLE_SCOPE: dict = {
@@ -107,6 +107,13 @@ DEFAULT_ROLE_SCOPE: dict = {
         ("tasks", "view"),
         ("comments", "view"),
     },
+    "member": {
+        ("projects", "view"),
+        ("sprints", "view"),
+        ("user_stories", "view"),
+        ("tasks", "view"),
+        ("comments", "view"),
+    },
 }
 
 PROJECT_MANAGER_EXCLUDED = {("projects", "add"), ("projects", "delete")}
@@ -117,6 +124,7 @@ ROLE_DESCRIPTIONS = {
     "developer": "Software developer with access to view and modify user stories and tasks",
     "qa": "Quality assurance engineer with access to test tasks",
     "stakeholder": "Read-only stakeholder with basic viewing and commenting privileges",
+    "member": "Organization member with basic viewing access",
 }
 
 AUTO_VIEW_PERMISSIONS = [
@@ -829,8 +837,13 @@ class OrganizationService:
         if not payload.members:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one member invitation is required")
 
-        developer_role = await self._get_role_by_name_and_org(GLOBAL_ROLE, str(org_id))
-        if developer_role is None:
+        member_role = await self._get_role_by_name_and_org(GLOBAL_ROLE, str(org_id))
+        if member_role is None:
+            await self.create_default_roles_for_org(str(org_id))
+            member_role = await self._get_role_by_name_and_org(GLOBAL_ROLE, str(org_id))
+        if member_role is None:
+            member_role = await self._get_role_by_name_and_org("developer", str(org_id))
+        if member_role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
         org_result = await self.db.execute(
             select(Organization).where(Organization.id == str(org_id))
@@ -840,6 +853,12 @@ class OrganizationService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
 
         for item in payload.members:
+            item_role = member_role
+            if getattr(item, "role", None) and item.role.strip():
+                specific_role = await self._get_role_by_name_and_org(item.role.strip(), str(org_id))
+                if specific_role is not None:
+                    item_role = specific_role
+
             invite_email = item.email.strip().lower()
             existing_user_result = await self.db.execute(
                 select(User).where(User.email == invite_email)
@@ -851,7 +870,7 @@ class OrganizationService:
                 if existing_user.organization_id is not None:
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already in an organization")
                 existing_user.organization_id = str(org_id)
-                existing_user.role_id = developer_role.id
+                existing_user.role_id = item_role.id
                 existing_user.is_active = False
                 existing_user.status = "pending"
                 await self.db.commit()
@@ -881,7 +900,7 @@ class OrganizationService:
             else:
                 invitation = OrganizationInvitation(
                     id=str(uuid_lib.uuid4()), organization_id=str(org_id), email=invite_email,
-                    role_id=developer_role.id, token=token, status=InvitationStatus.PENDING,
+                    role_id=item_role.id, token=token, status=InvitationStatus.PENDING,
                     expires_at=expires_at, created_by=str(inviter_id),
                     created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
                 )
@@ -892,13 +911,13 @@ class OrganizationService:
             invite_link = f"{backend_url}/api/v1/organization/invitations/accept?token={token}"
             temp_password = ""
             if not user_existed:
-                temp_password = await self._create_temp_user(invite_email, str(org_id), developer_role.id)
+                temp_password = await self._create_temp_user(invite_email, str(org_id), item_role.id)
 
             try:
                 email_service.send_organization_invitation(
                     invite_email,
                     org.name,
-                    developer_role.name,
+                    item_role.name,
                     invite_link,
                     temp_password,
                 )

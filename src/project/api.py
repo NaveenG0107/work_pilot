@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -385,13 +385,21 @@ async def get_members(
     page: int = 1,
     page_size: int = 10,
     name: str = "",
+    user_id: Optional[str] = Query(default=None, description="Filter by member user_id"),
     service: ProjectService = Depends(get_project_service),
 ):
     try:
         project_id = validated_uuid(project_id)
+        clean_user_id = (
+            validated_query_uuid(user_id.strip())
+            if (user_id and user_id.strip() and user_id.strip().lower() != "null")
+            else None
+        )
         org_id = request.state.organization_id
         page, page_size = max(1, page), page_size if page_size > 0 else 10
-        data, meta = await service.members(project_id, org_id, page, page_size, name)
+        data, meta = await service.members(
+            project_id, org_id, page, page_size, name, user_id=clean_user_id
+        )
         return success(
             "Project members retrieved successfully.",
             dumped(data),
