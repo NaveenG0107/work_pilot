@@ -36,6 +36,12 @@ async def test_project_members_list(client: AsyncClient, app_context: dict):
     body = resp.json()
     assert body["success"] is True
     assert isinstance(body["data"], list)
+    assert len(body["data"]) > 0
+    member = body["data"][0]
+    assert "email" in member
+    assert member["email"] is not None
+    assert "organization_id" in member
+    assert member["organization_id"] is not None
 
 
 @pytest.mark.anyio
