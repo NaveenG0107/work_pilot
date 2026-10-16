@@ -803,9 +803,9 @@ class ProjectService:
         return cleaned[:10]
 
     async def members(self, project_id: str, organization_id: str, page: int,
-                      page_size: int, name: str = ""):
+                      page_size: int, name: str = "", user_id: str | None = None):
         project = await self._project(project_id, organization_id, load_org=True)
-        stmt = self._member_statement(project_id, name)
+        stmt = self._member_statement(project_id, name, user_id=user_id)
         total = (
             await self.db.execute(
                 select(func.count()).select_from(stmt.order_by(None).subquery())
@@ -822,7 +822,7 @@ class ProjectService:
         return data, self.pagination(page, page_size, total)
 
     @staticmethod
-    def _member_statement(project_id: str, name: str = ""):
+    def _member_statement(project_id: str, name: str = "", user_id: str | None = None):
         stmt = (
             select(ProjectMember, User, Role)
             .join(User, User.id == ProjectMember.user_id)
@@ -834,6 +834,8 @@ class ProjectService:
                 Role.deleted_at.is_(None),
             )
         )
+        if user_id:
+            stmt = stmt.where(User.id == str(user_id))
         search = name.strip()
         if search:
             stmt = stmt.where(
@@ -953,6 +955,7 @@ class ProjectService:
                         project_id=project.id,
                         user_id=user.id,
                         role_id=role.id,
+                        project_role=project_role,
                         added_by_id=actor,
                         joined_at=datetime.now(timezone.utc),
                     )
