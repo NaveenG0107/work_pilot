@@ -20,6 +20,8 @@ async def test_get_sprints_list_success(client: AsyncClient, app_context: dict):
     if body["data"]:
         assert "total_stories" in body["data"][0]
         assert isinstance(body["data"][0]["total_stories"], int)
+        assert "total_storyless_tasks" in body["data"][0]
+        assert isinstance(body["data"][0]["total_storyless_tasks"], int)
     if "meta" in body:
         assert "page" in body["meta"]
         assert "page_size" in body["meta"]
@@ -62,6 +64,8 @@ async def test_sprint_detail_success_or_not_found(client: AsyncClient, app_conte
         assert detail_body["data"]["id"] == sprint_id
         assert "total_stories" in detail_body["data"]
         assert isinstance(detail_body["data"]["total_stories"], int)
+        assert "total_storyless_tasks" in detail_body["data"]
+        assert isinstance(detail_body["data"]["total_storyless_tasks"], int)
     else:
         dummy_id = "00000000-0000-0000-0000-000000000000"
         detail_resp = await client.get(
