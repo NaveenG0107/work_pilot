@@ -859,6 +859,8 @@ class ProjectService:
             ProjectMemberResponse(
                 user_id=str(user.id),
                 username=user.username,
+                email=user.email,
+                organization_id=str(user.organization_id or project.organization_id) if (user.organization_id or project.organization_id) else None,
                 full_name=user.full_name,
                 role=role.name,
                 avatar_url=user.avatar_url or None,

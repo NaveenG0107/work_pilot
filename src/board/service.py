@@ -279,6 +279,115 @@ class BoardService:
 
         return project, user
 
+    async def resolve_board_sprints(
+        self,
+        project_id: str,
+        sprint_id: str | None = None,
+        sprint_status: str | None = None,
+    ) -> tuple[list[str], Sprint | None]:
+        """
+        Resolves the sprint context and allowed sprint IDs for board operations.
+
+        - If sprint_id is explicitly provided: validates existence, project ownership,
+          and non-deleted status. Raises BoardServiceError(404) if not found.
+          Returns ([sprint_id], sprint).
+        - If sprint_status is provided (e.g. 'completed', 'active'):
+          Queries non-deleted sprints matching that status for the project.
+          Returns ([id for id in sprints], latest_sprint if sprints else None).
+        - If neither is provided (default board):
+          Returns stories from BOTH active and completed sprints simultaneously.
+          Queries non-deleted sprints with status IN ('active', 'completed').
+          Returns ([id for id in sprints], primary_sprint).
+          primary_sprint is the latest active sprint if one exists, otherwise the latest completed sprint.
+        """
+        if sprint_id:
+            sprint = (
+                await self.db.execute(
+                    select(Sprint).where(
+                        Sprint.id == sprint_id,
+                        Sprint.project_id == project_id,
+                        Sprint.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if not sprint:
+                logger.warning(
+                    "Sprint not found or does not belong to project: sprint_id=%s, project_id=%s",
+                    sprint_id,
+                    project_id,
+                )
+                raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "Sprint not found")
+            logger.info(
+                "Explicit sprint resolved for board: sprint_id=%s, name=%s, status=%s, project_id=%s",
+                sprint.id,
+                sprint.name,
+                sprint.status,
+                project_id,
+            )
+            return [str(sprint.id)], sprint
+
+        if sprint_status:
+            sprints_stmt = (
+                select(Sprint)
+                .where(
+                    Sprint.project_id == project_id,
+                    Sprint.status == sprint_status,
+                    Sprint.deleted_at.is_(None),
+                )
+                .order_by(Sprint.created_at.desc())
+            )
+            sprints = (await self.db.execute(sprints_stmt)).scalars().all()
+            allowed_ids = [str(s.id) for s in sprints]
+            primary_sprint = sprints[0] if sprints else None
+            logger.info(
+                "Sprint status filter '%s' resolved %d sprints for board in project_id=%s",
+                sprint_status,
+                len(allowed_ids),
+                project_id,
+            )
+            return allowed_ids, primary_sprint
+
+        # Default board: active AND completed sprints
+        sprints_stmt = (
+            select(Sprint)
+            .where(
+                Sprint.project_id == project_id,
+                Sprint.status.in_(["active", "completed"]),
+                Sprint.deleted_at.is_(None),
+            )
+            .order_by(
+                case((Sprint.status == "active", 0), else_=1),
+                Sprint.created_at.desc(),
+            )
+        )
+        sprints = (await self.db.execute(sprints_stmt)).scalars().all()
+        allowed_ids = [str(s.id) for s in sprints]
+        active_sprint = next((s for s in sprints if s.status == "active"), None)
+        primary_sprint = active_sprint or (sprints[0] if sprints else None)
+
+        if allowed_ids:
+            logger.info(
+                "Active and completed sprints resolved for default board: count=%d, primary=%s, project_id=%s",
+                len(allowed_ids),
+                primary_sprint.name if primary_sprint else None,
+                project_id,
+            )
+        else:
+            logger.info(
+                "No active or completed sprints found for default board in project_id=%s",
+                project_id,
+            )
+        return allowed_ids, primary_sprint
+
+    async def resolve_board_sprint(
+        self,
+        project_id: str,
+        sprint_id: str | None = None,
+        sprint_status: str | None = None,
+    ) -> Sprint | None:
+        _, primary = await self.resolve_board_sprints(project_id, sprint_id, sprint_status)
+        return primary
+
     async def _statuses(self, project_id: str) -> list[CustomStatus]:
         statuses = list(
             (
@@ -336,8 +445,18 @@ class BoardService:
         priority: str | list[str] | None = None,
         work_type: str | list[str] | None = None,
         label_id: str | list[str] | None = None,
+        search: str | None = None,
     ) -> list[Any]:
         conditions = []
+        if search:
+            search_str = f"%{search.strip()}%"
+            conditions.append(
+                or_(
+                    Task.title.ilike(search_str),
+                    Task.description.ilike(search_str),
+                    Task.key.ilike(search_str),
+                )
+            )
         if task_assignee_id:
             if isinstance(task_assignee_id, (list, tuple, set)):
                 assignee_list = [str(a) for a in task_assignee_id if a]
@@ -410,6 +529,7 @@ class BoardService:
         page: int = 1,
         page_size: int = 5,
         sprint_id: str | None = None,
+        sprint_status: str | None = None,
         story_assignee_id: str | list[str] | None = None,
         task_assignee_id: str | list[str] | None = None,
         task_status_id: str | list[str] | None = None,
@@ -419,14 +539,95 @@ class BoardService:
         tasks_per_status: int = 5,
         current_user_id: str | None = None,
         include_storyless: bool = False,
+        search: str | None = None,
     ) -> BoardResponse:
+        allowed_sprint_ids, resolved_sprint = await self.resolve_board_sprints(
+            project_id, sprint_id=sprint_id, sprint_status=sprint_status
+        )
+        if not allowed_sprint_ids:
+            story_summaries: list[BoardStorySummary] = []
+            total = 0
+            if include_storyless:
+                storyless_summary = await self.get_board_storyless_summary(
+                    project_id,
+                    sprint_id=sprint_id,
+                    sprint_status=sprint_status,
+                    task_assignee_id=task_assignee_id,
+                    task_status_id=task_status_id,
+                    priority=priority,
+                    work_type=work_type,
+                    label_id=label_id,
+                    search=search,
+                    tasks_per_status=tasks_per_status,
+                    current_user_id=current_user_id,
+                )
+                if storyless_summary and storyless_summary.total_tasks > 0:
+                    story_summaries.append(storyless_summary)
+                    total = 1
+
+            pagination = BoardPagination(
+                page=page,
+                page_size=page_size,
+                total=total,
+                has_next=(page * page_size) < total,
+            )
+            meta_dict = pagination.model_dump()
+            meta_dict["sprint"] = (
+                {
+                    "id": str(resolved_sprint.id),
+                    "name": resolved_sprint.name,
+                    "status": resolved_sprint.status,
+                }
+                if resolved_sprint
+                else None
+            )
+            sprints_meta_stmt = (
+                select(Sprint)
+                .where(
+                    Sprint.project_id == project_id,
+                    Sprint.deleted_at.is_(None),
+                )
+                .order_by(
+                    case(
+                        (Sprint.status == "active", 0),
+                        (Sprint.status == "planned", 1),
+                        (Sprint.status == "completed", 2),
+                        else_=3,
+                    ),
+                    Sprint.created_at.desc(),
+                )
+            )
+            all_sprints = (await self.db.execute(sprints_meta_stmt)).scalars().all()
+            meta_dict["sprints"] = [
+                {
+                    "id": str(s.id),
+                    "name": s.name,
+                    "status": s.status,
+                }
+                for s in all_sprints
+            ]
+            return BoardResponse(
+                success=True,
+                status_code=200,
+                message="Board stories retrieved successfully",
+                data=story_summaries,
+                meta=meta_dict,
+            )
+
         conditions = [
             UserStory.project_id == project_id,
             UserStory.deleted_at.is_(None),
-            UserStory.sprint_id.is_not(None),
+            UserStory.sprint_id.in_(allowed_sprint_ids),
         ]
-        if sprint_id:
-            conditions.append(UserStory.sprint_id == sprint_id)
+        if search:
+            search_str = f"%{search.strip()}%"
+            conditions.append(
+                or_(
+                    UserStory.title.ilike(search_str),
+                    UserStory.description.ilike(search_str),
+                    UserStory.key.ilike(search_str),
+                )
+            )
         if story_assignee_id:
             if isinstance(story_assignee_id, (list, tuple, set)):
                 story_assignees = [str(a) for a in story_assignee_id if a]
@@ -453,8 +654,14 @@ class BoardService:
             if current_user_id
             else None
         )
+        sprint_order = case(
+            (Sprint.status == "active", 0),
+            (Sprint.status == "completed", 1),
+            else_=2,
+        )
         stories_stmt = (
             select(UserStory)
+            .outerjoin(Sprint, Sprint.id == UserStory.sprint_id)
             .where(*conditions)
             .options(
                 joinedload(UserStory.assignee).joinedload(User.role),
@@ -463,19 +670,17 @@ class BoardService:
                 joinedload(UserStory.status),
             )
         )
+        order_clauses = [sprint_order.asc()]
         if fav_story_join is not None:
+            stories_stmt = stories_stmt.outerjoin(Favorite, fav_story_join)
             fav_story_priority = case((Favorite.id.is_not(None), 0), else_=1)
-            stories_stmt = stories_stmt.outerjoin(Favorite, fav_story_join).order_by(
-                fav_story_priority.asc(),
-                UserStory.created_at.desc(),
-                UserStory.id.desc(),
-            )
-        else:
-            stories_stmt = stories_stmt.order_by(
-                UserStory.created_at.desc(),
-                UserStory.id.desc(),
-            )
-        stories_stmt = stories_stmt.limit(page_size).offset(offset)
+            order_clauses.append(fav_story_priority.asc())
+
+        order_clauses.extend([
+            UserStory.created_at.desc(),
+            UserStory.id.desc(),
+        ])
+        stories_stmt = stories_stmt.order_by(*order_clauses).limit(page_size).offset(offset)
         stories = (await self.db.execute(stories_stmt)).scalars().unique().all()
 
         story_summaries: list[BoardStorySummary] = []
@@ -520,6 +725,7 @@ class BoardService:
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
+                search=search,
             )
 
             # 6. Task counts per (user_story_id, status_id) with filters applied
@@ -701,14 +907,17 @@ class BoardService:
                 )
 
         if include_storyless:
+            eff_storyless_sprint = sprint_id or (str(resolved_sprint.id) if resolved_sprint else None)
             storyless_summary = await self.get_board_storyless_summary(
                 project_id,
-                sprint_id=sprint_id,
+                sprint_id=eff_storyless_sprint,
+                sprint_status=sprint_status,
                 task_assignee_id=task_assignee_id,
                 task_status_id=task_status_id,
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
+                search=search,
                 tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
@@ -723,13 +932,48 @@ class BoardService:
             total=total,
             has_next=has_next,
         )
+        meta_dict = pagination.model_dump()
+        meta_dict["sprint"] = (
+            {
+                "id": str(resolved_sprint.id),
+                "name": resolved_sprint.name,
+                "status": resolved_sprint.status,
+            }
+            if resolved_sprint
+            else None
+        )
+        sprints_meta_stmt = (
+            select(Sprint)
+            .where(
+                Sprint.project_id == project_id,
+                Sprint.deleted_at.is_(None),
+            )
+            .order_by(
+                case(
+                    (Sprint.status == "active", 0),
+                    (Sprint.status == "planned", 1),
+                    (Sprint.status == "completed", 2),
+                    else_=3,
+                ),
+                Sprint.created_at.desc(),
+            )
+        )
+        all_sprints = (await self.db.execute(sprints_meta_stmt)).scalars().all()
+        meta_dict["sprints"] = [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "status": s.status,
+            }
+            for s in all_sprints
+        ]
 
         return BoardResponse(
             success=True,
             status_code=200,
             message="Board stories retrieved successfully",
             data=story_summaries,
-            meta=pagination.model_dump(),
+            meta=meta_dict,
         )
 
     # -----------------------------------------------------------------------
@@ -743,22 +987,33 @@ class BoardService:
         page: int = 1,
         page_size: int = 5,
         tasks_per_status: int = 5,
+        sprint_id: str | None = None,
+        sprint_status: str | None = None,
         task_assignee_id: str | list[str] | None = None,
         task_status_id: str | list[str] | None = None,
         priority: str | list[str] | None = None,
         work_type: str | list[str] | None = None,
         label_id: str | list[str] | None = None,
+        search: str | None = None,
         current_user_id: str | None = None,
     ) -> BoardResponse:
+        if sprint_id:
+            await self.resolve_board_sprint(project_id, sprint_id)
+        if sprint_status:
+            await self.resolve_board_sprint(project_id, sprint_status=sprint_status)
+
         # 1. Fetch story with eager-loaded single-value relationships
         if user_story_id == "storyless":
             summary = await self.get_board_storyless_summary(
                 project_id,
+                sprint_id=sprint_id,
+                sprint_status=sprint_status,
                 task_assignee_id=task_assignee_id,
                 task_status_id=task_status_id,
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
+                search=search,
                 tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
@@ -797,6 +1052,12 @@ class BoardService:
         if not story:
             logger.warning("User story not found in project: user_story_id=%s, project_id=%s", user_story_id, project_id)
             raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
+        if sprint_id and str(story.sprint_id) != str(sprint_id):
+            logger.warning("User story %s does not belong to sprint %s", user_story_id, sprint_id)
+            raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
+        if sprint_status and getattr(story, "sprint", None) and story.sprint.status != sprint_status:
+            logger.warning("User story %s does not belong to sprint status %s", user_story_id, sprint_status)
+            raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
 
         # 2. Fetch all project statuses
         statuses = await self._statuses(project_id)
@@ -808,6 +1069,7 @@ class BoardService:
             priority=priority,
             work_type=work_type,
             label_id=label_id,
+            search=search,
         )
 
         counts_stmt = (
@@ -1027,11 +1289,18 @@ class BoardService:
         *,
         task_assignee_id: str | list[str] | None = None,
         sprint_id: str | None = None,
+        sprint_status: str | None = None,
         priority: str | list[str] | None = None,
         work_type: str | list[str] | None = None,
         label_id: str | list[str] | None = None,
+        search: str | None = None,
         current_user_id: str | None = None,
     ) -> BoardResponse:
+        if sprint_id:
+            await self.resolve_board_sprint(project_id, sprint_id)
+        if sprint_status:
+            await self.resolve_board_sprint(project_id, sprint_status=sprint_status)
+
         # 1. Validate story belongs to project & load details
         if user_story_id == "storyless":
             story = None
@@ -1054,6 +1323,12 @@ class BoardService:
             if not story:
                 logger.warning("User story not found for status tasks: user_story_id=%s, project_id=%s", user_story_id, project_id)
                 raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
+            if sprint_id and str(story.sprint_id) != str(sprint_id):
+                logger.warning("User story %s does not belong to sprint %s", user_story_id, sprint_id)
+                raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
+            if sprint_status and getattr(story, "sprint", None) and story.sprint.status != sprint_status:
+                logger.warning("User story %s does not belong to sprint status %s", user_story_id, sprint_status)
+                raise BoardServiceError(404, "RESOURCE_NOT_FOUND", "User story not found")
 
         # 2. Validate status belongs to project
         status_obj = (
@@ -1075,6 +1350,7 @@ class BoardService:
             priority=priority,
             work_type=work_type,
             label_id=label_id,
+            search=search,
         )
         conditions = [
             Task.project_id == project_id,
@@ -1086,7 +1362,13 @@ class BoardService:
         if sprint_id:
             conditions.append(Task.sprint_id == sprint_id)
         elif user_story_id == "storyless":
-            conditions.append(Task.sprint_id.isnot(None))
+            allowed_sprint_ids, _ = await self.resolve_board_sprints(
+                project_id, sprint_id=sprint_id, sprint_status=sprint_status
+            )
+            if allowed_sprint_ids:
+                conditions.append(Task.sprint_id.in_(allowed_sprint_ids))
+            else:
+                conditions.append(Task.sprint_id.isnot(None))
 
         # 4. Total count query
         count_stmt = select(func.count(Task.id)).where(*conditions)
@@ -1299,23 +1581,32 @@ class BoardService:
         tasks_per_status: int = 5,
         *,
         sprint_id: str | None = None,
+        sprint_status: str | None = None,
         task_assignee_id: str | list[str] | None = None,
         task_status_id: str | list[str] | None = None,
         priority: str | list[str] | None = None,
         work_type: str | list[str] | None = None,
         label_id: str | list[str] | None = None,
+        search: str | None = None,
         current_user_id: str | None = None,
         group_by_status: bool = True,
     ) -> BoardResponse:
+        if sprint_id:
+            await self.resolve_board_sprint(project_id, sprint_id)
+        if sprint_status:
+            await self.resolve_board_sprint(project_id, sprint_status=sprint_status)
+
         if group_by_status:
             summary = await self.get_board_storyless_summary(
                 project_id,
                 sprint_id=sprint_id,
+                sprint_status=sprint_status,
                 task_assignee_id=task_assignee_id,
                 task_status_id=task_status_id,
                 priority=priority,
                 work_type=work_type,
                 label_id=label_id,
+                search=search,
                 tasks_per_status=tasks_per_status,
                 current_user_id=current_user_id,
             )
@@ -1343,16 +1634,24 @@ class BoardService:
             priority=priority,
             work_type=work_type,
             label_id=label_id,
+            search=search,
         )
         conditions = [
             Task.project_id == project_id,
             Task.user_story_id.is_(None),
-            Task.sprint_id.isnot(None),
             Task.deleted_at.is_(None),
             *task_filters,
         ]
         if sprint_id:
             conditions.append(Task.sprint_id == sprint_id)
+        else:
+            allowed_sprint_ids, _ = await self.resolve_board_sprints(
+                project_id, sprint_id=sprint_id, sprint_status=sprint_status
+            )
+            if allowed_sprint_ids:
+                conditions.append(Task.sprint_id.in_(allowed_sprint_ids))
+            else:
+                conditions.append(Task.sprint_id.isnot(None))
 
         # 1. Total count query
         count_stmt = select(func.count(Task.id)).where(*conditions)
@@ -1457,6 +1756,21 @@ class BoardService:
         if active_sprint:
             return str(active_sprint[0]), active_sprint[1]
 
+        # 2. Try to resolve completed sprint of the project
+        comp_sprint = (
+            await self.db.execute(
+                select(Sprint.id, Sprint.name)
+                .where(
+                    Sprint.project_id == project_id,
+                    Sprint.status == "completed",
+                    Sprint.deleted_at.is_(None),
+                )
+                .order_by(Sprint.created_at.desc())
+            )
+        ).first()
+        if comp_sprint:
+            return str(comp_sprint[0]), comp_sprint[1]
+
         # 2. Try to resolve from the most recent sprint of storyless tasks
         task_sprint = (
             await self.db.execute(
@@ -1482,11 +1796,13 @@ class BoardService:
         project_id: str,
         *,
         sprint_id: str | None = None,
+        sprint_status: str | None = None,
         task_assignee_id: str | list[str] | None = None,
         task_status_id: str | list[str] | None = None,
         priority: str | list[str] | None = None,
         work_type: str | list[str] | None = None,
         label_id: str | list[str] | None = None,
+        search: str | None = None,
         tasks_per_status: int = 5,
         current_user_id: str | None = None,
     ) -> BoardStorySummary:
@@ -1499,7 +1815,13 @@ class BoardService:
         if sprint_id:
             base_conditions.append(Task.sprint_id == sprint_id)
         else:
-            base_conditions.append(Task.sprint_id.isnot(None))
+            allowed_sprint_ids, _ = await self.resolve_board_sprints(
+                project_id, sprint_id=sprint_id, sprint_status=sprint_status
+            )
+            if allowed_sprint_ids:
+                base_conditions.append(Task.sprint_id.in_(allowed_sprint_ids))
+            else:
+                base_conditions.append(Task.sprint_id.isnot(None))
 
         # Unfiltered total tasks
         total_stmt = select(func.count(Task.id)).where(*base_conditions)
@@ -1524,6 +1846,7 @@ class BoardService:
             priority=priority,
             work_type=work_type,
             label_id=label_id,
+            search=search,
         )
         filtered_conditions = [*base_conditions, *task_filters]
 

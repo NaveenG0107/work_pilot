@@ -194,6 +194,8 @@ class ProjectListResponse(BaseModel):
 class ProjectMemberResponse(BaseModel):
     user_id: str
     username: str
+    email: str | None = None
+    organization_id: str | None = None
     full_name: str
     role: str
     avatar_url: str | None

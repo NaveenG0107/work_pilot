@@ -105,6 +105,7 @@ async def get_board(
     status_id: Optional[str] = Query(default=None, description="Status ID for loading more tasks within a story or status filtering"),
     storyless_tasks: bool = Query(default=False, description="Whether to fetch storyless tasks grouped by status"),
     sprint_id: Optional[str] = Query(default=None, description="Optional sprint filter"),
+    sprint_status: Optional[str] = Query(default=None, description="Optional sprint status filter ('active', 'completed', etc.)"),
     story_assignee_id: Optional[str] = Query(
         default=None,
         description="Optional assignee filter for user stories (single UUID, comma-separated UUIDs, or repeated param)",
@@ -138,6 +139,7 @@ async def get_board(
     ),
     label_ids: Optional[str] = Query(default=None, include_in_schema=False),
     labels: Optional[str] = Query(default=None, include_in_schema=False),
+    search: Optional[str] = Query(default=None, description="Optional search filter"),
     # Hidden backward-compatible query aliases:
     storyless: Optional[bool] = Query(default=None, include_in_schema=False),
     include_storyless: Optional[bool] = Query(default=None, include_in_schema=False),
@@ -170,6 +172,11 @@ async def get_board(
         clean_project_id = validate_uuid_param("project_id", project_id)
         clean_user_story_id = "storyless" if is_storyless_id else validate_uuid_param("user_story_id", effective_story_id)
         clean_sprint_id = validate_uuid_param("sprint_id", sprint_id)
+        clean_sprint_status = (
+            str(sprint_status).strip().lower()
+            if sprint_status and str(sprint_status).strip()
+            else None
+        )
 
         # Multi-value parsing for story_assignee_id
         raw_story_assignees = (
@@ -309,6 +316,9 @@ async def get_board(
         # Verify project existence, org isolation, and permissions
         await service.check_authorization(clean_project_id, str(user_id), str(org_id))
 
+        if clean_sprint_id:
+            await service.resolve_board_sprint(clean_project_id, clean_sprint_id)
+
         # 3. Determine request mode & dispatch
         if clean_user_story_id and clean_status_id:
             mode = "story_status_tasks"
@@ -320,9 +330,11 @@ async def get_board(
                 page_size=page_size,
                 task_assignee_id=clean_task_assignee_filter,
                 sprint_id=clean_sprint_id,
+                sprint_status=clean_sprint_status,
                 priority=clean_priority_filter,
                 work_type=clean_work_type_filter,
                 label_id=clean_label_filter,
+                search=search,
                 current_user_id=str(user_id) if user_id else None,
             )
         elif effective_storyless:
@@ -333,11 +345,13 @@ async def get_board(
                 page_size=page_size,
                 tasks_per_status=tasks_per_status,
                 sprint_id=clean_sprint_id,
+                sprint_status=clean_sprint_status,
                 task_assignee_id=clean_task_assignee_filter,
                 task_status_id=clean_task_status_filter,
                 priority=clean_priority_filter,
                 work_type=clean_work_type_filter,
                 label_id=clean_label_filter,
+                search=search,
                 current_user_id=str(user_id) if user_id else None,
                 group_by_status=(group_by_status is not False),
             )
@@ -349,11 +363,14 @@ async def get_board(
                 page=page,
                 page_size=page_size,
                 tasks_per_status=tasks_per_status,
+                sprint_id=clean_sprint_id,
+                sprint_status=clean_sprint_status,
                 task_assignee_id=clean_task_assignee_filter,
                 task_status_id=clean_task_status_filter,
                 priority=clean_priority_filter,
                 work_type=clean_work_type_filter,
                 label_id=clean_label_filter,
+                search=search,
                 current_user_id=str(user_id) if user_id else None,
             )
         else:
@@ -363,6 +380,7 @@ async def get_board(
                 page=page,
                 page_size=page_size,
                 sprint_id=clean_sprint_id,
+                sprint_status=clean_sprint_status,
                 story_assignee_id=clean_story_assignee_filter,
                 task_assignee_id=clean_task_assignee_filter,
                 task_status_id=clean_task_status_filter,
@@ -372,6 +390,7 @@ async def get_board(
                 tasks_per_status=tasks_per_status,
                 current_user_id=str(user_id) if user_id else None,
                 include_storyless=bool(include_storyless),
+                search=search,
             )
 
         duration_ms = (time.perf_counter() - start_time) * 1000
