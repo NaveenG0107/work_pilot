@@ -1228,8 +1228,9 @@ class SprintService:
 
             sprints = result.scalars().all()
 
-            # Batch count user stories per sprint to avoid N+1 queries
+            # Batch count user stories and storyless tasks per sprint to avoid N+1 queries
             story_counts: dict[str, int] = {}
+            storyless_counts: dict[str, int] = {}
             if sprints:
                 sprint_ids = [s.id for s in sprints]
                 counts_stmt = (
@@ -1242,6 +1243,18 @@ class SprintService:
                 )
                 counts_res = await self.db.execute(counts_stmt)
                 story_counts = {str(sp_id): int(cnt) for sp_id, cnt in counts_res.all()}
+
+                storyless_stmt = (
+                    select(Task.sprint_id, func.count(Task.id))
+                    .where(
+                        Task.sprint_id.in_(sprint_ids),
+                        Task.user_story_id.is_(None),
+                        Task.deleted_at.is_(None),
+                    )
+                    .group_by(Task.sprint_id)
+                )
+                storyless_res = await self.db.execute(storyless_stmt)
+                storyless_counts = {str(sp_id): int(cnt) for sp_id, cnt in storyless_res.all()}
 
             total_pages = (
                 ceil(total_items / page_size)
@@ -1274,6 +1287,7 @@ class SprintService:
                             sprint.end_date
                         ),
                         "total_stories": story_counts.get(str(sprint.id), 0),
+                        "total_storyless_tasks": storyless_counts.get(str(sprint.id), 0),
                     }
                 )
 
@@ -1375,6 +1389,14 @@ class SprintService:
             )
             story_count = (await self.db.execute(count_stmt)).scalar() or 0
 
+            # Count storyless tasks in this sprint
+            storyless_stmt = select(func.count(Task.id)).where(
+                Task.sprint_id == sprint.id,
+                Task.user_story_id.is_(None),
+                Task.deleted_at.is_(None),
+            )
+            storyless_count = (await self.db.execute(storyless_stmt)).scalar() or 0
+
             sprint_data = {
                 "id": str(sprint.id),
                 "name": sprint.name,
@@ -1387,6 +1409,7 @@ class SprintService:
                     sprint.end_date
                 ),
                 "total_stories": int(story_count),
+                "total_storyless_tasks": int(storyless_count),
             }
 
             try:
