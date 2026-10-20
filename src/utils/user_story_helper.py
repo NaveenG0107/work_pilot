@@ -103,6 +103,8 @@ def failure(exc: Exception) -> JSONResponse:
         code, error_code, message = exc.status_code, exc.code, exc.message
     elif isinstance(exc, UserStoryServiceError):
         code, error_code, message = exc.status_code, exc.code, exc.message
+    elif isinstance(exc, (ValueError, TypeError)):
+        code, error_code, message = 400, "BAD_REQUEST", str(exc) or "Invalid request payload."
     else:
         code, error_code, message = (
             500,

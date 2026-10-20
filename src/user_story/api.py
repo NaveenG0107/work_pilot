@@ -4,9 +4,11 @@ import urllib.parse
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 from starlette.datastructures import UploadFile
 
 from src.config import get_logger
+from src.user_story_status.models import UserStoryStatus
 from src.user_story.schema import (
     CreateCommentRequest,
     CreateUserStoryRequest,
@@ -110,7 +112,7 @@ async def get_user_stories(
     page_size: int = 10,
     sort_by: str = "created_at",
     sort_order: str = "DESC",
-    status: str = "",
+    status_id: str = "",
     assignee_id: str = "",
     reporter_id: str = "",
     sprint_id: str = "",
@@ -132,12 +134,41 @@ async def get_user_stories(
 
         sprint_filter = sprint_id.strip()
         without_sprint = sprint_filter.lower() in ("null", "none")
+
+        raw_sids = request.query_params.getlist("status_id")
+        if raw_sids:
+            all_sids = []
+            for item in raw_sids:
+                for part in item.split(","):
+                    p = part.strip()
+                    if p and p not in all_sids:
+                        all_sids.append(p)
+            status_id_val = ",".join(all_sids) if all_sids else None
+        else:
+            status_id_val = status_id.strip() or None
+
+        legacy_status = request.query_params.get("status", "").strip()
+        if not status_id_val and legacy_status:
+            status_rec = (
+                await service.db.execute(
+                    select(UserStoryStatus.id).where(
+                        UserStoryStatus.project_id == project_id,
+                        func.lower(UserStoryStatus.name) == legacy_status.lower(),
+                        UserStoryStatus.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if status_rec:
+                status_id_val = str(status_rec)
+            else:
+                status_id_val = None
+
         filter_ = UserStoryFilter(
             page=page if page > 0 else 1,
             page_size=page_size if page_size > 0 else 10,
             sort_by=sort_by.strip() or "created_at",
             sort_order=(sort_order.strip() or "DESC").upper(),
-            status=status.strip(),
+            status_id=status_id_val,
             assignee_id=assignee_id.strip() or None,
             reporter_id=reporter_id.strip() or None,
             sprint_id=None if without_sprint else (sprint_filter or None),

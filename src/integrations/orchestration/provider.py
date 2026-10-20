@@ -242,7 +242,23 @@ class MockLLMProvider(LLMProvider):
                 break
 
         if "create" in last_user_msg and "task" in last_user_msg:
-            # Extract basic context project_id if present in system/context
+            # Determine priority from user message without silently mapping unsupported values to high
+            parsed_priority = "medium"
+            import re
+            m_pri = re.search(r"\bpriority\s*(?::|=|\bis\b|\bto\b)?\s*([a-zA-Z0-9_-]+)\b", last_user_msg)
+            if m_pri and m_pri.group(1) not in {"to", "the", "a", "an", "of", "and", "in", "for"}:
+                parsed_priority = m_pri.group(1)
+            elif "critical" in last_user_msg:
+                parsed_priority = "critical"
+            elif "urgent" in last_user_msg:
+                parsed_priority = "urgent"
+            elif "high" in last_user_msg:
+                parsed_priority = "high"
+            elif "low" in last_user_msg:
+                parsed_priority = "low"
+            elif "medium" in last_user_msg:
+                parsed_priority = "medium"
+
             return ProviderResponse(
                 content=None,
                 tool_calls=[
@@ -252,7 +268,7 @@ class MockLLMProvider(LLMProvider):
                         arguments={
                             "title": "Fix the login API",
                             "type": "bug" if "bug" in last_user_msg else "task",
-                            "priority": "high" if "high" in last_user_msg else "medium",
+                            "priority": parsed_priority,
                         },
                     )
                 ],

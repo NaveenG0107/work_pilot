@@ -179,8 +179,15 @@ def task_before_insert(mapper, connection, target):
     if not target.id:
         target.id = str(uuid7())
 
-    if not target.sequence_number:
-        target.sequence_number = get_next_global_serial_number(connection)
-
     if not target.serial_number:
-        target.serial_number = target.sequence_number
+        target.serial_number = get_next_global_serial_number(connection)
+
+    if not target.sequence_number:
+        if target.project_id:
+            val = connection.execute(
+                text("SELECT COALESCE(MAX(sequence_number), 0) FROM tasks WHERE project_id = :p_id"),
+                {"p_id": target.project_id},
+            ).scalar() or 0
+            target.sequence_number = int(val) + 1
+        else:
+            target.sequence_number = 1
