@@ -112,7 +112,7 @@ class UserStoryFilter(BaseModel):
     page_size: int = Field(default=10, ge=1)
     sort_by: str = Field(default="created_at")
     sort_order: str = Field(default="DESC")
-    status: str = ""
+    status_id: Optional[str] = None
     assignee_id: Optional[str] = None
     reporter_id: Optional[str] = None
     sprint_id: Optional[str] = None
@@ -129,7 +129,25 @@ class UserStoryFilter(BaseModel):
     def validate_optional_ids(cls, value: str | None) -> str | None:
         return validate_uuid(value)
 
-    @field_validator("status", "priority", "sort_by", "sort_order")
+    @field_validator("status_id")
+    @classmethod
+    def validate_status_id(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = str(value).strip().strip('"').strip("'")
+        if not cleaned or cleaned.lower() in ("none", "null", "undefined"):
+            return None
+        import uuid
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+        validated = []
+        for p in parts:
+            try:
+                validated.append(str(uuid.UUID(p)))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError("Invalid request payload.") from exc
+        return ",".join(validated) if validated else None
+
+    @field_validator("priority", "sort_by", "sort_order")
     @classmethod
     def trim_strings(cls, value: str) -> str:
         return (value or "").strip()

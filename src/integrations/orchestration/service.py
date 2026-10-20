@@ -10,7 +10,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
+import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,11 +25,17 @@ from src.integrations.orchestration.schemas import (
     PendingAction,
     ProposedTask,
 )
+from src.integrations.tools.task_tools import (
+    is_generic_or_empty_title,
+    is_past_due_date,
+    parse_due_date,
+)
 from src.integrations.tools.tool_executor import (
     ToolExecutionStatus,
     ToolExecutor,
     ToolResult,
 )
+from src.task.schema import TASK_PRIORITIES, TASK_TYPES
 from src.task.service import TaskServiceError
 
 logger = get_logger(__name__)
@@ -38,6 +45,196 @@ _MEMORY_ACTION_STORE: dict[str, dict[str, Any]] = {}
 _MEMORY_STORE_LOCK = asyncio.Lock()
 CONFIRMATION_TTL_SECONDS = 900  # 15 minutes
 DEFAULT_CLAIM_TTL_SECONDS = 30  # 30 seconds claim execution lock
+
+FOLLOW_UP_TITLE_PROMPT = (
+    "What would you like the title of the task to be? "
+    "Please provide a title or meaningful name before creation."
+)
+
+METADATA_COMMAND_WORDS = {
+    # Actions & auxiliary verbs
+    "create", "creating", "make", "making", "add", "adding", "new", "put", "generate",
+    "build", "open", "file", "insert", "please", "can", "you", "i", "want", "need",
+    "would", "like", "to", "do", "help",
+    # Work items
+    "task", "tasks", "chore", "chores", "bug", "bugs", "feature", "features",
+    "story", "stories", "user_story", "userstory", "issue", "issues", "item", "items",
+    "work", "workitem", "ticket", "tickets", "workpilot",
+    # Context / Prepositions
+    "in", "for", "the", "a", "an", "on", "at", "of", "and", "or", "with", "from",
+    "project", "projects", "current", "this", "my", "our", "workspace", "org",
+    "organization", "board", "backlog", "sprint", "active",
+    # Fields & values
+    "set", "type", "priority", "status", "low", "medium", "high", "critical",
+    "assign", "assignee", "assigned", "reporter", "reported", "me", "myself", "self",
+    "story_points", "points", "storypoints", "fibonacci", "point", "pts", "sp",
+    "due", "date", "duedate", "deadline", "time", "estimate", "estimated", "hours",
+    # Omission words
+    "empty", "none", "null", "leave", "keep", "without", "no", "blank",
+    "description", "details", "titled", "named", "called", "title", "name",
+}
+
+
+def _extract_content_tokens(text: str) -> list[str]:
+    tokens = re.findall(r"\b[a-zA-Z0-9_-]+\b", text.lower())
+    return [t for t in tokens if t not in METADATA_COMMAND_WORDS and len(t) > 1]
+
+
+def is_user_title_omitted_or_invented(user_message: str, candidate_title: str) -> bool:
+    """Detect if the user omitted the title from their request or if candidate_title was invented by the LLM."""
+    if not candidate_title or is_generic_or_empty_title(candidate_title):
+        return True
+
+    candidate_clean = candidate_title.strip()
+    title_tokens = _extract_content_tokens(candidate_clean)
+    if not title_tokens:
+        # Candidate title only contains metadata words (e.g. "Chore in project")
+        return True
+
+    return False
+
+
+def extract_user_priority(user_message: str) -> str | None:
+    """Extract priority explicitly specified by the user in natural language, if any."""
+    # Remove quoted strings so titles like 'Urgent: Fix login' don't confuse priority extraction
+    unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
+
+    # 1. "<val>-priority" or "<val> priority" (e.g. "urgent priority", "high-priority", "high priority")
+    m3 = re.search(r"\b([a-zA-Z0-9_-]+)[-\s]+priority\b", unquoted)
+    if m3:
+        val = m3.group(1).strip()
+        if val not in {"the", "a", "an", "set", "give", "has", "no", "with", "at", "its", "their"}:
+            return re.sub(r"[-\s]+(?:priority|level)$", "", val).strip()
+
+    # 2. "set (the) priority to <val>"
+    m1 = re.search(r"\bset\s+(?:the\s+)?priority\s+to\s+([a-zA-Z0-9_-]+)\b", unquoted)
+    if m1:
+        return re.sub(r"[-\s]+(?:priority|level)$", "", m1.group(1).strip()).strip()
+
+    # 3. "priority: <val>", "priority is <val>", "priority = <val>", "priority <val>", "priority level <val>"
+    # Note: Avoid matching task types like "priority bug" or nouns like "priority task"
+    m2 = re.search(r"\bpriority\s*(?::|=|\bis\b|\bto\b|\bas\b|\blevel\b)?\s*([a-zA-Z0-9_-]+)\b", unquoted)
+    if m2:
+        val = m2.group(1).strip()
+        non_priorities = {
+            "to", "the", "a", "an", "of", "and", "in", "for", "is", "as", "level",
+            "bug", "feature", "task", "chore", "story", "ticket", "issue", "item",
+        }
+        if val not in non_priorities:
+            return re.sub(r"[-\s]+(?:priority|level)$", "", val).strip()
+
+    # 4. Check for direct allowed priority mentions in priority context
+    for p in ("critical", "high", "medium", "low"):
+        if re.search(rf"\b{p}\b", unquoted) and ("priority" in unquoted or "level" in unquoted):
+            return p
+
+    return None
+
+
+COMMON_UNSUPPORTED_TASK_TYPES = {
+    "epic",
+    "subtask",
+    "sub-task",
+    "defect",
+    "spike",
+    "improvement",
+    "enhancement",
+    "incident",
+    "initiative",
+    "milestone",
+    "feature_request",
+    "change_request",
+}
+
+
+def extract_user_task_type(user_message: str) -> str | None:
+    """Extract task type explicitly specified by the user in natural language, if any."""
+    unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
+
+    def _is_priority_phrase(s: str) -> bool:
+        norm = re.sub(r"[-\s]+(?:priority|level)$", "", s.strip()).strip()
+        return norm in TASK_PRIORITIES or "priority" in s.lower() or "level" in s.lower()
+
+    # 1. "set (the) type to <val>"
+    m1 = re.search(r"\bset\s+(?:the\s+)?type\s+to\s+([a-zA-Z0-9_-]+)\b", unquoted)
+    if m1:
+        val = m1.group(1).strip()
+        if val not in {"the", "a", "an", "this", "to"} and not _is_priority_phrase(val):
+            return val
+
+    # 2. "type: <val>", "type is <val>", "type = <val>", "type as <val>", "type to <val>", "type of <val>"
+    m2 = re.search(r"\btype\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)\s*([a-zA-Z0-9_-]+)\b", unquoted)
+    if m2:
+        val = m2.group(1).strip()
+        if val not in {"the", "a", "an", "to", "of", "and", "is", "as", "level"} and not _is_priority_phrase(val):
+            return val
+
+    # 3. "<val> type" or "<val>-type" (e.g. "chore type", "epic type")
+    m3 = re.search(r"\b([a-zA-Z0-9_-]+)[-\s]+type\b", unquoted)
+    if m3:
+        val = m3.group(1).strip()
+        if val not in {"the", "a", "an", "set", "give", "has", "no", "with", "at", "its", "their", "task", "any", "what", "which", "this"} and not _is_priority_phrase(val):
+            return val
+
+    # 4. Check for known valid task types mentioned directly in the message
+    for t in ("bug", "feature", "chore", "story"):
+        if re.search(rf"\b{t}\b", unquoted):
+            return t
+
+    # 5. Check for common unsupported work item types mentioned directly
+    for ut in sorted(COMMON_UNSUPPORTED_TASK_TYPES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(ut)}\b", unquoted):
+            return ut
+
+    # 6. "create (a|an) <val> titled/in/for/with" or "create (a|an) <val> task"
+    m6 = re.search(r"\bcreate\s+(?:a|an)\s+([a-zA-Z0-9_-]+)\s+(?:task|ticket|item|titled|with|in|for)\b", unquoted)
+    if m6:
+        val = m6.group(1).strip()
+        if val not in {"new", "single", "quick", "simple", "high", "low", "medium", "critical", "the", "a", "an"} and not _is_priority_phrase(val):
+            return val
+
+    return None
+
+
+def extract_user_due_date(user_message: str) -> str | None:
+    """Extract due date explicitly specified by the user in natural language, if any."""
+    unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
+
+    # 1. 'due date: <val>', 'due date is <val>', 'due date = <val>', 'due date <val>'
+    m1 = re.search(r"\bdue\s+date\s*(?::|=|\bis\b|\bto\b|\bas\b)?\s*([a-zA-Z0-9_\-\.\/]+(?:\s+[a-zA-Z0-9_\-\.\/]+)?)\b", unquoted)
+    if m1:
+        val = m1.group(1).strip()
+        if val not in {"is", "the", "a", "an", "for", "in", "of", "to"}:
+            return val
+
+    # 2. 'deadline: <val>', 'deadline is <val>', 'deadline <val>'
+    m2 = re.search(r"\bdeadline\s*(?::|=|\bis\b|\bto\b|\bas\b)?\s*([a-zA-Z0-9_\-\.\/]+(?:\s+[a-zA-Z0-9_\-\.\/]+)?)\b", unquoted)
+    if m2:
+        val = m2.group(1).strip()
+        if val not in {"is", "the", "a", "an", "for", "in", "of", "to"}:
+            return val
+
+    # 3. 'due on <val>', 'due by <val>', 'due before <val>'
+    m3 = re.search(r"\bdue\s+(?:on|by|before)\s+([a-zA-Z0-9_\-\.\/]+(?:\s+[a-zA-Z0-9_\-\.\/]+)?)\b", unquoted)
+    if m3:
+        val = m3.group(1).strip()
+        if val not in {"the", "a", "an"}:
+            return val
+
+    # 4. 'due: <val>'
+    m4 = re.search(r"\bdue\s*:\s*([a-zA-Z0-9_\-\.\/]+(?:\s+[a-zA-Z0-9_\-\.\/]+)?)\b", unquoted)
+    if m4:
+        return m4.group(1).strip()
+
+    # 5. 'due <val>' (avoid prepositions)
+    m5 = re.search(r"\bdue\s+([a-zA-Z0-9_\-\.\/]+)\b", unquoted)
+    if m5:
+        val = m5.group(1).strip()
+        if val not in {"to", "in", "at", "for", "the", "a", "an", "date", "on", "by", "before"}:
+            return val
+
+    return None
+
 
 LUA_CLAIM_ACTION = """
 local key = KEYS[1]
@@ -393,11 +590,19 @@ class AIOrchestrationService:
         messages: list[dict[str, str]] = [
             {"role": "system", "content": AI_ASSISTANT_SYSTEM_PROMPT}
         ]
+        context_project = None
         if context_proj_id:
+            from src.project.models import Project
+            try:
+                context_project = await self.db.get(Project, context_proj_id)
+            except Exception:
+                context_project = None
+            proj_name_str = f"'{context_project.name}'" if context_project and context_project.name else "the current project"
             messages.append({
                 "role": "system",
-                "content": f"Active context: The user is currently in project_id='{context_proj_id}'. "
-                           f"Use this project_id if the user asks to create a task without specifying another project."
+                "content": f"Active context: The user is currently in project {proj_name_str} (project_id='{context_proj_id}'). "
+                           f"Use project_id='{context_proj_id}' if the user asks to create a task in the current project without specifying another project. "
+                           f"CRITICAL: Never put the project name in the assignee field. If the user does not specify an assignee, leave assignee null or omitted."
             })
 
         messages.append({"role": "user", "content": request.message})
@@ -424,38 +629,238 @@ class AIOrchestrationService:
                     f"Tool '{tool_name}' is not recognized or permitted.",
                 )
 
-            # If tool is create_task, inject context project_id if missing
+            # If tool is create_task, inspect arguments and resolve project and fields
             if tool_name == "create_task":
-                if context_proj_id and not args.get("project_id"):
-                    args["project_id"] = context_proj_id
+                from src.project.models import Project
+                from sqlalchemy import select, func
 
-                if not args.get("project_id"):
+                raw_pid = args.get("project_id")
+                raw_pname = args.get("project_name")
+                raw_assignee = args.get("assignee")
+                raw_type = args.get("type")
+                raw_sp = args.get("story_points")
+
+                logger.info(
+                    "Inspecting create_task tool arguments: project_name=%r, project_id=%r, assignee=%r, type=%r, story_points=%r",
+                    raw_pname, raw_pid, raw_assignee, raw_type, raw_sp,
+                )
+
+                # Check if project_id was passed as a non-UUID name string (e.g. "demo")
+                if raw_pid:
+                    try:
+                        UUID(str(raw_pid).strip())
+                    except ValueError:
+                        if not raw_pname:
+                            raw_pname = str(raw_pid).strip()
+                            args["project_name"] = raw_pname
+                        args["project_id"] = None
+                        raw_pid = None
+
+                # If project_id is missing and project_name is provided, resolve project_id independently
+                if not args.get("project_id") and args.get("project_name"):
+                    stmt = select(Project).where(
+                        Project.organization_id == str(organization_id),
+                        func.lower(Project.name) == str(args["project_name"]).strip().lower(),
+                        Project.deleted_at.is_(None),
+                    )
+                    found_p = (await self.db.execute(stmt)).scalars().first()
+                    if found_p:
+                        args["project_id"] = str(found_p.id)
+                        args["project_name"] = found_p.name
+                    elif context_project and context_project.name.lower() == str(args["project_name"]).strip().lower():
+                        args["project_id"] = str(context_project.id)
+                        args["project_name"] = context_project.name
+
+                # If project_id is still missing and context_proj_id exists, use context_proj_id
+                if not args.get("project_id") and context_proj_id:
+                    args["project_id"] = context_proj_id
+                    if context_project and not args.get("project_name"):
+                        args["project_name"] = context_project.name
+
+                if not args.get("project_id") or str(args.get("project_id")).strip().lower() in ("", "none", "null", "undefined"):
                     return ChatResponseData(
                         conversation_id=conversation_id,
                         message="Please specify the project where you would like to create this task.",
                         action_state="NONE",
                     )
 
+                # Check if assignee was erroneously populated with the project name or "demo"
+                target_assignee = args.get("assignee") or args.get("assignee_id")
+                if target_assignee:
+                    a_clean = str(target_assignee).strip().lower()
+                    resolved_pname = (args.get("project_name") or (context_project.name if context_project else "")).strip().lower()
+                    if a_clean == "demo" or (resolved_pname and a_clean == resolved_pname):
+                        logger.warning(
+                            "Clearing misrouted assignee %r which matches project name %r; user did not specify this as an assignee.",
+                            target_assignee, resolved_pname or "demo",
+                        )
+                        args["assignee"] = None
+                        args["assignee_id"] = None
+
+                # Normalize story_points
+                if "story_points" in args and args["story_points"] is not None:
+                    if isinstance(args["story_points"], str):
+                        digits = "".join(c for c in args["story_points"] if c.isdigit())
+                        args["story_points"] = int(digits) if digits else 0
+
+                # Normalize swapped or mispopulated type and priority fields in LLM tool arguments
+                raw_type = args.get("type")
+                raw_priority = args.get("priority")
+                type_str = str(raw_type).strip().lower() if raw_type is not None else ""
+                priority_str = str(raw_priority).strip().lower() if raw_priority is not None else ""
+
+                norm_priority_str = re.sub(r"[-\s]+(?:priority|level)$", "", priority_str).strip()
+                norm_type_str = re.sub(r"[-\s]+(?:priority|level)$", "", type_str).strip()
+
+                if norm_priority_str in TASK_PRIORITIES:
+                    priority_str = norm_priority_str
+                    args["priority"] = norm_priority_str
+
+                if norm_type_str in TASK_PRIORITIES and type_str not in TASK_TYPES:
+                    type_str = norm_type_str
+
+                if priority_str in TASK_TYPES and type_str in TASK_PRIORITIES:
+                    # Swapped arguments: type="high", priority="bug"
+                    logger.warning(
+                        "LLM generated swapped arguments: type=%r, priority=%r. Swapping to type=%r, priority=%r.",
+                        raw_type, raw_priority, priority_str, type_str,
+                    )
+                    args["type"] = priority_str
+                    args["priority"] = type_str
+                    type_str, priority_str = priority_str, type_str
+                elif priority_str in TASK_TYPES and (not type_str or type_str == "task"):
+                    # Priority contains a task type (e.g. priority="bug")
+                    logger.warning(
+                        "LLM generated task type in priority field: priority=%r. Moving to type.",
+                        raw_priority,
+                    )
+                    args["type"] = priority_str
+                    user_prio = extract_user_priority(request.message)
+                    if user_prio:
+                        norm_up = re.sub(r"[-\s]+(?:priority|level)$", "", user_prio.lower()).strip()
+                        if norm_up in TASK_PRIORITIES:
+                            args["priority"] = norm_up
+                        else:
+                            args["priority"] = "low"
+                    else:
+                        args["priority"] = "low"
+                    type_str = args["type"]
+                    priority_str = args["priority"]
+                elif type_str in TASK_PRIORITIES and (not priority_str or priority_str not in TASK_PRIORITIES):
+                    # Type contains a priority (e.g. type="high" or type="medium-priority")
+                    logger.warning(
+                        "LLM generated priority in type field: type=%r. Moving to priority.",
+                        raw_type,
+                    )
+                    args["priority"] = type_str
+                    user_type = extract_user_task_type(request.message)
+                    args["type"] = user_type if user_type else "task"
+                    type_str = args["type"]
+                    priority_str = args["priority"]
+                elif type_str in TASK_PRIORITIES:
+                    # Type contains a priority, but priority was already populated
+                    user_type = extract_user_task_type(request.message)
+                    args["type"] = user_type if user_type else "task"
+                    type_str = args["type"]
+
                 # Ensure user provides a meaningful name/title before task creation
                 raw_title = args.get("title")
                 title = str(raw_title).strip() if raw_title is not None else ""
-                generic_titles = {
-                    "task",
-                    "a task",
-                    "the task",
-                    "new task",
-                    "create task",
-                    "create a task",
-                    "untitled",
-                    "untitled task",
-                }
-                if raw_title is None or title == "" or title.lower() in generic_titles:
+                if is_user_title_omitted_or_invented(request.message, title):
                     return ChatResponseData(
                         conversation_id=conversation_id,
-                        message="Please provide a meaningful name for the task before creation.",
+                        message=FOLLOW_UP_TITLE_PROMPT,
                         action_state="NONE",
                     )
 
+                # Validate priority against allowed enum before generating pending action
+                user_priority = extract_user_priority(request.message)
+                if user_priority:
+                    norm_user_prio = re.sub(r"[-\s]+(?:priority|level)$", "", user_priority.lower()).strip()
+                    if norm_user_prio not in TASK_PRIORITIES and norm_user_prio not in TASK_TYPES:
+                        return ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"Priority '{user_priority}' is not supported. Allowed priorities are: {', '.join(TASK_PRIORITIES)}. Please specify an allowed priority.",
+                            action_state="NONE",
+                        )
+                else:
+                    norm_user_prio = None
+
+                curr_priority = args.get("priority")
+                if curr_priority:
+                    norm_curr_prio = re.sub(r"[-\s]+(?:priority|level)$", "", str(curr_priority).strip().lower()).strip()
+                    if norm_curr_prio in TASK_PRIORITIES:
+                        args["priority"] = norm_curr_prio
+                    else:
+                        return ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"Priority '{curr_priority}' is not supported. Allowed priorities are: {', '.join(TASK_PRIORITIES)}. Please specify an allowed priority.",
+                            action_state="NONE",
+                        )
+
+                # If priority is omitted from arguments, apply default 'low' (or user_priority if valid)
+                if not args.get("priority"):
+                    args["priority"] = norm_user_prio if (norm_user_prio and norm_user_prio in TASK_PRIORITIES) else "low"
+
+                # Validate type against allowed enum before generating pending action
+                user_type = extract_user_task_type(request.message)
+                if user_type:
+                    norm_ut = re.sub(r"[-\s]+(?:priority|level)$", "", user_type.lower()).strip()
+                    if norm_ut in TASK_PRIORITIES or "priority" in user_type.lower():
+                        user_type = None
+
+                if user_type and user_type.lower() not in TASK_TYPES and user_type.lower() not in TASK_PRIORITIES:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"Task type '{user_type}' is not supported. Allowed types are: {', '.join(TASK_TYPES)}. Please choose a valid type.",
+                        action_state="NONE",
+                    )
+
+                curr_type = args.get("type")
+                if curr_type:
+                    norm_ct = re.sub(r"[-\s]+(?:priority|level)$", "", str(curr_type).strip().lower()).strip()
+                    if norm_ct in TASK_PRIORITIES:
+                        curr_type = None
+                        args["type"] = None
+
+                if curr_type and str(curr_type).strip().lower() not in TASK_TYPES:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"Task type '{curr_type}' is not supported. Allowed types are: {', '.join(TASK_TYPES)}. Please choose a valid type.",
+                        action_state="NONE",
+                    )
+                if not curr_type or str(curr_type).strip().lower() in ("", "none", "null", "undefined"):
+                    args["type"] = user_type.lower() if (user_type and user_type.lower() in TASK_TYPES) else "task"
+
+                # Validate due_date before generating pending action
+                user_due_date_str = extract_user_due_date(request.message)
+                raw_due = args.get("due_date")
+
+                target_due_str = None
+                if raw_due is not None and str(raw_due).strip().lower() not in ("", "none", "null", "undefined"):
+                    target_due_str = str(raw_due).strip()
+                elif user_due_date_str is not None:
+                    target_due_str = user_due_date_str
+
+                if target_due_str is not None:
+                    parsed_dt, is_valid = parse_due_date(target_due_str)
+                    if not is_valid:
+                        return ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"The specified due date '{target_due_str}' is invalid. Please provide a valid date (e.g. YYYY-MM-DD).",
+                            action_state="NONE",
+                        )
+                    if parsed_dt is not None and is_past_due_date(parsed_dt):
+                        return ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"The specified due date '{target_due_str}' is in the past. Past due dates are not permitted. Please provide a valid date in the future.",
+                            action_state="NONE",
+                        )
+                    args["due_date"] = parsed_dt.isoformat()
+                else:
+                    args["due_date"] = None
+
+            logger.info("Calling %s with validated tool arguments: %s", tool_name, args)
             tool_result = await self.executor.execute_or_prepare(
                 tool_name,
                 args,
@@ -499,7 +904,7 @@ class AIOrchestrationService:
                 )
 
                 confirmation_msg = (
-                    f"I've prepared a {p_task.priority}-priority {p_task.type} task "
+                    f"I've prepared the {p_task.priority}-priority {p_task.type} "
                     f"'{p_task.title}' for project '{p_task.project_name or p_task.project_id}'. "
                     f"Please confirm to create it."
                 )
@@ -519,6 +924,37 @@ class AIOrchestrationService:
                 )
 
             elif tool_result.status == ToolExecutionStatus.VALIDATION_FAILURE:
+                err_msg = (tool_result.error_message or "").lower()
+                if "invalid argument 'project_id'" in err_msg or "project_id" in err_msg:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message="Please specify the project where you would like to create this task.",
+                        action_state="NONE",
+                    )
+                if "past" in err_msg:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message="The specified due date is in the past. Past due dates are not permitted. Please provide a valid date in the future.",
+                        action_state="NONE",
+                    )
+                if "due_date" in err_msg or "due date" in err_msg:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message="The specified due date is invalid. Please provide a valid date (e.g. YYYY-MM-DD).",
+                        action_state="NONE",
+                    )
+                if "invalid argument 'priority'" in err_msg or "priority '" in err_msg:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"The specified priority is not supported. Allowed priorities are: {', '.join(TASK_PRIORITIES)}. Please specify an allowed priority.",
+                        action_state="NONE",
+                    )
+                if "invalid argument 'type'" in err_msg or "task type '" in err_msg:
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"The specified task type is not supported. Allowed types are: {', '.join(TASK_TYPES)}. Please choose a valid type.",
+                        action_state="NONE",
+                    )
                 raise TaskServiceError(
                     400,
                     "VALIDATION_ERROR",

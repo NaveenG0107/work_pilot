@@ -1532,7 +1532,19 @@ class UserStoryService:
             UserStory.deleted_at.is_(None),
         ]
 
-        if filter_.status:
+        if filter_.status_id:
+            sids = [s.strip() for s in filter_.status_id.split(",") if s.strip()]
+            if sids:
+                conditions.append(
+                    UserStory.status_id.in_(
+                        select(UserStoryStatus.id).where(
+                            UserStoryStatus.project_id == project_id,
+                            UserStoryStatus.id.in_(sids),
+                            UserStoryStatus.deleted_at.is_(None),
+                        )
+                    )
+                )
+        elif getattr(filter_, "status", None):
             conditions.append(
                 UserStory.status_id.in_(
                     select(UserStoryStatus.id).where(
