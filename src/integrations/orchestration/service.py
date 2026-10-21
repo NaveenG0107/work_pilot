@@ -94,41 +94,77 @@ def is_user_title_omitted_or_invented(user_message: str, candidate_title: str) -
     return False
 
 
+CONNECTING_WORDS = {
+    "and", "or", "but", "nor", "so", "yet", "with", "without", "has", "have", "had",
+    "set", "give", "giving", "given", "the", "a", "an", "this", "that", "these", "those",
+    "its", "their", "our", "your", "my", "his", "her", "no", "not", "at", "in", "on",
+    "by", "for", "from", "to", "as", "of", "also", "then", "plus", "is", "are", "was",
+    "were", "be", "been", "being", "add", "make", "create", "update", "assign", "new",
+    "some", "any", "all", "each", "every", "both", "either", "neither", "into", "onto",
+    "upon", "about", "after", "before", "between", "under", "over", "through", "during",
+    "level", "order",
+}
+
+
+def extract_all_user_priorities(user_message: str) -> list[str]:
+    """Extract all priorities explicitly specified by the user in natural language.
+
+    Returns a list of distinct normalized priority strings in the order they appear.
+    """
+    unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
+    found: list[str] = []
+
+    ALL_PRIORITY_CANDIDATES = {
+        "critical", "high", "medium", "low",
+        "urgent", "super_urgent", "blocker", "trivial", "minor", "major", "normal", "highest", "lowest", "immediate",
+    }
+
+    def _add(val: str):
+        norm = re.sub(r"[-\s]+(?:priority|level)$", "", val.strip().lower()).strip()
+        if norm and norm not in CONNECTING_WORDS and norm in ALL_PRIORITY_CANDIDATES and norm not in found:
+            found.append(norm)
+
+    # 1. Compound expressions: "priority low and high", "priority: low or high", "priority low, high"
+    m_compound = re.search(
+        r"\bpriority(?:\s+level)?\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)?\s*([a-zA-Z0-9_-]+)\s*(?:\band\b|\bor\b|,|\/)\s*([a-zA-Z0-9_-]+)\b",
+        unquoted,
+    )
+    if m_compound:
+        _add(m_compound.group(1))
+        _add(m_compound.group(2))
+
+    # 2. Check all "set (the) priority to <val>"
+    for m in re.finditer(r"\bset\s+(?:the\s+)?priority\s+(?:to\s+|as\s+)?([a-zA-Z0-9_-]+)\b", unquoted):
+        _add(m.group(1))
+
+    # 3. Check all "<val>-priority" or "<val> priority"
+    for m in re.finditer(r"\b([a-zA-Z0-9_-]+)[-\s]+priority\b", unquoted):
+        _add(m.group(1))
+
+    # 4. Check all "priority: <val>", "priority is <val>", "priority <val>"
+    for m in re.finditer(
+        r"\bpriority(?:\s+level)?\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)?(?:\s+(?:is|set|to|marked|as)\b)*\s*([a-zA-Z0-9_-]+)\b",
+        unquoted,
+    ):
+        _add(m.group(1))
+
+    # 5. Check direct priority keyword mentions in priority context
+    if "priority" in unquoted or "level" in unquoted:
+        for p in ("critical", "high", "medium", "low", "urgent", "super_urgent", "blocker", "trivial", "minor", "major", "normal", "highest", "lowest", "immediate"):
+            if re.search(rf"\b{re.escape(p)}\b", unquoted):
+                _add(p)
+    else:
+        for p in ("critical", "high", "medium", "low", "urgent", "super_urgent", "blocker", "trivial", "minor", "major", "normal", "highest", "lowest", "immediate"):
+            if re.search(rf"\b{re.escape(p)}[-\s]+(?:priority|level|task|bug|ticket|chore|story|item|issue)\b", unquoted) or re.search(rf"\b(?:is|marked|flagged|as)\s+{re.escape(p)}\b", unquoted):
+                _add(p)
+
+    return found
+
+
 def extract_user_priority(user_message: str) -> str | None:
     """Extract priority explicitly specified by the user in natural language, if any."""
-    # Remove quoted strings so titles like 'Urgent: Fix login' don't confuse priority extraction
-    unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
-
-    # 1. "<val>-priority" or "<val> priority" (e.g. "urgent priority", "high-priority", "high priority")
-    m3 = re.search(r"\b([a-zA-Z0-9_-]+)[-\s]+priority\b", unquoted)
-    if m3:
-        val = m3.group(1).strip()
-        if val not in {"the", "a", "an", "set", "give", "has", "no", "with", "at", "its", "their"}:
-            return re.sub(r"[-\s]+(?:priority|level)$", "", val).strip()
-
-    # 2. "set (the) priority to <val>"
-    m1 = re.search(r"\bset\s+(?:the\s+)?priority\s+to\s+([a-zA-Z0-9_-]+)\b", unquoted)
-    if m1:
-        return re.sub(r"[-\s]+(?:priority|level)$", "", m1.group(1).strip()).strip()
-
-    # 3. "priority: <val>", "priority is <val>", "priority = <val>", "priority <val>", "priority level <val>"
-    # Note: Avoid matching task types like "priority bug" or nouns like "priority task"
-    m2 = re.search(r"\bpriority\s*(?::|=|\bis\b|\bto\b|\bas\b|\blevel\b)?\s*([a-zA-Z0-9_-]+)\b", unquoted)
-    if m2:
-        val = m2.group(1).strip()
-        non_priorities = {
-            "to", "the", "a", "an", "of", "and", "in", "for", "is", "as", "level",
-            "bug", "feature", "task", "chore", "story", "ticket", "issue", "item",
-        }
-        if val not in non_priorities:
-            return re.sub(r"[-\s]+(?:priority|level)$", "", val).strip()
-
-    # 4. Check for direct allowed priority mentions in priority context
-    for p in ("critical", "high", "medium", "low"):
-        if re.search(rf"\b{p}\b", unquoted) and ("priority" in unquoted or "level" in unquoted):
-            return p
-
-    return None
+    priorities = extract_all_user_priorities(user_message)
+    return priorities[0] if priorities else None
 
 
 COMMON_UNSUPPORTED_TASK_TYPES = {
@@ -147,53 +183,65 @@ COMMON_UNSUPPORTED_TASK_TYPES = {
 }
 
 
-def extract_user_task_type(user_message: str) -> str | None:
-    """Extract task type explicitly specified by the user in natural language, if any."""
+def extract_all_user_task_types(user_message: str) -> list[str]:
+    """Extract all task types explicitly specified by the user in natural language."""
     unquoted = re.sub(r"['\"`“”‘’][^'\"`“”‘’]+['\"`“”‘’]", " ", user_message).lower()
+    unquoted_masked = re.sub(r"\bstory\s+(?:points?|pts?|sp)\b", " ", unquoted)
+    found: list[str] = []
+
+    ALL_TASK_TYPE_CANDIDATES = set(TASK_TYPES) | COMMON_UNSUPPORTED_TASK_TYPES
 
     def _is_priority_phrase(s: str) -> bool:
         norm = re.sub(r"[-\s]+(?:priority|level)$", "", s.strip()).strip()
         return norm in TASK_PRIORITIES or "priority" in s.lower() or "level" in s.lower()
 
-    # 1. "set (the) type to <val>"
-    m1 = re.search(r"\bset\s+(?:the\s+)?type\s+to\s+([a-zA-Z0-9_-]+)\b", unquoted)
-    if m1:
-        val = m1.group(1).strip()
-        if val not in {"the", "a", "an", "this", "to"} and not _is_priority_phrase(val):
-            return val
+    def _add(val: str):
+        norm = val.strip().lower()
+        if norm and norm not in CONNECTING_WORDS and not _is_priority_phrase(norm) and norm in ALL_TASK_TYPE_CANDIDATES and norm not in found:
+            found.append(norm)
 
-    # 2. "type: <val>", "type is <val>", "type = <val>", "type as <val>", "type to <val>", "type of <val>"
-    m2 = re.search(r"\btype\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)\s*([a-zA-Z0-9_-]+)\b", unquoted)
-    if m2:
-        val = m2.group(1).strip()
-        if val not in {"the", "a", "an", "to", "of", "and", "is", "as", "level"} and not _is_priority_phrase(val):
-            return val
+    # 1. Compound: "type bug and chore", "type: feature or bug"
+    m_compound = re.search(
+        r"\btype\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)?\s*([a-zA-Z0-9_-]+)\s*(?:\band\b|\bor\b|,|\/)\s*([a-zA-Z0-9_-]+)\b",
+        unquoted_masked,
+    )
+    if m_compound:
+        _add(m_compound.group(1))
+        _add(m_compound.group(2))
 
-    # 3. "<val> type" or "<val>-type" (e.g. "chore type", "epic type")
-    m3 = re.search(r"\b([a-zA-Z0-9_-]+)[-\s]+type\b", unquoted)
-    if m3:
-        val = m3.group(1).strip()
-        if val not in {"the", "a", "an", "set", "give", "has", "no", "with", "at", "its", "their", "task", "any", "what", "which", "this"} and not _is_priority_phrase(val):
-            return val
+    # 2. "set (the) type to <val>"
+    for m in re.finditer(r"\bset\s+(?:the\s+)?type\s+to\s+([a-zA-Z0-9_-]+)\b", unquoted_masked):
+        _add(m.group(1))
 
-    # 4. Check for known valid task types mentioned directly in the message
+    # 3. "type: <val>", "type is <val>", "type = <val>", "type as <val>", "type to <val>", "type of <val>"
+    for m in re.finditer(r"\btype\s*(?::|=|\bis\b|\bto\b|\bas\b|\bof\b)\s*([a-zA-Z0-9_-]+)\b", unquoted_masked):
+        _add(m.group(1))
+
+    # 4. "<val> type" or "<val>-type" (e.g. "chore type", "epic type")
+    for m in re.finditer(r"\b([a-zA-Z0-9_-]+)[-\s]+type\b", unquoted_masked):
+        val = m.group(1).strip()
+        if val != "task":
+            _add(val)
+
+    # 5. Check for known valid task types mentioned directly in the message
     for t in ("bug", "feature", "chore", "story"):
-        if re.search(rf"\b{t}\b", unquoted):
-            return t
+        if re.search(rf"\b{t}\b", unquoted_masked):
+            _add(t)
 
-    # 5. Check for common unsupported work item types mentioned directly
+    # 6. Check for common unsupported work item types mentioned directly
     for ut in sorted(COMMON_UNSUPPORTED_TASK_TYPES, key=len, reverse=True):
-        if re.search(rf"\b{re.escape(ut)}\b", unquoted):
-            return ut
+        if re.search(rf"\b{re.escape(ut)}\b", unquoted_masked):
+            _add(ut)
 
-    # 6. "create (a|an) <val> titled/in/for/with" or "create (a|an) <val> task"
-    m6 = re.search(r"\bcreate\s+(?:a|an)\s+([a-zA-Z0-9_-]+)\s+(?:task|ticket|item|titled|with|in|for)\b", unquoted)
-    if m6:
-        val = m6.group(1).strip()
-        if val not in {"new", "single", "quick", "simple", "high", "low", "medium", "critical", "the", "a", "an"} and not _is_priority_phrase(val):
-            return val
+    # Filter out generic 'task' if more specific types were found (e.g. 'bug task' -> 'bug')
+    specific_types = [t for t in found if t != "task"]
+    return specific_types if specific_types else found
 
-    return None
+
+def extract_user_task_type(user_message: str) -> str | None:
+    """Extract task type explicitly specified by the user in natural language, if any."""
+    types = extract_all_user_task_types(user_message)
+    return types[0] if types else None
 
 
 def extract_user_due_date(user_message: str) -> str | None:
@@ -770,6 +818,25 @@ class AIOrchestrationService:
                     return ChatResponseData(
                         conversation_id=conversation_id,
                         message=FOLLOW_UP_TITLE_PROMPT,
+                        action_state="NONE",
+                    )
+
+                # Conflict detection for repeated fields (priority, type) before generating task proposal
+                user_priorities = extract_all_user_priorities(request.message)
+                if len(user_priorities) > 1:
+                    p1, p2 = user_priorities[0], user_priorities[1]
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"I noticed a conflict between the priorities '{p1}' and '{p2}'. Which priority would you like to set for this task?",
+                        action_state="NONE",
+                    )
+
+                user_types_all = extract_all_user_task_types(request.message)
+                if len(user_types_all) > 1:
+                    t1, t2 = user_types_all[0], user_types_all[1]
+                    return ChatResponseData(
+                        conversation_id=conversation_id,
+                        message=f"I noticed a conflict between the task types '{t1}' and '{t2}'. Which task type would you like to use for this task?",
                         action_state="NONE",
                     )
 

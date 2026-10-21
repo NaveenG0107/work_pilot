@@ -1498,6 +1498,148 @@ async def test_past_due_date_prohibited_and_explains_without_pending_action(
     assert "in the past" in data3["message"].lower()
 
 
+@pytest.mark.anyio
+async def test_priority_extraction_does_not_misidentify_connecting_words_like_and(
+    client: AsyncClient, app_context: dict, reset_provider: MockLLMProvider
+):
+    """Verify that connecting words like 'and' preceding 'priority' are not misidentified
+
+    as field values, and that 'urgent' is extracted and rejected with a validation error.
+    """
+    project_id = app_context["project_a_id"]
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    # Case 1: "and priority urgent" in sentence
+    resp1 = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a task titled 'Fix critical login crash' in the current project and priority urgent",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp1.status_code == 200
+    data1 = resp1.json()["data"]
+    assert data1["action_state"] == "NONE"
+    assert data1["pending_action"] is None
+    # Must identify 'urgent' as the unsupported priority, NOT 'and'
+    assert "priority 'urgent' is not supported" in data1["message"].lower()
+    assert "'and'" not in data1["message"]
+
+    # Case 2: "with type bug and priority urgent"
+    resp2 = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a task titled 'Fix checkout crash' with type bug and priority urgent",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp2.status_code == 200
+    data2 = resp2.json()["data"]
+    assert data2["action_state"] == "NONE"
+    assert data2["pending_action"] is None
+    assert "priority 'urgent' is not supported" in data2["message"].lower()
+    assert "'and'" not in data2["message"]
+
+    # Case 3: "create an urgent task titled ..."
+    resp3 = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create an urgent task titled 'Fix payment gateway error' in the current project",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp3.status_code == 200
+    data3 = resp3.json()["data"]
+    assert data3["action_state"] == "NONE"
+    assert data3["pending_action"] is None
+    assert "priority 'urgent' is not supported" in data3["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_conflicting_repeated_priorities_detected_without_pending_action(
+    client: AsyncClient, app_context: dict, reset_provider: MockLLMProvider
+):
+    """Verify that specifying conflicting priorities (e.g. low and high) is detected
+
+    as a conflict, prompts the user to clarify, and prevents creating a pending action.
+    """
+    project_id = app_context["project_a_id"]
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    # Case 1: "Create a low-priority task titled ... with high priority"
+    resp1 = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a low-priority task titled 'Resolve login failure' in the current project with high priority",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp1.status_code == 200
+    data1 = resp1.json()["data"]
+    assert data1["action_state"] == "NONE"
+    assert data1["pending_action"] is None
+    msg1 = data1["message"].lower()
+    assert "conflict" in msg1
+    assert "low" in msg1
+    assert "high" in msg1
+    assert "which priority" in msg1
+
+    # Case 2: "priority low and high"
+    resp2 = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a task titled 'Migrate database schema' in the current project with priority low and high",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp2.status_code == 200
+    data2 = resp2.json()["data"]
+    assert data2["action_state"] == "NONE"
+    assert data2["pending_action"] is None
+    msg2 = data2["message"].lower()
+    assert "conflict" in msg2
+    assert "low" in msg2
+    assert "high" in msg2
+    assert "which priority" in msg2
+
+
+@pytest.mark.anyio
+async def test_conflicting_repeated_task_types_detected_without_pending_action(
+    client: AsyncClient, app_context: dict, reset_provider: MockLLMProvider
+):
+    """Verify that specifying conflicting task types (e.g. bug and feature) is detected
+
+    as a conflict, prompts the user to clarify, and prevents creating a pending action.
+    """
+    project_id = app_context["project_a_id"]
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a bug task titled 'Improve dashboard layout' in the current project with type feature",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["action_state"] == "NONE"
+    assert data["pending_action"] is None
+    msg = data["message"].lower()
+    assert "conflict" in msg
+    assert "bug" in msg
+    assert "feature" in msg
+    assert "which task type" in msg
+
+
+
+
 
 
 
