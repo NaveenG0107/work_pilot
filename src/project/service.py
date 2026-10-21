@@ -2,7 +2,7 @@ import logging
 import math
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, update
@@ -1055,6 +1055,7 @@ class ProjectService:
                     cache_key = f"wp:project:detail:{resolved_project_id}:{ver}"
                     cached = await cache_get_json(self.redis, cache_key)
                     if cached:
+                        await self._log_project_view(user_id, organization_id, resolved_project_id, project.name)
                         return ProjectDetail.model_validate(cached)
             except Exception as exc:
                 logger.warning("Redis cache read in detail failed: %s", exc)
@@ -1175,6 +1176,7 @@ class ProjectService:
             except Exception as exc:
                 logger.warning("Redis cache write in detail failed: %s", exc)
 
+        await self._log_project_view(user_id, organization_id, resolved_project_id, project.name)
         return detail
 
     async def delete(self, project_id: str, user_id: str, organization_id: str):
@@ -1690,11 +1692,78 @@ class ProjectService:
         )
 
     def _audit(self, user_id: str, org_id: str, project_id: str, action: str,
-               resource_type: str, resource_id: str, details: str):
+               resource_type: str, resource_id: str, details: str,
+               audit_type: str = AuditLogType.ACTIVITY):
         self.db.add(AuditLog(user_id=user_id, organization_id=org_id,
             project_id=project_id, action=action, resource_type=resource_type,
-            resource_id=resource_id, details=details, type="activity",
+            resource_id=resource_id, details=details, type=audit_type,
             created_at=datetime.now(timezone.utc)))
+
+    async def _log_project_view(
+        self,
+        user_id: str,
+        organization_id: str,
+        project_id: str,
+        project_name: str,
+        cooldown_seconds: int = 300,
+    ) -> None:
+        try:
+            # Deduplicate views per user per project within cooldown window (5 minutes)
+            if self.redis is not None:
+                try:
+                    dedup_key = f"wp:audit:view:project:{user_id}:{project_id}"
+                    acquired = await self.redis.set(dedup_key, "1", ex=cooldown_seconds, nx=True)
+                    if not acquired:
+                        return
+                except Exception as rex:
+                    logger.debug("Redis view deduplication check error: %s", rex)
+                    cutoff = datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+                    recent = (
+                        await self.db.execute(
+                            select(AuditLog.id).where(
+                                AuditLog.user_id == user_id,
+                                AuditLog.project_id == project_id,
+                                AuditLog.resource_type == "project",
+                                AuditLog.action == "viewed",
+                                AuditLog.created_at >= cutoff,
+                            ).limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if recent:
+                        return
+            else:
+                cutoff = datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+                recent = (
+                    await self.db.execute(
+                        select(AuditLog.id).where(
+                            AuditLog.user_id == user_id,
+                            AuditLog.project_id == project_id,
+                            AuditLog.resource_type == "project",
+                            AuditLog.action == "viewed",
+                            AuditLog.created_at >= cutoff,
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if recent:
+                    return
+
+            actor = (
+                await self.db.execute(
+                    select(User.username).where(User.id == user_id)
+                )
+            ).scalar_one_or_none() or "user"
+            await AuditService(self.db).create_audit_log(
+                user_id=user_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                action="viewed",
+                resource_type="project",
+                resource_id=project_id,
+                details=f"The project '{project_name}' was viewed by {actor}",
+                audit_type=AuditLogType.VIEW,
+            )
+        except Exception as exc:
+            logger.warning("Failed to log project view audit: %s", exc)
 
     async def _commit(self) -> None:
         try:
