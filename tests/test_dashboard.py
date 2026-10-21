@@ -65,3 +65,29 @@ async def test_dashboard_unauthorized(client: AsyncClient, app_context: dict):
     project_id = app_context["project_a_id"]
     resp = await client.get(f"/api/v1/{project_id}/overview")
     assert resp.status_code == 401
+
+
+async def test_dashboard_weekly_progress_inclusive_date_range(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    project_id = app_context["project_a_id"]
+
+    # 1. Single day test (start_date == end_date should yield 1 day)
+    resp_single = await client.get(
+        f"/api/v1/{project_id}/weekly-progress?start_date=2026-10-21&end_date=2026-10-21",
+        headers=headers,
+    )
+    assert resp_single.status_code == 200
+    body_single = resp_single.json()
+    assert body_single.get("success") is True
+    assert len(body_single["data"]) == 1
+
+    # 2. Date range test (7 days inclusive)
+    resp_range = await client.get(
+        f"/api/v1/{project_id}/weekly-progress?start_date=2026-10-15&end_date=2026-10-21",
+        headers=headers,
+    )
+    assert resp_range.status_code == 200
+    body_range = resp_range.json()
+    assert body_range.get("success") is True
+    assert len(body_range["data"]) == 7
+

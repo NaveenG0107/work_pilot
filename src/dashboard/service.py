@@ -52,6 +52,7 @@ class DashboardService:
             .where(
                 ProjectMember.project_id == project_id,
                 ProjectMember.user_id == user.id,
+                ProjectMember.deleted_at.is_(None),
             )
             .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
@@ -671,9 +672,9 @@ class DashboardService:
                 detail="Start date must be before end date",
             )
 
-        # 5. Build datetime boundaries in UTC
+        # 5. Build datetime boundaries in UTC (inclusive of end_date full day)
         start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-        end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=timezone.utc)
 
         # 6. Fetch tasks in date range
         tasks_stmt = (
@@ -704,7 +705,7 @@ class DashboardService:
         # 8. Construct day-by-day response list
         result: List[WeeklyProgress] = []
         curr_date = start_date
-        while curr_date < end_date:
+        while curr_date <= end_date:
             d_str = curr_date.strftime("%Y-%m-%d")
             result.append(
                 WeeklyProgress(

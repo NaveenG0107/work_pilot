@@ -61,6 +61,7 @@ class CustomStatusService:
             .where(
                 ProjectMember.project_id == project_id,
                 ProjectMember.user_id == user.id,
+                ProjectMember.deleted_at.is_(None),
             )
             .options(joinedload(ProjectMember.role).selectinload(Role.permissions))
         )
