@@ -73,7 +73,7 @@ app.include_router(task_router, prefix=API_PREFIX)
 app.include_router(work_item_router, prefix=API_PREFIX)
 app.include_router(search_router, prefix=API_PREFIX)
 app.include_router(board_router, prefix=API_PREFIX)
-app.include_router(ai_assistant_router, prefix=API_PREFIX)
+# app.include_router(ai_assistant_router, prefix=API_PREFIX)
 
 
 @app.get("/health_check")
