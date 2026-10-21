@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, ForeignKey, String, Text, DateTime, Integer, Index, UniqueConstraint, event, text, literal
+from sqlalchemy import Column, ForeignKey, String, Text, DateTime, Integer, Index, UniqueConstraint, event, text, literal, func
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.dialects.postgresql import UUID
@@ -28,7 +28,7 @@ class Project(Base):
     organization_id = Column(UUID(as_uuid=False), ForeignKey("organizations.id", name="fk_projects_organization"), nullable=False)
     name = Column(String(150), nullable=False)
     slug = Column(String(150), nullable=True)
-    key = Column(String(20), nullable=True)
+    key = Column(String(20), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="active", server_default="active")
     created_by = Column(UUID(as_uuid=False), ForeignKey("users.id", name="fk_projects_creator"), nullable=False)
@@ -56,7 +56,7 @@ class ProjectKeyHistory(Base):
     project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE", name="fk_project_key_history_project"), nullable=False)
     organization_id = Column(UUID(as_uuid=False), ForeignKey("organizations.id", name="fk_project_key_history_org"), nullable=False)
     key = Column(String(20), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     changed_by = Column(UUID(as_uuid=False), ForeignKey("users.id", name="fk_project_key_history_user"), nullable=True)
 
     project = relationship("Project", back_populates="key_history")

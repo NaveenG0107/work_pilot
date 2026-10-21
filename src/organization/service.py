@@ -1148,17 +1148,27 @@ class OrganizationService:
     async def _is_role_assigned(self, role_id: UUID) -> bool:
         role_id_str = str(role_id)
         user_result = await self.db.execute(
-            select(User.id).where(User.role_id == role_id_str).limit(1)
+            select(User.id).where(
+                User.role_id == role_id_str,
+                User.deleted_at.is_(None),
+            ).limit(1)
         )
         if user_result.first() is not None:
             return True
         member_result = await self.db.execute(
-            select(ProjectMember.id).where(ProjectMember.role_id == role_id_str).limit(1)
+            select(ProjectMember.id).where(
+                ProjectMember.role_id == role_id_str,
+                ProjectMember.deleted_at.is_(None),
+            ).limit(1)
         )
         if member_result.first() is not None:
             return True
         invite_result = await self.db.execute(
-            select(OrganizationInvitation.id).where(OrganizationInvitation.role_id == role_id_str).limit(1)
+            select(OrganizationInvitation.id).where(
+                OrganizationInvitation.role_id == role_id_str,
+                OrganizationInvitation.deleted_at.is_(None),
+                OrganizationInvitation.status == InvitationStatus.PENDING,
+            ).limit(1)
         )
         if invite_result.first() is not None:
             return True
@@ -1168,7 +1178,7 @@ class OrganizationService:
         name = req.name.strip()
         if not name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role name is required")
-        if name.lower() in ("super_admin", "org_admin"):
+        if name.lower() in ("super_admin", "org_admin", "member"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Cannot create a role with name '{name}'",
@@ -1201,8 +1211,11 @@ class OrganizationService:
         result = await self.db.execute(
             select(Role)
             .where(
-                (Role.organization_id == str(org_id))
-                | (Role.organization_id.is_(None) & (Role.is_system.is_(True)))
+                (
+                    (Role.organization_id == str(org_id))
+                    | (Role.organization_id.is_(None) & (Role.is_system.is_(True)))
+                ),
+                Role.deleted_at.is_(None),
             )
             .options(selectinload(Role.permissions))
         )
@@ -1210,20 +1223,20 @@ class OrganizationService:
         return [
             self._map_role_response(r)
             for r in rows
-            if r.name not in ("super_admin", "org_admin")
+            if r.name not in ("super_admin", "org_admin", "member")
         ]
 
     async def get_role_by_id(self, org_id: UUID, role_id: UUID) -> RoleResponse:
         role = await self._get_role_by_id_raw(role_id)
         if role.organization_id is not None and role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this role")
-        if role.name in ("super_admin", "org_admin"):
+        if role.name in ("super_admin", "org_admin", "member"):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this role")
         return self._map_role_response(role)
 
     async def update_role(self, org_id: UUID, role_id: UUID, req: UpdateRoleRequest) -> RoleResponse:
         role = await self._get_role_by_id_raw(role_id)
-        if role.name in ("super_admin", "org_admin"):
+        if role.name in ("super_admin", "org_admin", "member"):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to modify this role")
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to modify this role")
@@ -1232,7 +1245,7 @@ class OrganizationService:
             name = req.name.strip()
             if not name:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role name cannot be empty")
-            if name.lower() in ("super_admin", "org_admin"):
+            if name.lower() in ("super_admin", "org_admin", "member"):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Cannot rename a role to '{name}'",
@@ -1258,7 +1271,7 @@ class OrganizationService:
 
     async def delete_role(self, org_id: UUID, role_id: UUID) -> None:
         role = await self._get_role_by_id_raw(role_id)
-        if role.name in ("super_admin", "org_admin") or role.is_system:
+        if role.name in ("super_admin", "org_admin", "member") or role.is_system:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System roles cannot be deleted")
         if role.organization_id is None or role.organization_id != str(org_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to delete this role")
@@ -1268,12 +1281,30 @@ class OrganizationService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Role cannot be deleted because it is currently assigned to users, project members, or invitations",
             )
+        role_id_str = str(role_id)
+        # Clear foreign key references from inactive / soft-deleted records before deleting
+        await self.db.execute(
+            update(ProjectMember)
+            .where(ProjectMember.role_id == role_id_str)
+            .values(role_id=None)
+        )
+        await self.db.execute(
+            update(OrganizationInvitation)
+            .where(OrganizationInvitation.role_id == role_id_str)
+            .values(role_id=None)
+        )
+        await self.db.execute(
+            update(User)
+            .where(User.role_id == role_id_str)
+            .values(role_id=None)
+        )
         # Remove the role-permission association rows first (FK constraint),
         # then delete the role itself.
         await self.db.execute(
-            delete(RolePermission).where(RolePermission.role_id == str(role_id))
+            delete(RolePermission).where(RolePermission.role_id == role_id_str)
         )
         await self.db.execute(
-            delete(Role).where(Role.id == str(role_id))
+            delete(Role).where(Role.id == role_id_str)
         )
         await self.db.commit()
+
