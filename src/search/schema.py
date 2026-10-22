@@ -42,7 +42,22 @@ class MemberSearchResult(SearchSchema):
     color: str = ""
 
 
-class GlobalSearchResponse(SearchSchema):
+class SearchMeta(SearchSchema):
+    page: int = 1
+    page_size: int = 10
+    has_next: bool = False
+    total: int = 0
+    total_tasks: int = 0
+    total_projects: int = 0
+    total_members: int = 0
+    total_sprints: int = 0
+    total_user_stories: int = 0
+
+
+SearchPaginationMeta = SearchMeta
+
+
+class GlobalSearchData(SearchSchema):
     tasks: list[SearchResult] = Field(default_factory=list)
     user_stories: list[SearchResult] = Field(default_factory=list)
     projects: list[SearchResult] = Field(default_factory=list)
@@ -50,11 +65,20 @@ class GlobalSearchResponse(SearchSchema):
     sprints: list[SearchResult] = Field(default_factory=list)
 
 
+GlobalSearchResponse = GlobalSearchData
+
+
+class GlobalSearchResult(SearchSchema):
+    data: GlobalSearchData = Field(default_factory=GlobalSearchData)
+    meta: SearchMeta = Field(default_factory=SearchMeta)
+
+
 class SearchSuccessResponse(SearchSchema):
     success: bool
     status_code: int
     message: str
-    data: GlobalSearchResponse
+    data: GlobalSearchData
+    meta: SearchMeta = Field(default_factory=SearchMeta)
 
 
 class ErrorDetail(SearchSchema):

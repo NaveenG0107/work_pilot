@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------
     frontend_dashboard_url: str = Field(default="http://localhost:3000", env="FRONTEND_DASHBOARD_URL")
     backend_api_url: str = Field(default="http://localhost:8000", env="BACKEND_API_URL")
-    cors_origins: str = Field(default="*", env="CORS_ORIGINS")
+    cors_origins: str = Field(default="", env="CORS_ORIGINS")
 
     # -----------------------------------------------------------------
     # Cookie
