@@ -97,7 +97,7 @@ class UserStoryStatusService:
             )
         )).scalars().first()
 
-        if member is not None or role_name.lower() == "org_admin":
+        if member is not None or (role_name.lower() == "org_admin" and str(project.organization_id) == str(user.organization_id)):
             return user
 
         logger.warning("User user_id=%s forbidden from project_id=%s", user_id, project.id)

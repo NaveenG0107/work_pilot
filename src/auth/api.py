@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from typing import Any
 import uuid
 
 from fastapi import (
@@ -36,7 +37,7 @@ from src.auth.schema import (
     UpdateUserRequest,
     VerifyEmailRequest,
 )
-from src.auth.deps import get_current_user, is_mobile_client
+from src.auth.deps import _extract_token, get_current_user, is_mobile_client
 from src.auth.service import AuthService
 from src.database import get_db, get_redis
 from src.utils.core import (
@@ -49,7 +50,9 @@ from src.utils.core import (
     string_to_bool,
     success_response,
     UserProfileFromModel,
+    verify_jwt,
 )
+from src.utils.security import blacklist_token, rate_limit
 from src.utils.setting import get_settings
 from src.utils.storage import (
     StorageConfigurationError,
@@ -280,7 +283,11 @@ async def signup(
 # Signin
 # ============================================================
 
-@router.post("/signin", response_model=AuthTokenSuccessResponse)
+@router.post(
+    "/signin",
+    response_model=AuthTokenSuccessResponse,
+    dependencies=[Depends(rate_limit(max_requests=10, window_seconds=60, scope="signin"))],
+)
 async def signin(
     req: SignInRequest,
     response: Response,
@@ -314,8 +321,8 @@ async def signin(
         settings = get_settings()
 
         secure, _ = string_to_bool(settings.cookie_secure or "")
-        access_expires = int(settings.jwt_expiry or 900)
-        refresh_expires = int(settings.refresh_token_expiry or 604800)
+        access_expires = 0 if platform == "mobile" else settings.jwt_expiry
+        refresh_expires = settings.refresh_token_expiry
 
         set_access_token_cookie(
             response,
@@ -379,8 +386,8 @@ async def refresh_token(
         settings = get_settings()
 
         secure, _ = string_to_bool(settings.cookie_secure or "")
-        access_expires = int(settings.jwt_expiry or 900)
-        refresh_expires = int(settings.refresh_token_expiry or 604800)
+        access_expires = 0 if platform == "mobile" else settings.jwt_expiry
+        refresh_expires = settings.refresh_token_expiry
 
         set_access_token_cookie(
             response,
@@ -415,8 +422,14 @@ async def refresh_token(
 # ============================================================
 
 @router.post("/logout")
-async def logout(response: Response, current_user: dict = Depends(get_current_user), service: AuthService = Depends(get_auth_service)):
-    """Revoke refresh tokens and log out the user."""
+async def logout(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
+    service: AuthService = Depends(get_auth_service),
+    redis: Any = Depends(get_redis),
+):
+    """Revoke refresh tokens, blacklist the current access token, and log out the user."""
 
     try:
         user_id = current_user.get("user_id")
@@ -436,6 +449,16 @@ async def logout(response: Response, current_user: dict = Depends(get_current_us
                 "Invalid user ID",
                 status_code=401,
             )
+
+        # Blacklist the current access token in Redis
+        token = _extract_token(request, None)
+        if not token and "authorization" in request.headers:
+            auth_hdr = request.headers.get("authorization", "")
+            if auth_hdr.lower().startswith("bearer "):
+                token = auth_hdr[7:].strip()
+        if token:
+            claims, _ = verify_jwt(token)
+            await blacklist_token(redis, token, claims)
 
         result, err = await service.logout(user_uuid)
 
@@ -512,7 +535,14 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
 # Password Reset Request
 # ============================================================
 
-@router.post("/password-reset/request")
+@router.post(
+    "/password-reset/request",
+    dependencies=[Depends(rate_limit(max_requests=5, window_seconds=60, scope="forgot_password"))],
+)
+@router.post(
+    "/forgot-password",
+    dependencies=[Depends(rate_limit(max_requests=5, window_seconds=60, scope="forgot_password"))],
+)
 async def password_reset_request(req: PasswordResetRequest, service: AuthService = Depends(get_auth_service)):
     """Send a password reset OTP."""
 
@@ -539,7 +569,14 @@ async def password_reset_request(req: PasswordResetRequest, service: AuthService
 # Password Reset Confirm
 # ============================================================
 
-@router.post("/password-reset/confirm")
+@router.post(
+    "/password-reset/confirm",
+    dependencies=[Depends(rate_limit(max_requests=10, window_seconds=60, scope="reset_password"))],
+)
+@router.post(
+    "/reset-password",
+    dependencies=[Depends(rate_limit(max_requests=10, window_seconds=60, scope="reset_password"))],
+)
 async def reset_password(req: ResetPasswordRequest, service: AuthService = Depends(get_auth_service)):
     """Validate reset OTP and update the user's password."""
 
@@ -604,8 +641,8 @@ async def verify_email(
         settings = get_settings()
 
         secure, _ = string_to_bool(settings.cookie_secure or "")
-        access_expires = int(settings.jwt_expiry or 900)
-        refresh_expires = int(settings.refresh_token_expiry or 604800)
+        access_expires = 0 if platform == "mobile" else settings.jwt_expiry
+        refresh_expires = settings.refresh_token_expiry
 
         set_access_token_cookie(
             response,

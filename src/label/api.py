@@ -7,7 +7,7 @@ from src.auth.deps import get_current_user
 from src.database import get_db
 from src.label.schemas import CreateLabelRequest, UpdateLabelRequest
 from src.label.service import LabelService
-from src.response import error, success
+from src.utils.response import error, success
 
 router = APIRouter(prefix="/projects", tags=["Label"])
 

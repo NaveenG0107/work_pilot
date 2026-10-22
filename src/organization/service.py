@@ -23,7 +23,6 @@ from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
 from src.audit.models import AuditLog
 from src.auth.models import RefreshToken, User
-from src.utils import email as email_service
 from src.organization.models import (
     InvitationStatus,
     Organization,
@@ -380,8 +379,8 @@ class OrganizationService:
         hashed, _ = bcrypt_hash(refresh_value)
 
         settings = get_settings()
-        expires_in = int(settings.jwt_expiry or 900)
-        refresh_expires_in = int(settings.refresh_token_expiry or 604800)
+        expires_in = settings.jwt_expiry
+        refresh_expires_in = settings.refresh_token_expiry
 
         now = datetime.now(timezone.utc)
 

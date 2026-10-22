@@ -105,12 +105,22 @@ class ChatResponseData(BaseModel):
 class ActionConfirmationRequest(BaseModel):
     """Payload to confirm or reject a pending action."""
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     confirmed: bool = Field(
         default=True,
         description="Set to true to execute the pending task creation, false to cancel.",
     )
+    confirm: bool | None = Field(
+        default=None,
+        description="Alias for confirmed (pass true to confirm, false to cancel).",
+    )
+
+    @property
+    def is_confirmed(self) -> bool:
+        if self.confirm is not None:
+            return self.confirm
+        return self.confirmed
 
 
 class ActionConfirmationResponseData(BaseModel):

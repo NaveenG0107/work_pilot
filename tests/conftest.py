@@ -19,6 +19,10 @@ from src.custom_status.models import CustomStatus
 from src.label.models import Label
 from src.comments.models import Comments
 from src.utils.core import create_jwt
+from src.integrations.orchestration.api import router as ai_assistant_router
+
+if not any(getattr(r, "path", "").startswith("/api/v1/ai-assistant") for r in app.routes):
+    app.include_router(ai_assistant_router, prefix="/api/v1")
 
 
 @pytest.fixture(scope="session")

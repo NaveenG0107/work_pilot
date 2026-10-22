@@ -41,7 +41,7 @@ from src.organization.schemas import (
 )
 from src.organization.service import OrganizationService
 from src.public.models import Country
-from src.response import error, success
+from src.utils.response import error, success
 
 router = APIRouter(tags=["Organizations"])
 

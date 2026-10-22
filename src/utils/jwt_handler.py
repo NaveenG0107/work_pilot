@@ -6,20 +6,34 @@ from uuid import UUID, uuid4
 import jwt
 from fastapi import HTTPException, status
 
-from src.config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, JWT_ALGORITHM, JWT_REFRESH_TOKEN_EXPIRE_DAYS, JWT_SECRET_KEY
+from src.utils.setting import get_settings
 
 
-# Platform-specific token lifetimes
-PLATFORM_TOKEN_LIFETIMES = {
-    "web": {
-        "access_expires": timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
-        "refresh_expires": timedelta(days=JWT_REFRESH_TOKEN_EXPIRE_DAYS),
-    },
-    "mobile": {
-        "access_expires": timedelta(days=7),
-        "refresh_expires": timedelta(days=30),
-    },
-}
+def get_platform_lifetimes() -> dict[str, dict[str, Optional[timedelta]]]:
+    """Dynamically get token lifetimes based on environment configuration."""
+    settings = get_settings()
+    return {
+        "web": {
+            "access_expires": timedelta(seconds=settings.jwt_expiry),
+            "refresh_expires": timedelta(seconds=settings.refresh_token_expiry),
+        },
+        "mobile": {
+            "access_expires": None,  # Mobile tokens omit exp claim
+            "refresh_expires": None,  # Mobile tokens omit exp claim
+        },
+    }
+
+
+# Backwards compatibility export
+class _PlatformTokenLifetimesProxy(dict):
+    def __getitem__(self, key):
+        return get_platform_lifetimes()[key]
+
+    def get(self, key, default=None):
+        return get_platform_lifetimes().get(key, default)
+
+
+PLATFORM_TOKEN_LIFETIMES = _PlatformTokenLifetimesProxy()
 
 
 def create_access_token(
@@ -29,12 +43,15 @@ def create_access_token(
     organization_id: Optional[str] = None,
     platform: str = "web",
 ) -> str:
-    """Replaces GenerateAccessToken in generate.go"""
+    """Generate JWT access token.
+    For web clients, sets an expiration timestamp ('exp') based on environment settings.
+    For mobile clients, omits the 'exp' claim per mobile requirements.
+    """
+    settings = get_settings()
     now = datetime.now(timezone.utc)
-    expire = now + PLATFORM_TOKEN_LIFETIMES.get(platform, PLATFORM_TOKEN_LIFETIMES["web"])["access_expires"]
-
-    payload = {
+    payload: dict[str, Any] = {
         "sub": user_id,
+        "user_id": user_id,
         "email": email,
         "role": role,
         "organization_id": organization_id,
@@ -42,10 +59,15 @@ def create_access_token(
         "type": "access",
         "jti": str(uuid4()),
         "iat": now,
-        "exp": expire,
     }
 
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    if platform != "mobile":
+        lifetimes = get_platform_lifetimes().get(platform, get_platform_lifetimes()["web"])
+        lifetime = lifetimes.get("access_expires")
+        if lifetime:
+            payload["exp"] = now + lifetime
+
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def create_refresh_token(
@@ -55,12 +77,15 @@ def create_refresh_token(
     organization_id: Optional[str] = None,
     platform: str = "web",
 ) -> str:
-    """Replaces GenerateRefreshToken in generate.go"""
+    """Generate JWT refresh token.
+    For web clients, sets an expiration timestamp ('exp') based on environment settings.
+    For mobile clients, omits the 'exp' claim per mobile requirements.
+    """
+    settings = get_settings()
     now = datetime.now(timezone.utc)
-    expire = now + PLATFORM_TOKEN_LIFETIMES.get(platform, PLATFORM_TOKEN_LIFETIMES["web"])["refresh_expires"]
-
-    payload = {
+    payload: dict[str, Any] = {
         "sub": user_id,
+        "user_id": user_id,
         "email": email,
         "role": role,
         "organization_id": organization_id,
@@ -68,16 +93,25 @@ def create_refresh_token(
         "type": "refresh",
         "jti": str(uuid4()),
         "iat": now,
-        "exp": expire,
     }
 
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    if platform != "mobile":
+        lifetimes = get_platform_lifetimes().get(platform, get_platform_lifetimes()["web"])
+        lifetime = lifetimes.get("refresh_expires")
+        if lifetime:
+            payload["exp"] = now + lifetime
+
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict[str, Any]:
-    """Decode and validate JWT (replaces ValidateToken in validate.go)"""
+    """Decode and validate JWT.
+    PyJWT validates 'exp' if present in claims. For tokens without 'exp' (mobile),
+    it validates signature and other claims without requiring 'exp'.
+    """
+    settings = get_settings()
     try:
-        return jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

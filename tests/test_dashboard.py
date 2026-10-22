@@ -45,14 +45,9 @@ async def test_dashboard_full_data_success(client: AsyncClient, app_context: dic
     assert body.get("success") is True
 
 
-@pytest.mark.xfail(
-    reason="Known Bug: Missing project tenant-isolation check in DashboardService.get_overview; cross-org user receives 200 instead of 403/404",
-    strict=False,
-)
 async def test_dashboard_tenant_isolation(client: AsyncClient, app_context: dict):
     """
     Expected behavior: Org B user requesting Org A's dashboard overview should be rejected with 403 Forbidden or 404 Not Found.
-    Actual behavior: Currently returns 200 OK because DashboardService does not verify Project.organization_id.
     """
     headers_org_b = {"Authorization": f"Bearer {app_context['token_org_b_admin']}"}
     project_a_id = app_context["project_a_id"]

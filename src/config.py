@@ -17,20 +17,14 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+from src.utils.setting import get_settings
 
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(
-    os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30")
-)
+_settings = get_settings()
 
-JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(
-    os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7")
-)
-
-
-if not JWT_SECRET_KEY:
-    raise ValueError("JWT_SECRET_KEY is not configured")
+JWT_SECRET_KEY = _settings.jwt_secret_key
+JWT_ALGORITHM = _settings.jwt_algorithm
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = _settings.jwt_access_token_expire_minutes
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = _settings.jwt_refresh_token_expire_days
 
 
 # Email provider config (Brevo primary, Resend fallback).
@@ -41,11 +35,22 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "")
 
 # CORS configuration
-CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
-if CORS_ORIGINS_RAW.strip() == "*":
-    CORS_ORIGINS = ["*"]
+# Enforce explicit origins for browser clients to prevent cross-origin credential leaks.
+# Native mobile apps (Flutter/React Native/iOS/Android) do not send an Origin header and are not restricted by browser CORS.
+# For hybrid/Capacitor/Ionic mobile apps, capacitor://localhost and http://localhost are included.
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "https://workpilot-frontend-1.onrender.com",
+    "capacitor://localhost",
+    "http://localhost",
+]
+
+CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "")
+if CORS_ORIGINS_RAW and CORS_ORIGINS_RAW.strip() != "*":
+    env_origins = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip()]
+    CORS_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + env_origins))
 else:
-    CORS_ORIGINS = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip()]
+    CORS_ORIGINS = DEFAULT_CORS_ORIGINS
 
 # AI Assistant configuration
 AI_ENABLED = os.getenv("AI_ENABLED", "").lower() in ("true", "1", "yes")

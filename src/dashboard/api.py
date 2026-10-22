@@ -18,7 +18,7 @@ from src.dashboard.schemas import (
 )
 from src.dashboard.service import DashboardService
 from src.database import get_db, get_redis
-from src.response import error, success
+from src.utils.response import error, success
 
 logger = logging.getLogger(__name__)
 

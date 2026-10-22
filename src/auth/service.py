@@ -555,9 +555,7 @@ class AuthService:
             refresh_secret = generate_refresh_secret_64hex()
             refresh_hash, _ = bcrypt_hash(refresh_secret)
 
-            refresh_expiry = int(
-                get_settings().refresh_token_expiry or 604800
-            )
+            refresh_expiry = get_settings().refresh_token_expiry
 
             expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
@@ -593,7 +591,7 @@ class AuthService:
 
             refresh_token_value = f"{stored_token.id}.{refresh_secret}"
 
-            access_expiry = int(get_settings().jwt_expiry or 900)
+            access_expiry = 0 if platform == "mobile" else get_settings().jwt_expiry
 
             return AuthTokensResponse(
                 access_token=access_token,
@@ -718,9 +716,7 @@ class AuthService:
             new_secret = generate_refresh_secret_64hex()
             new_hash, _ = bcrypt_hash(new_secret)
 
-            refresh_expiry = int(
-                get_settings().refresh_token_expiry or 604800
-            )
+            refresh_expiry = get_settings().refresh_token_expiry
 
             new_expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
@@ -735,7 +731,7 @@ class AuthService:
             await self.db.refresh(old_token)
 
             new_refresh_value = f"{old_token.id}.{new_secret}"
-            access_expiry = int(get_settings().jwt_expiry or 900)
+            access_expiry = 0 if platform == "mobile" else get_settings().jwt_expiry
 
             return AuthTokensResponse(
                 access_token=access_token,
@@ -871,11 +867,15 @@ class AuthService:
             user = await self._get_user_by_email(clean_email)
 
             if user is None:
-                return None, error_response(
-                    ErrorCode.ErrNotFound,
-                    "User not found",
-                    status_code=404,
-                )
+                # Mitigate user enumeration: return generic success so attackers cannot determine registered emails
+                return success_response(
+                    message=(
+                        "A password reset OTP has been sent "
+                        "to your email address"
+                    ),
+                    status_code=200,
+                    success=True,
+                ), None
 
             otp = generate_pw_otp(6)
 
@@ -1106,9 +1106,7 @@ class AuthService:
             refresh_secret = generate_refresh_secret_64hex()
             refresh_hash, _ = bcrypt_hash(refresh_secret)
 
-            refresh_expiry = int(
-                get_settings().refresh_token_expiry or 604800
-            )
+            refresh_expiry = get_settings().refresh_token_expiry
 
             expires_at = datetime.now(dt_timezone.utc) + timedelta(seconds=refresh_expiry)
 
@@ -1130,7 +1128,7 @@ class AuthService:
             await self.redis.delete(self._user_redis_key(clean_email))
             await self.redis.delete(otp_key)
 
-            access_expiry = int(get_settings().jwt_expiry or 900)
+            access_expiry = 0 if platform == "mobile" else get_settings().jwt_expiry
 
             return AuthTokensResponse(
                 access_token=access_token,

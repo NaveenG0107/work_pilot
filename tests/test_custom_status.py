@@ -19,14 +19,9 @@ async def test_get_custom_statuses_success(client: AsyncClient, app_context: dic
     assert isinstance(body["data"], list)
 
 
-@pytest.mark.xfail(
-    reason="Known Bug: Missing project tenant-isolation check in CustomStatusService.get_statuses; cross-org user receives 200 instead of 403/404",
-    strict=False,
-)
 async def test_get_custom_statuses_tenant_isolation(client: AsyncClient, app_context: dict):
     """
     Expected behavior: Org B user requesting Org A's custom statuses should be rejected with 403 Forbidden or 404 Not Found.
-    Actual behavior: Currently returns 200 OK because CustomStatusService does not verify Project.organization_id.
     """
     headers_org_b = {"Authorization": f"Bearer {app_context['token_org_b_admin']}"}
     project_a_id = app_context["project_a_id"]
@@ -59,14 +54,9 @@ async def test_get_user_story_statuses_success(client: AsyncClient, app_context:
     assert isinstance(body["data"], list)
 
 
-@pytest.mark.xfail(
-    reason="Known Bug: Missing project tenant-isolation check in UserStoryStatusService.get_statuses; cross-org user receives 200 instead of 403/404",
-    strict=False,
-)
 async def test_get_user_story_statuses_tenant_isolation(client: AsyncClient, app_context: dict):
     """
     Expected behavior: Org B user requesting Org A's user story statuses should be rejected with 403 Forbidden or 404 Not Found.
-    Actual behavior: Currently returns 200 OK because UserStoryStatusService does not verify Project.organization_id.
     """
     headers_org_b = {"Authorization": f"Bearer {app_context['token_org_b_admin']}"}
     project_a_id = app_context["project_a_id"]

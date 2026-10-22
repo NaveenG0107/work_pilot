@@ -137,6 +137,13 @@ class CustomStatusService:
                 detail="Project not found",
             )
 
+        if str(project.organization_id) != str(organization_id):
+            logger.error("Project %s does not belong to organization %s", project_id, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+
         # 3. Check permission (requires projects:modify)
         can_manage = await self._check_permission(user, project_id, "projects", "modify")
         if not can_manage:
@@ -274,6 +281,13 @@ class CustomStatusService:
                 detail="Project not found",
             )
 
+        if str(project.organization_id) != str(organization_id):
+            logger.error("Project %s does not belong to organization %s", project_id, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+
         # 3. Check permission (requires projects:view)
         can_view = await self._check_permission(user, project_id, "projects", "view")
         if not can_view:
@@ -388,6 +402,13 @@ class CustomStatusService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
+            )
+
+        if str(project.organization_id) != str(organization_id):
+            logger.error("Project %s does not belong to organization %s", project_id, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
             )
 
         # 3. Check permission (requires projects:modify)
@@ -643,6 +664,13 @@ class CustomStatusService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
+            )
+
+        if str(project.organization_id) != str(organization_id):
+            logger.error("Project %s does not belong to organization %s", project_id, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
             )
 
         # 3. Check permission (requires projects:modify)
