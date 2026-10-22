@@ -46,12 +46,12 @@ DEFAULT_CORS_ORIGINS = [
     "http://localhost",
 ]
 
-CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", getattr(_settings, "cors_origins", "*"))
-if not CORS_ORIGINS_RAW or CORS_ORIGINS_RAW.strip() == "*":
-    CORS_ORIGINS = ["*"]
-else:
-    env_origins = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip()]
+CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", getattr(_settings, "cors_origins", "")).strip()
+if CORS_ORIGINS_RAW:
+    env_origins = [orig.strip() for orig in CORS_ORIGINS_RAW.split(",") if orig.strip() and orig.strip() != "*"]
     CORS_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + env_origins))
+else:
+    CORS_ORIGINS = DEFAULT_CORS_ORIGINS
 
 # AI Assistant configuration
 AI_ENABLED = os.getenv("AI_ENABLED", "").lower() in ("true", "1", "yes")

@@ -77,14 +77,20 @@ def dump(value: Any) -> Any:
 async def global_search(
     request: Request,
     q: str = Query(default="", description="Search query string"),
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(
+        default=10, ge=1, le=100, description="Items per category per page"
+    ),
     service: SearchService = Depends(get_search_service),
 ):
     try:
         user_id = getattr(request.state, "user_id", None)
         organization_id = getattr(request.state, "organization_id", None)
         logger.info(
-            "Global search requested: q=%r, user_id=%s, organization_id=%s",
+            "Global search requested: q=%r, page=%d, page_size=%d, user_id=%s, organization_id=%s",
             q,
+            page,
+            page_size,
             user_id,
             organization_id,
         )
@@ -97,13 +103,18 @@ async def global_search(
                 403, "ORGANIZATION_REQUIRED", "Organization is required"
             )
         result = await service.global_search(
-            str(user_id), str(organization_id), q
+            str(user_id),
+            str(organization_id),
+            q,
+            page=page,
+            page_size=page_size,
         )
         logger.info(
-            "Global search succeeded for q=%r (user_id=%s, org_id=%s)",
+            "Global search succeeded for q=%r (user_id=%s, org_id=%s, total=%d)",
             q,
             user_id,
             organization_id,
+            result.meta.total,
         )
         return JSONResponse(
             status_code=200,
@@ -111,7 +122,8 @@ async def global_search(
                 "success": True,
                 "status_code": 200,
                 "message": "Search results retrieved successfully",
-                "data": dump(result),
+                "data": dump(result.data),
+                "meta": dump(result.meta),
             },
         )
     except Exception as exc:

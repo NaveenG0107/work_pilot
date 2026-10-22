@@ -1,8 +1,5 @@
 import asyncio
-import os
 import sys
-
-os.environ["ENV"] = "test"
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -15,7 +12,8 @@ from sqlalchemy.orm import joinedload
 
 import src.main
 from src.main import app
-from src.database import engine, AsyncSessionLocal
+from src.database import engine, AsyncSessionLocal, get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 from src.organization.models import Organization, Role
 from src.project.models import Project, ProjectMember
 from src.auth.models import User
@@ -73,16 +71,77 @@ def query_counter():
 
 
 @pytest.fixture
-async def db_session() -> AsyncGenerator:
-    async with AsyncSessionLocal() as session:
-        yield session
+async def db_session(monkeypatch) -> AsyncGenerator[AsyncSession, None]:
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(
+            bind=conn,
+            join_transaction_mode="create_savepoint",
+            expire_on_commit=False,
+        )
+
+        # 1. Monkeypatch session.commit to flush()
+        # Endpoints and services can execute flush/savepoints without sending a COMMIT to Postgres
+        real_flush = session.flush
+        async def fake_commit():
+            await real_flush()
+        monkeypatch.setattr(session, "commit", fake_commit)
+
+        # Monkeypatch session.close to no-op during test so context managers don't kill the session
+        real_close = session.close
+        async def fake_close():
+            pass
+        monkeypatch.setattr(session, "close", fake_close)
+
+        # 2. Monkeypatch global serial sequences to prevent Postgres sequence inflation
+        _mock_serial = 800000
+        def fake_serial(*args, **kwargs):
+            nonlocal _mock_serial
+            _mock_serial += 1
+            return _mock_serial
+        monkeypatch.setattr("src.user_story.models.get_next_global_serial_number", fake_serial)
+
+        # 3. Monkeypatch AsyncSessionLocal so any direct calls also use this session
+        class _TestSessionContext:
+            def __init__(self, sess):
+                self._sess = sess
+            async def __aenter__(self):
+                return self._sess
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+            def __getattr__(self, name):
+                return getattr(self._sess, name)
+
+        class SessionMakerProxy:
+            def __call__(self, *args, **kwargs):
+                return _TestSessionContext(session)
+            async def __aenter__(self):
+                return session
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        monkeypatch.setattr("src.database.AsyncSessionLocal", SessionMakerProxy())
+
+        try:
+            yield session
+        finally:
+            await trans.rollback()
+            await real_close()
 
 
 @pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
+async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    async def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture(scope="session")
