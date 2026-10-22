@@ -41,6 +41,7 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "")
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
     "https://workpilot-frontend-1.onrender.com",
+    "https://workpilot-frontend-jo7y.onrender.com",
     "capacitor://localhost",
     "http://localhost",
 ]
