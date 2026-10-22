@@ -11,9 +11,25 @@ from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 
 
+import sys
+
 load_dotenv(override=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# In test mode or when running pytest, route automatically to the isolated test database
+is_testing = (
+    "pytest" in sys.modules
+    or os.getenv("PYTEST_CURRENT_TEST") is not None
+    or os.getenv("ENV") == "test"
+)
+
+if is_testing:
+    DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+    if not DATABASE_URL and os.getenv("DATABASE_URL"):
+        base_url = os.getenv("DATABASE_URL")
+        if "/" in base_url:
+            DATABASE_URL = base_url.rsplit("/", 1)[0] + "/workpilot_test"
+else:
+    DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not configured")
