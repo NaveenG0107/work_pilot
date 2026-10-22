@@ -1,12 +1,13 @@
-# src/seeder.py
+# src/utils/seeder.py
 """
 Database seeder for WorkPilot FastAPI application.
 Seeds initial data including permissions and countries from SQL/models.
 
 Usage:
-    python -m src.seeder                  # Seeds all (permissions, countries)
-    python -m src.seeder --permissions    # Seeds only permissions
-    python -m src.seeder --countries      # Seeds only countries
+    python -m src.utils.seeder            # Seeds all (permissions, countries)
+    python -m src.utils.seeder --permissions    # Seeds only permissions
+    python -m src.utils.seeder --countries      # Seeds only countries
+    python -m src.utils.seeder --super-admin    # Seeds only super admin
 """
 
 import argparse
@@ -128,8 +129,10 @@ def _find_countries_sql_file(custom_path: Optional[str] = None) -> Optional[Path
     workspace_dir = base_dir.parent.parent
 
     candidates = [
+        base_dir / "seeds" / "seed_countries.sql",
         base_dir / "utils" / "seeds" / "seed_countries.sql",
         base_dir.parent / "src" / "utils" / "seeds" / "seed_countries.sql",
+        base_dir.parent / "utils" / "seeds" / "seed_countries.sql",
         Path("/app/src/utils/seeds/seed_countries.sql"),
         base_dir.parent / "seed_countries.sql",
         base_dir.parent / "seed_countries 1.sql",

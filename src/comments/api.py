@@ -14,7 +14,7 @@ from src.comments.schemas import (
 )
 from src.comments.service import CommentService
 from src.database import get_db
-from src.response import error, success
+from src.utils.response import error, success
 
 logger = logging.getLogger(__name__)
 

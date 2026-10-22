@@ -1,10 +1,11 @@
-# src/core/config.py
+# src/utils/setting.py
 from __future__ import annotations
 
+from functools import lru_cache
 import os
-from typing import Optional
+from typing import Optional, Self
 
-from pydantic import Field, validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,14 +47,46 @@ class Settings(BaseSettings):
     redis_password: str = Field(default="", env="REDIS_PASSWORD")
 
     # -----------------------------------------------------------------
-    # JWT
+    # JWT & Authentication (Single Source of Truth from Environment)
     # -----------------------------------------------------------------
-    jwt_secret_key: str = Field(..., env="JWT_SECRET_KEY")  # required, no default
-    jwt_expiry: int = Field(default=1800, gt=0, env="JWT_EXPIRY")  # seconds
+    jwt_secret_key: str = Field(..., env="JWT_SECRET_KEY")
+    jwt_algorithm: str = Field(default="HS256", env="JWT_ALGORITHM")
+    jwt_access_token_expire_minutes: Optional[int] = Field(default=None, env="JWT_ACCESS_TOKEN_EXPIRE_MINUTES")
+    jwt_refresh_token_expire_days: Optional[int] = Field(default=None, env="JWT_REFRESH_TOKEN_EXPIRE_DAYS")
+    jwt_expiry: Optional[int] = Field(default=None, env="JWT_EXPIRY")  # in seconds
+    refresh_token_expiry: Optional[int] = Field(default=None, env="REFRESH_TOKEN_EXPIRY")  # in seconds
     jwt_sliding_session_enabled: bool = True
-    jwt_renewal_interval: int = Field(default=60, gt=0)  # seconds between cookie renewals
-    refresh_token_expiry: int = Field(default=604800, env="REFRESH_TOKEN_EXPIRY")  # seconds, default 7 days
-    otp_expiry_minutes: int = Field(default=15, env="OTP_EXPIRY_MINUTES")  # minutes
+    jwt_renewal_interval: int = Field(default=60, gt=0)  # seconds between renewals
+    otp_expiry_minutes: int = Field(default=15, env="OTP_EXPIRY_MINUTES")
+
+    @model_validator(mode="after")
+    def resolve_token_expiries(self) -> Self:
+        """Resolve token expirations dynamically from environment variables without hardcoded discrepancies."""
+        # 1. Access token expiration in seconds:
+        # Prioritize JWT_EXPIRY if explicitly provided, else compute from JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        if self.jwt_expiry is not None:
+            self.jwt_expiry = int(self.jwt_expiry)
+            if self.jwt_access_token_expire_minutes is None:
+                self.jwt_access_token_expire_minutes = max(1, self.jwt_expiry // 60)
+        elif self.jwt_access_token_expire_minutes is not None:
+            self.jwt_expiry = int(self.jwt_access_token_expire_minutes * 60)
+        else:
+            self.jwt_expiry = 900
+            self.jwt_access_token_expire_minutes = 15
+
+        # 2. Refresh token expiration in seconds:
+        # Prioritize REFRESH_TOKEN_EXPIRY if provided, else compute from JWT_REFRESH_TOKEN_EXPIRE_DAYS
+        if self.refresh_token_expiry is not None:
+            self.refresh_token_expiry = int(self.refresh_token_expiry)
+            if self.jwt_refresh_token_expire_days is None:
+                self.jwt_refresh_token_expire_days = max(1, self.refresh_token_expiry // 86400)
+        elif self.jwt_refresh_token_expire_days is not None:
+            self.refresh_token_expiry = int(self.jwt_refresh_token_expire_days * 86400)
+        else:
+            self.refresh_token_expiry = 604800
+            self.jwt_refresh_token_expire_days = 7
+
+        return self
 
     # -----------------------------------------------------------------
     # Email (Brevo primary / Resend fallback)
@@ -78,7 +111,7 @@ class Settings(BaseSettings):
     cookie_samesite: str = Field(default="lax", env="COOKIE_SAMESITE")
 
     # -----------------------------------------------------------------
-    # S3 (Supabase‑compatible storage)
+    # S3 (Supabase-compatible storage)
     # -----------------------------------------------------------------
     s3_endpoint: str = Field(default="", env="S3_ENDPOINT")
     s3_public_endpoint: str = Field(default="", env="S3_PUBLIC_ENDPOINT")
@@ -107,6 +140,7 @@ class Settings(BaseSettings):
         )
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Fast singleton to get the populated Settings instance."""
+    """Singleton to get the populated Settings instance."""
     return Settings()

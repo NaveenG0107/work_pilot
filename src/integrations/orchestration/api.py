@@ -18,9 +18,10 @@ from src.integrations.orchestration.schemas import (
     ChatResponseData,
 )
 from src.integrations.orchestration.service import AIOrchestrationService
-from src.response import error, success
+from src.utils.response import error, success
 from src.task.service import TaskServiceError
 from src.utils.core import require_jwt
+from src.utils.security import rate_limit
 
 logger = get_logger(__name__)
 
@@ -66,6 +67,7 @@ def _handle_exception(exc: Exception):
     "/chat",
     status_code=status.HTTP_200_OK,
     summary="Chat with the WorkPilot AI Assistant",
+    dependencies=[Depends(rate_limit(max_requests=60, window_seconds=60, scope="ai_chat"))],
 )
 @require_jwt
 async def chat_with_assistant(
@@ -94,24 +96,30 @@ async def chat_with_assistant(
 @router.post(
     "/actions/{action_id}/confirm",
     status_code=status.HTTP_200_OK,
-    summary="Confirm and execute a pending AI action",
-)
-@router.post(
-    "/confirm/{action_id}",
-    status_code=status.HTTP_200_OK,
-    include_in_schema=False,
+    summary="Confirm or cancel a pending AI action",
 )
 @require_jwt
 async def confirm_action(
     action_id: str,
     request: Request,
-    body: ActionConfirmationRequest = ActionConfirmationRequest(confirmed=True),
+    body: ActionConfirmationRequest | None = None,
+    confirm: bool | None = None,
+    confirmed: bool | None = None,
     service: AIOrchestrationService = Depends(get_ai_service),
 ):
-    """Confirm a pending server-side action and execute the task creation."""
+    """Confirm or cancel a pending server-side action: pass true to execute task creation, or false to cancel."""
     try:
         user_id, organization_id, role = _auth_context(request)
-        if not body.confirmed:
+
+        is_confirmed = True
+        if confirm is not None:
+            is_confirmed = confirm
+        elif confirmed is not None:
+            is_confirmed = confirmed
+        elif body is not None:
+            is_confirmed = body.is_confirmed
+
+        if not is_confirmed:
             res = await service.cancel_action(
                 action_id,
                 user_id=user_id,
@@ -126,34 +134,5 @@ async def confirm_action(
             role=role,
         )
         return success("Task created successfully", res, status_code=200)
-    except Exception as exc:
-        return _handle_exception(exc)
-
-
-@router.post(
-    "/actions/{action_id}/cancel",
-    status_code=status.HTTP_200_OK,
-    summary="Cancel a pending AI action",
-)
-@router.post(
-    "/cancel/{action_id}",
-    status_code=status.HTTP_200_OK,
-    include_in_schema=False,
-)
-@require_jwt
-async def cancel_action(
-    action_id: str,
-    request: Request,
-    service: AIOrchestrationService = Depends(get_ai_service),
-):
-    """Cancel a pending action before it is executed."""
-    try:
-        user_id, organization_id, _ = _auth_context(request)
-        res = await service.cancel_action(
-            action_id,
-            user_id=user_id,
-            organization_id=organization_id,
-        )
-        return success("Action cancelled successfully", res, status_code=200)
     except Exception as exc:
         return _handle_exception(exc)

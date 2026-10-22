@@ -1,9 +1,10 @@
-# src/response.py
+# src/utils/response.py
 """
-Response envelope helpers.
+Response envelope helpers for WorkPilot backend.
+Provides standardized JSON envelopes for API success and error responses.
 """
 
-from datetime import datetime, date
+from datetime import date, datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -17,6 +18,8 @@ ERROR_CODES = {
     404: "RESOURCE_NOT_FOUND",
     409: "CONFLICT",
     410: "GONE",
+    422: "VALIDATION_ERROR",
+    429: "RATE_LIMIT_EXCEEDED",
     500: "INTERNAL_SERVER_ERROR",
 }
 
@@ -36,8 +39,13 @@ def _serialize(value: Any) -> Any:
     return jsonable_encoder(value)
 
 
-def success(message: str, data: Any = None, meta: Optional[dict] = None,
-            status_code: int = 200) -> JSONResponse:
+def success(
+    message: str,
+    data: Any = None,
+    meta: Optional[dict] = None,
+    status_code: int = 200,
+) -> JSONResponse:
+    """Standard success response envelope: {success: true, status_code, message, data, meta}."""
     body: dict = {
         "success": True,
         "status_code": status_code,
@@ -51,7 +59,12 @@ def success(message: str, data: Any = None, meta: Optional[dict] = None,
     return JSONResponse(status_code=status_code, content=body)
 
 
-def error(message: str, status_code: int = 400, code: Optional[str] = None) -> JSONResponse:
+def error(
+    message: str,
+    status_code: int = 400,
+    code: Optional[str] = None,
+) -> JSONResponse:
+    """Standard error response envelope: {success: false, error: {code, status_code, message}}."""
     if code is None:
         code = ERROR_CODES.get(status_code, "INTERNAL_SERVER_ERROR")
     body = {

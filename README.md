@@ -109,8 +109,9 @@ work_pilot/
 │   ├── config.py                  # Environment config & structured logger
 │   ├── database.py                # Async engine & sessionmaker
 │   ├── main.py                    # FastAPI application initialization & routes
-│   ├── response.py                # Standardized JSON response envelope
-│   └── seeder.py                  # Database seeder (permissions, countries, super admin)
+│   └── utils/
+│       ├── response.py            # Standardized JSON response envelope
+│       └── seeder.py              # Database seeder (permissions, countries, super admin)
 ├── tests/
 │   └── test_storage.py            # Storage & utility unit tests
 ├── docker-compose.yaml            # Docker composition (FastAPI + Redis)
@@ -211,7 +212,7 @@ poetry run alembic upgrade head
 
 #### 3. Seed Default Permissions and Super Admin
 ```bash
-poetry run python -m src.seeder
+poetry run python -m src.utils.seeder
 ```
 
 #### 4. Start the Development Server
@@ -232,17 +233,17 @@ poetry run alembic upgrade head
 ```
 
 ### Database Seeder CLI
-The repository includes an idempotent database seeder (`src/seeder.py`) to populate initial system data.
+The repository includes an idempotent database seeder (`src/utils/seeder.py`) to populate initial system data.
 
 #### 1. Seed All Data
 To seed everything at once (Default Permissions + ISO Countries + Super Admin user & role):
 
 ```bash
 # Using Poetry
-poetry run python -m src.seeder
+poetry run python -m src.utils.seeder
 
 # Using Docker
-docker compose exec fastapi python -m src.seeder
+docker compose exec fastapi python -m src.utils.seeder
 ```
 
 #### 2. Seed Specific Data Only
@@ -250,13 +251,13 @@ If you only need to seed specific components without modifying the rest:
 
 ```bash
 # Seed only system permissions (projects, sprints, tasks, user stories, comments)
-poetry run python -m src.seeder --permissions
+poetry run python -m src.utils.seeder --permissions
 
 # Seed only ISO countries list
-poetry run python -m src.seeder --countries
+poetry run python -m src.utils.seeder --countries
 
 # Seed only super admin user and system role
-poetry run python -m src.seeder --super-admin
+poetry run python -m src.utils.seeder --super-admin
 ```
 
 ### Default Credentials

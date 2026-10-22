@@ -212,6 +212,19 @@ class DashboardService:
                 detail="Project not found",
             )
 
+        if str(project.organization_id) != str(user.organization_id):
+            logger.warning(
+                "Tenant isolation violation: user %s (org: %s) attempted to access project %s (org: %s)",
+                user_id,
+                user.organization_id,
+                project_id,
+                project.organization_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
+            )
+
         can_view = await self._check_permission(user, project_id, resource, action)
         if not can_view:
             logger.warning(
@@ -644,6 +657,19 @@ class DashboardService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
+            )
+
+        if str(project.organization_id) != str(user.organization_id):
+            logger.warning(
+                "Tenant isolation violation in weekly progress: user %s (org: %s) attempted to access project %s (org: %s)",
+                user_id,
+                user.organization_id,
+                project_id,
+                project.organization_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project",
             )
 
         # 3. Check permission (requires projects:view)

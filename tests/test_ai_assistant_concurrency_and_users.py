@@ -250,8 +250,8 @@ async def test_concurrent_cancellation_and_confirmation_race(
     action_id = chat_resp.json()["data"]["pending_action"]["action_id"]
 
     res_conf, res_canc = await asyncio.gather(
-        client.post(f"/api/v1/ai-assistant/confirm/{action_id}", headers=headers),
-        client.post(f"/api/v1/ai-assistant/actions/{action_id}/cancel", headers=headers),
+        client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": True}, headers=headers),
+        client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": False}, headers=headers),
         return_exceptions=True,
     )
 
@@ -294,11 +294,11 @@ async def test_cancellation_of_already_completed_action_rejected(
     action_id = chat_resp.json()["data"]["pending_action"]["action_id"]
 
     # Confirm
-    conf = await client.post(f"/api/v1/ai-assistant/confirm/{action_id}", headers=headers)
+    conf = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": True}, headers=headers)
     assert conf.status_code == 200
 
     # Cancel should be rejected
-    canc = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/cancel", headers=headers)
+    canc = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": False}, headers=headers)
     assert canc.status_code == 409
     assert "already been executed" in canc.json()["error"]["message"].lower()
 
@@ -338,11 +338,11 @@ async def test_confirmation_of_cancelled_action_rejected(
     action_id = chat_resp.json()["data"]["pending_action"]["action_id"]
 
     # Cancel first
-    canc = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/cancel", headers=headers)
+    canc = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": False}, headers=headers)
     assert canc.status_code == 200
 
     # Confirm should be rejected
-    conf = await client.post(f"/api/v1/ai-assistant/confirm/{action_id}", headers=headers)
+    conf = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": True}, headers=headers)
     assert conf.status_code == 409
     assert "cancelled" in conf.json()["error"]["message"].lower()
 

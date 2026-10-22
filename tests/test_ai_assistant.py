@@ -264,8 +264,8 @@ async def test_confirmation_cancellation(
     )
     action_id = chat_resp.json()["data"]["pending_action"]["action_id"]
 
-    # Cancel via cancel endpoint
-    cancel_resp = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/cancel", headers=headers)
+    # Cancel via confirm endpoint with confirm=False
+    cancel_resp = await client.post(f"/api/v1/ai-assistant/actions/{action_id}/confirm", json={"confirm": False}, headers=headers)
     assert cancel_resp.status_code == 200
     assert cancel_resp.json()["data"]["status"] == "cancelled"
 

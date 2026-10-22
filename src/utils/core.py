@@ -99,42 +99,13 @@ def error_response(
 
 
 # ---------------------------------------------------------------------------
-# bcrypt helpers (rounds=10 to match Go bcrypt.DefaultCost)
+# Password & Bcrypt helpers (utilized from src.utils.password_helper)
 # ---------------------------------------------------------------------------
-
-def bcrypt_hash(password: str) -> Tuple[str, None]:
-    """Hash password with bcrypt cost 10 (Go DefaultCost). Returns (hashed_pw, None)."""
-    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
-    return hashed, None
-
-
-def bcrypt_verify(password: str, hashed: str) -> bool:
-    """Verify password against bcrypt hash. Returns True/False."""
-    try:
-        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Password policy validation (Go: ValidatePassword regex)
-# ---------------------------------------------------------------------------
-
-def validate_password(password: str) -> bool:
-    """Returns True if password meets policy: >=8 chars, upper+lower+digit+special, no spaces."""
-    if len(password) < 8:
-        return False
-    if "\\s" in password or re.search(r"\s", password):
-        return False
-    has_upper = re.search(r"[A-Z]", password) is not None
-    has_lower = re.search(r"[a-z]", password) is not None
-    has_digit = re.search(r"[0-9]", password) is not None
-    # Special chars: ! @ # $ % ^ & * ( ) _ + - = [ ] { } | \ : ; " ' < > , . ? / ~
-    has_special = (
-        re.search(r'[!@#$%^&*()_+\-=\[\]{}|\\:;"\'<>,.?/~]', password)
-        is not None
-    )
-    return has_upper and has_lower and has_digit and has_special
+from src.utils.password_helper import (
+    bcrypt_hash,
+    bcrypt_verify,
+    validate_password,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -175,14 +146,16 @@ def create_jwt(
     claims = {
         "role": role,
         "user_id": user_id,
+        "sub": user_id,
+        "platform": platform,
         "iat": now,
     }
 
     if organization_id is not None:
         claims["organization_id"] = organization_id
 
-    # Platform expiry logic (JWT_EXPIRY in seconds).
-    expires_in_seconds = int(get_settings().jwt_expiry or 900)
+    # Platform expiry logic (JWT_EXPIRY in seconds from environment).
+    expires_in_seconds = int(get_settings().jwt_expiry)
     if platform != "mobile":
         # web clients get an expiry
         if expires_in_seconds > 0:
@@ -356,14 +329,8 @@ def hash_password(password: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
     Hash a password using bcrypt with cost 10 (Go DefaultCost).
     Returns (hashed_password, error_or_None).
-    Matches internal/pkg/utils.HashPassword Go function.
     """
-    import bcrypt
-    try:
-        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
-        return hashed, None
-    except Exception as e:
-        return "", {"error": str(e), "code": "INTERNAL_SERVER_ERROR"}
+    return bcrypt_hash(password)
 
 def ParseUserDuplicateError(err: Optional[str]) -> Optional[Dict[str, Any]]:
     """
@@ -578,6 +545,17 @@ async def authenticate_request(request: Request) -> Optional[JSONResponse]:
     """
     try:
         require_jwt(request)
+        token = _extract_bearer_token(request, None)
+        if token:
+            from src.database import get_redis
+            from src.utils.security import is_token_blacklisted
+            redis = get_redis()
+            if await is_token_blacklisted(redis, token):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
         return None
     except HTTPException as exc:
         return JSONResponse(

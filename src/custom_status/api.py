@@ -12,7 +12,7 @@ from src.custom_status.schemas import (
 )
 from src.custom_status.service import CustomStatusService
 from src.database import get_db
-from src.response import error, success
+from src.utils.response import error, success
 
 logger = logging.getLogger(__name__)
 

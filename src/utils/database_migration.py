@@ -379,12 +379,12 @@ def run_seeder() -> None:
     import subprocess
 
     log("SEED", "Running initial database seeder")
-    subprocess.run([sys.executable, "-m", "src.seeder"], cwd=PROJECT_ROOT, check=True)
+    subprocess.run([sys.executable, "-m", "src.utils.seeder"], cwd=PROJECT_ROOT, check=True)
     log("SEED", "Seeder completed")
 
 
 def verify_seed(connection: Connection) -> None:
-    from src.seeder import DEFAULT_PERMISSIONS
+    from src.utils.seeder import DEFAULT_PERMISSIONS
 
     checks = {
         "permissions": ("SELECT count(*) FROM permissions", len(DEFAULT_PERMISSIONS)),
@@ -502,7 +502,7 @@ def prepare_database(connection: Connection, allow_migration: bool = True) -> No
             verify_seed(connection)
         except RuntimeError as exc:
             raise RuntimeError(
-                "Initial seeding is incomplete; startup blocked. Run python -m src.seeder "
+                "Initial seeding is incomplete; startup blocked. Run python -m src.utils.seeder "
                 "against this database, then retry startup. " + str(exc)
             ) from exc
         set_initialization_comment(connection, original_comment)
