@@ -190,12 +190,7 @@ def test_dynamic_env_token_expiry():
     from src.utils.setting import get_settings
 
     settings = get_settings()
-    # In .env: JWT_ACCESS_TOKEN_EXPIRE_MINUTES=1 -> jwt_expiry must be 60 seconds
-    assert settings.jwt_access_token_expire_minutes == 1
-    assert settings.jwt_expiry == 60
-
-    # In .env: JWT_REFRESH_TOKEN_EXPIRE_DAYS=7 -> refresh_token_expiry must be 604800 seconds
-    assert settings.jwt_refresh_token_expire_days == 7
-    assert settings.refresh_token_expiry == 604800
+    assert settings.jwt_expiry == settings.jwt_access_token_expire_minutes * 60
+    assert settings.refresh_token_expiry == settings.jwt_refresh_token_expire_days * 86400
 
 

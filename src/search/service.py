@@ -8,16 +8,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from src.auth.models import User
+from src.config import get_logger
 from src.label.models import Label as _Label  # noqa: F401
 from src.organization.models import Role
 from src.project.models import Project, ProjectKeyHistory, ProjectMember
-from src.search.schema import GlobalSearchResponse, SearchResult
+from src.search.schema import GlobalSearchResponse, MemberSearchResult, SearchResult
 from src.sprint.models import Sprint
 from src.task.models import Task
 from src.user_story.models import UserStory
 from src.user_story_status.models import (
     UserStoryStatus as _UserStoryStatus,  # noqa: F401
 )
+
+logger = get_logger(__name__)
 
 
 class SearchServiceError(Exception):
@@ -130,7 +133,15 @@ class SearchService:
     ) -> GlobalSearchResponse:
         query = query.strip()
         if not query:
+            logger.debug("Empty query passed to global_search; returning empty result")
             return GlobalSearchResponse()
+
+        logger.info(
+            "Executing global search for query=%r (user_id=%s, organization_id=%s)",
+            query,
+            user_id,
+            organization_id,
+        )
 
         try:
             project_ids = await self._accessible_project_ids(
@@ -141,14 +152,44 @@ class SearchService:
             projects = await self._search_projects(project_ids, query)
             members = await self._search_members(organization_id, query)
             sprints = await self._search_sprints(project_ids, query)
-        except SearchServiceError:
+        except SearchServiceError as exc:
+            logger.warning(
+                "Search service error for query=%r: [%s] %s",
+                query,
+                exc.code,
+                exc.message,
+            )
             raise
         except SQLAlchemyError as exc:
+            logger.error(
+                "Database error executing search query=%r: %s",
+                query,
+                exc,
+                exc_info=True,
+            )
             raise SearchServiceError(
                 500,
                 "INTERNAL_SERVER_ERROR",
                 "Failed to execute search queries",
             ) from exc
+        except Exception as exc:
+            logger.error(
+                "Unexpected error during global search query=%r: %s",
+                query,
+                exc,
+                exc_info=True,
+            )
+            raise
+
+        logger.info(
+            "Global search completed for query=%r: tasks=%d, stories=%d, projects=%d, members=%d, sprints=%d",
+            query,
+            len(tasks),
+            len(stories),
+            len(projects),
+            len(members),
+            len(sprints),
+        )
 
         return GlobalSearchResponse(
             tasks=tasks,
@@ -303,33 +344,57 @@ class SearchService:
 
     async def _search_members(
         self, organization_id: str, query: str
-    ) -> list[SearchResult]:
+    ) -> list[MemberSearchResult]:
+        logger.debug(
+            "Searching members in organization_id=%s with query=%r",
+            organization_id,
+            query,
+        )
         users = list(
             (
                 await self.db.execute(
                     select(User)
+                    .outerjoin(Role, User.role_id == Role.id)
                     .where(
                         User.organization_id == organization_id,
                         User.deleted_at.is_(None),
                         self._search_predicate(
-                            query, User.full_name, User.username, User.email
+                            query,
+                            User.full_name,
+                            User.username,
+                            User.email,
+                            Role.name,
+                            User.avatar_url,
+                            User.color,
                         ),
                     )
+                    .options(joinedload(User.role))
                     .limit(20)
                 )
-            ).scalars()
-        )
-        return [
-            SearchResult(
-                id=str(user.id),
-                type="member",
-                title=user.full_name,
-                key=user.username,
-                description=user.email,
-                avatar_url=user.avatar_url or "",
             )
-            for user in users
-        ]
+            .scalars()
+            .unique()
+        )
+        logger.debug("Found %d members for query=%r", len(users), query)
+        results: list[MemberSearchResult] = []
+        for user in users:
+            role_name = (
+                user.role.name
+                if user.role and hasattr(user.role, "name")
+                else (str(user.role) if user.role else "")
+            )
+            results.append(
+                MemberSearchResult(
+                    id=str(user.id),
+                    name=user.full_name or "",
+                    user_name=user.username or "",
+                    email=user.email or "",
+                    role=role_name,
+                    avatar_url=user.avatar_url or "",
+                    color=user.color or "",
+                )
+            )
+        return results
 
     async def _search_sprints(
         self, project_ids: set[str], query: str
