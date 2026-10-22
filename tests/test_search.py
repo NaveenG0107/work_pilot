@@ -38,3 +38,22 @@ async def test_search_tenant_isolation(client: AsyncClient, app_context: dict):
 async def test_search_unauthorized(client: AsyncClient, app_context: dict):
     resp = await client.get("/api/v1/search?q=test")
     assert resp.status_code == 401
+
+
+async def test_search_members_response_fields(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=admin", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    members = body.get("data", {}).get("members", [])
+    if members:
+        member = members[0]
+        assert "id" in member
+        assert "name" in member
+        assert "user_name" in member
+        assert "email" in member
+        assert "role" in member
+        assert "color" in member
+        assert isinstance(member.get("role"), str)
+

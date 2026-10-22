@@ -5,11 +5,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request  # type: ignore
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_logger
 from src.database import get_db
 from src.search.schema import ErrorResponse, SearchSuccessResponse
 from src.search.service import SearchService, SearchServiceError
 from src.utils.core import GoJSONResponse as JSONResponse
 from src.utils.core import require_jwt
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/search",
@@ -27,10 +30,17 @@ def failure(exc: Exception) -> JSONResponse:
         status_code = exc.status_code
         code = exc.code
         message = exc.message
+        logger.warning(
+            "SearchServiceError: status_code=%d, code=%s, message=%s",
+            status_code,
+            code,
+            message,
+        )
     else:
         status_code = 500
         code = "INTERNAL_SERVER_ERROR"
         message = "Failed to execute search queries"
+        logger.error("Unhandled exception in search API: %s", exc, exc_info=True)
     return JSONResponse(
         status_code=status_code,
         content={
@@ -72,6 +82,12 @@ async def global_search(
     try:
         user_id = getattr(request.state, "user_id", None)
         organization_id = getattr(request.state, "organization_id", None)
+        logger.info(
+            "Global search requested: q=%r, user_id=%s, organization_id=%s",
+            q,
+            user_id,
+            organization_id,
+        )
         if not user_id:
             raise SearchServiceError(
                 401, "UNAUTHORIZED", "Authentication required"
@@ -82,6 +98,12 @@ async def global_search(
             )
         result = await service.global_search(
             str(user_id), str(organization_id), q
+        )
+        logger.info(
+            "Global search succeeded for q=%r (user_id=%s, org_id=%s)",
+            q,
+            user_id,
+            organization_id,
         )
         return JSONResponse(
             status_code=200,
