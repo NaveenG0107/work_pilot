@@ -1,6 +1,8 @@
 """Email delivery service (Brevo primary, Resend fallback)."""
 
 import logging
+import os
+import re
 from typing import Optional
 
 import httpx
@@ -99,3 +101,83 @@ async def send_password_reset_otp(email: str, otp: str) -> None:
         "<p>If you did not request this, you can ignore this email.</p>"
     )
     await _send_email(email, subject, html)
+
+
+def _render_organization_invitation_html(
+    organization_name: str,
+    invite_link: str,
+    temporary_password: str = "",
+) -> str:
+    template_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "utils",
+        "templates",
+        "organization_invitation.html",
+    )
+    if not os.path.exists(template_path):
+        temp_pwd_html = (
+            f"<p>Your temporary password is: <strong>{temporary_password}</strong></p>"
+            if temporary_password
+            else ""
+        )
+        return (
+            f"<p>You have been invited to join <strong>{organization_name}</strong> on Work Pilot.</p>"
+            f"<p><a href='{invite_link}'>Click here to accept the invitation</a></p>"
+            f"{temp_pwd_html}"
+        )
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if temporary_password:
+        content = re.sub(
+            r"\{\{\s*if\s+\.TempPassword\s*\}\}(.*?)\{\{\s*else\s*\}\}(.*?)\{\{\s*end\s*\}\}",
+            r"\1",
+            content,
+            flags=re.DOTALL,
+        )
+        content = re.sub(
+            r"\{\{\s*if\s+\.TempPassword\s*\}\}(.*?)\{\{\s*end\s*\}\}",
+            r"\1",
+            content,
+            flags=re.DOTALL,
+        )
+    else:
+        content = re.sub(
+            r"\{\{\s*if\s+\.TempPassword\s*\}\}(.*?)\{\{\s*else\s*\}\}(.*?)\{\{\s*end\s*\}\}",
+            r"\2",
+            content,
+            flags=re.DOTALL,
+        )
+        content = re.sub(
+            r"\{\{\s*if\s+\.TempPassword\s*\}\}(.*?)\{\{\s*end\s*\}\}",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+
+    content = content.replace("{{ .OrganizationName }}", organization_name)
+    content = content.replace("{{.OrganizationName}}", organization_name)
+    content = content.replace("{{ .InviteLink }}", invite_link)
+    content = content.replace("{{.InviteLink}}", invite_link)
+    content = content.replace("{{ .TempPassword }}", temporary_password)
+    content = content.replace("{{.TempPassword}}", temporary_password)
+    return content
+
+
+async def send_organization_invitation(
+    email: str,
+    organization_name: str,
+    role_name: str,
+    invite_link: str,
+    temporary_password: str = "",
+) -> None:
+    """Send an organization invitation email."""
+    subject = f"Invitation to join {organization_name} on Work Pilot"
+    html = _render_organization_invitation_html(
+        organization_name=organization_name,
+        invite_link=invite_link,
+        temporary_password=temporary_password,
+    )
+    await _send_email(email, subject, html)
+
