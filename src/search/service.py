@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
 
-from sqlalchemy import String, and_, cast, distinct, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -13,6 +14,8 @@ from src.label.models import Label as _Label  # noqa: F401
 from src.organization.models import Role
 from src.project.models import Project, ProjectKeyHistory, ProjectMember
 from src.search.schema import (
+    CategoryPaginationMap,
+    CategoryPaginationMeta,
     GlobalSearchData,
     GlobalSearchResponse,
     GlobalSearchResult,
@@ -39,6 +42,15 @@ class SearchServiceError(Exception):
 
 
 class SearchService:
+    VALID_CATEGORIES = {
+        "all",
+        "tasks",
+        "user_stories",
+        "projects",
+        "members",
+        "sprints",
+    }
+
     _PROJECT_VIEW_ROLES = {
         "org_admin",
         "project_manager",
@@ -92,7 +104,8 @@ class SearchService:
         self,
         user_id: str,
         organization_id: str,
-    ) -> set[str]:
+        category: str = "all",
+    ) -> tuple[bool, set[str]]:
         user = (
             await self.db.execute(
                 select(User)
@@ -107,27 +120,31 @@ class SearchService:
         if user is None:
             raise SearchServiceError(401, "UNAUTHORIZED", "User not found")
 
-        project_ids = set(
-            (
-                await self.db.execute(
-                    select(Project.id).where(
-                        Project.organization_id == organization_id,
-                        Project.deleted_at.is_(None),
-                    )
-                )
-            ).scalars()
-        )
         is_org_admin = (user.role.name if user.role else "").strip().lower() == "org_admin"
         if is_org_admin:
+            if category == "members":
+                return True, set()
+            project_ids = set(
+                (
+                    await self.db.execute(
+                        select(Project.id).where(
+                            Project.organization_id == organization_id,
+                            Project.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
             return True, project_ids
 
         memberships = list(
             (
                 await self.db.execute(
                     select(ProjectMember)
+                    .join(Project, Project.id == ProjectMember.project_id)
                     .where(
                         ProjectMember.user_id == user_id,
-                        ProjectMember.project_id.in_(project_ids),
+                        Project.organization_id == organization_id,
+                        Project.deleted_at.is_(None),
                         ProjectMember.deleted_at.is_(None),
                     )
                     .options(
@@ -143,70 +160,189 @@ class SearchService:
         }
         return False, accessible_ids
 
+    @classmethod
+    def _build_empty_result(
+        cls, category: str, page: int, page_size: int
+    ) -> GlobalSearchResult:
+        empty_cat_meta = CategoryPaginationMeta(
+            page=page, page_size=page_size, has_next=False, total=0
+        )
+        if category == "all":
+            empty_map = CategoryPaginationMap(
+                tasks=CategoryPaginationMeta(page=page, page_size=page_size, has_next=False, total=0),
+                user_stories=CategoryPaginationMeta(page=page, page_size=page_size, has_next=False, total=0),
+                projects=CategoryPaginationMeta(page=page, page_size=page_size, has_next=False, total=0),
+                members=CategoryPaginationMeta(page=page, page_size=page_size, has_next=False, total=0),
+                sprints=CategoryPaginationMeta(page=page, page_size=page_size, has_next=False, total=0),
+            )
+            data = GlobalSearchData(
+                tasks=[],
+                user_stories=[],
+                projects=[],
+                members=[],
+                sprints=[],
+            )
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_tasks=0,
+                total_user_stories=0,
+                total_projects=0,
+                total_members=0,
+                total_sprints=0,
+                pagination=empty_map,
+            )
+        elif category == "tasks":
+            data = GlobalSearchData(tasks=[])
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_tasks=0,
+                pagination=CategoryPaginationMap(tasks=empty_cat_meta),
+            )
+        elif category == "user_stories":
+            data = GlobalSearchData(user_stories=[])
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_user_stories=0,
+                pagination=CategoryPaginationMap(user_stories=empty_cat_meta),
+            )
+        elif category == "projects":
+            data = GlobalSearchData(projects=[])
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_projects=0,
+                pagination=CategoryPaginationMap(projects=empty_cat_meta),
+            )
+        elif category == "members":
+            data = GlobalSearchData(members=[])
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_members=0,
+                pagination=CategoryPaginationMap(members=empty_cat_meta),
+            )
+        elif category == "sprints":
+            data = GlobalSearchData(sprints=[])
+            meta = SearchMeta(
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_next=False,
+                total_sprints=0,
+                pagination=CategoryPaginationMap(sprints=empty_cat_meta),
+            )
+        else:
+            raise SearchServiceError(400, "BAD_REQUEST", f"Invalid category '{category}'")
+
+        return GlobalSearchResult(data=data, meta=meta)
+
     async def global_search(
         self,
         user_id: str,
         organization_id: str,
         query: str,
+        category: str = "all",
         page: int = 1,
         page_size: int = 10,
+        request_id: str | None = None,
     ) -> GlobalSearchResult:
-        query = query.strip()
-        if not query:
-            logger.debug("Empty query passed to global_search; returning empty result")
-            return GlobalSearchResult(
-                data=GlobalSearchData(),
-                meta=SearchMeta(
-                    page=page,
-                    page_size=page_size,
-                    has_next=False,
-                    total=0,
-                    total_tasks=0,
-                    total_projects=0,
-                    total_members=0,
-                    total_sprints=0,
-                    total_user_stories=0,
-                ),
+        category = (category or "all").strip().lower()
+        if category not in self.VALID_CATEGORIES:
+            raise SearchServiceError(
+                400,
+                "BAD_REQUEST",
+                f"Invalid category '{category}'. Allowed categories: {', '.join(sorted(self.VALID_CATEGORIES))}",
             )
 
+        if page < 1:
+            raise SearchServiceError(
+                400, "BAD_REQUEST", "Page number must be greater than or equal to 1"
+            )
+        if page_size < 1 or page_size > 100:
+            raise SearchServiceError(
+                400, "BAD_REQUEST", "Page size must be between 1 and 100"
+            )
+
+        start_time = time.perf_counter()
+        query = query.strip()
+
         logger.info(
-            "Executing global search for query=%r (page=%d, page_size=%d, user_id=%s, organization_id=%s)",
-            query,
+            "Global search started: category=%s, page=%d, page_size=%d, user_id=%s, org_id=%s, query_len=%d, req_id=%s",
+            category,
             page,
             page_size,
             user_id,
             organization_id,
+            len(query),
+            request_id or "-",
         )
+
+        if not query:
+            return self._build_empty_result(category, page, page_size)
 
         try:
             is_org_admin, project_ids = await self._accessible_project_ids(
-                user_id, organization_id
+                user_id, organization_id, category=category
             )
-            tasks, tasks_total = await self._search_tasks(project_ids, query, page=page, page_size=page_size)
-            stories, stories_total = await self._search_user_stories(project_ids, query, page=page, page_size=page_size)
-            projects, projects_total = await self._search_projects(project_ids, query, page=page, page_size=page_size)
-            members, members_total = await self._search_members(
-                organization_id,
-                user_id,
-                is_org_admin,
-                project_ids,
-                query,
-                page=page,
-                page_size=page_size,
-            )
-            sprints, sprints_total = await self._search_sprints(project_ids, query, page=page, page_size=page_size)
-        except SearchServiceError as exc:
-            logger.warning(
-                "Search service error for query=%r: [%s] %s",
-                query,
-                exc.code,
-                exc.message,
-            )
+
+            t_items, t_total = [], 0
+            s_items, s_total = [], 0
+            p_items, p_total = [], 0
+            m_items, m_total = [], 0
+            sp_items, sp_total = [], 0
+
+            if category in ("all", "tasks"):
+                t_items, t_total = await self._search_tasks(
+                    project_ids, query, page=page, page_size=page_size
+                )
+
+            if category in ("all", "user_stories"):
+                s_items, s_total = await self._search_user_stories(
+                    project_ids, query, page=page, page_size=page_size
+                )
+
+            if category in ("all", "projects"):
+                p_items, p_total = await self._search_projects(
+                    project_ids, query, page=page, page_size=page_size
+                )
+
+            if category in ("all", "members"):
+                m_items, m_total = await self._search_members(
+                    organization_id,
+                    user_id,
+                    is_org_admin,
+                    project_ids,
+                    query,
+                    page=page,
+                    page_size=page_size,
+                )
+
+            if category in ("all", "sprints"):
+                sp_items, sp_total = await self._search_sprints(
+                    project_ids, query, page=page, page_size=page_size
+                )
+
+        except SearchServiceError:
             raise
         except SQLAlchemyError as exc:
+            await self.db.rollback()
             logger.error(
-                "Database error executing search query=%r: %s",
-                query,
+                "Database error in global search (category=%s, query_len=%d): %s",
+                category,
+                len(query),
                 exc,
                 exc_info=True,
             )
@@ -217,51 +353,137 @@ class SearchService:
             ) from exc
         except Exception as exc:
             logger.error(
-                "Unexpected error during global search query=%r: %s",
-                query,
+                "Unexpected error in global search (category=%s, query_len=%d): %s",
+                category,
+                len(query),
                 exc,
                 exc_info=True,
             )
             raise
 
-        overall_total = (
-            tasks_total
-            + stories_total
-            + projects_total
-            + members_total
-            + sprints_total
-        )
-        has_next = (page * page_size) < overall_total
-        meta = SearchMeta(
-            page=page,
-            page_size=page_size,
-            has_next=has_next,
-            total=overall_total,
-            total_tasks=tasks_total,
-            total_projects=projects_total,
-            total_members=members_total,
-            total_sprints=sprints_total,
-            total_user_stories=stories_total,
-        )
+        if category == "all":
+            t_has_next = (page * page_size) < t_total
+            s_has_next = (page * page_size) < s_total
+            p_has_next = (page * page_size) < p_total
+            m_has_next = (page * page_size) < m_total
+            sp_has_next = (page * page_size) < sp_total
 
-        logger.info(
-            "Global search completed for query=%r: total=%d (tasks=%d, stories=%d, projects=%d, members=%d, sprints=%d)",
-            query,
-            overall_total,
-            tasks_total,
-            stories_total,
-            projects_total,
-            members_total,
-            sprints_total,
-        )
+            overall_total = t_total + s_total + p_total + m_total + sp_total
+            overall_has_next = t_has_next or s_has_next or p_has_next or m_has_next or sp_has_next
 
-        data = GlobalSearchData(
-            tasks=tasks,
-            user_stories=stories,
-            projects=projects,
-            members=members,
-            sprints=sprints,
-        )
+            p_map = CategoryPaginationMap(
+                tasks=CategoryPaginationMeta(page=page, page_size=page_size, has_next=t_has_next, total=t_total),
+                user_stories=CategoryPaginationMeta(page=page, page_size=page_size, has_next=s_has_next, total=s_total),
+                projects=CategoryPaginationMeta(page=page, page_size=page_size, has_next=p_has_next, total=p_total),
+                members=CategoryPaginationMeta(page=page, page_size=page_size, has_next=m_has_next, total=m_total),
+                sprints=CategoryPaginationMeta(page=page, page_size=page_size, has_next=sp_has_next, total=sp_total),
+            )
+
+            meta = SearchMeta(
+                total=overall_total,
+                page=page,
+                page_size=page_size,
+                has_next=overall_has_next,
+                total_tasks=t_total,
+                total_user_stories=s_total,
+                total_projects=p_total,
+                total_members=m_total,
+                total_sprints=sp_total,
+                pagination=p_map,
+            )
+            data = GlobalSearchData(
+                tasks=t_items,
+                user_stories=s_items,
+                projects=p_items,
+                members=m_items,
+                sprints=sp_items,
+            )
+        elif category == "tasks":
+            t_has_next = (page * page_size) < t_total
+            meta = SearchMeta(
+                total=t_total,
+                page=page,
+                page_size=page_size,
+                has_next=t_has_next,
+                total_tasks=t_total,
+                pagination=CategoryPaginationMap(
+                    tasks=CategoryPaginationMeta(page=page, page_size=page_size, has_next=t_has_next, total=t_total)
+                ),
+            )
+            data = GlobalSearchData(tasks=t_items)
+        elif category == "user_stories":
+            s_has_next = (page * page_size) < s_total
+            meta = SearchMeta(
+                total=s_total,
+                page=page,
+                page_size=page_size,
+                has_next=s_has_next,
+                total_user_stories=s_total,
+                pagination=CategoryPaginationMap(
+                    user_stories=CategoryPaginationMeta(page=page, page_size=page_size, has_next=s_has_next, total=s_total)
+                ),
+            )
+            data = GlobalSearchData(user_stories=s_items)
+        elif category == "projects":
+            p_has_next = (page * page_size) < p_total
+            meta = SearchMeta(
+                total=p_total,
+                page=page,
+                page_size=page_size,
+                has_next=p_has_next,
+                total_projects=p_total,
+                pagination=CategoryPaginationMap(
+                    projects=CategoryPaginationMeta(page=page, page_size=page_size, has_next=p_has_next, total=p_total)
+                ),
+            )
+            data = GlobalSearchData(projects=p_items)
+        elif category == "members":
+            m_has_next = (page * page_size) < m_total
+            meta = SearchMeta(
+                total=m_total,
+                page=page,
+                page_size=page_size,
+                has_next=m_has_next,
+                total_members=m_total,
+                pagination=CategoryPaginationMap(
+                    members=CategoryPaginationMeta(page=page, page_size=page_size, has_next=m_has_next, total=m_total)
+                ),
+            )
+            data = GlobalSearchData(members=m_items)
+        elif category == "sprints":
+            sp_has_next = (page * page_size) < sp_total
+            meta = SearchMeta(
+                total=sp_total,
+                page=page,
+                page_size=page_size,
+                has_next=sp_has_next,
+                total_sprints=sp_total,
+                pagination=CategoryPaginationMap(
+                    sprints=CategoryPaginationMeta(page=page, page_size=page_size, has_next=sp_has_next, total=sp_total)
+                ),
+            )
+            data = GlobalSearchData(sprints=sp_items)
+        else:
+            raise SearchServiceError(400, "BAD_REQUEST", f"Invalid category '{category}'")
+
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        if duration_ms > 1000.0:
+            logger.warning(
+                "Slow global search completed: category=%s, duration=%.2fms, total=%d, req_id=%s",
+                category,
+                duration_ms,
+                meta.total,
+                request_id or "-",
+            )
+        else:
+            logger.info(
+                "Global search completed: category=%s, duration=%.2fms, total=%d, req_id=%s",
+                category,
+                duration_ms,
+                meta.total,
+                request_id or "-",
+            )
+
         return GlobalSearchResult(data=data, meta=meta)
 
     async def _search_tasks(
@@ -302,16 +524,19 @@ class SearchService:
                     and_(Task.project_id.in_(matching_pids), Task.sequence_number == s_seq)
                 )
         predicate = or_(*predicates)
-        offset = max(0, (page - 1) * page_size)
         total_stmt = (
-            select(func.count(distinct(Task.id)))
+            select(func.count(Task.id))
             .where(
                 Task.project_id.in_(project_ids),
                 Task.deleted_at.is_(None),
                 predicate,
             )
         )
-        total = (await self.db.execute(total_stmt)).scalar() or 0
+        total = int((await self.db.execute(total_stmt)).scalar() or 0)
+        offset = max(0, (page - 1) * page_size)
+        if total == 0 or offset >= total:
+            return [], total
+
         tasks = list(
             (
                 await self.db.execute(
@@ -322,6 +547,7 @@ class SearchService:
                         predicate,
                     )
                     .options(joinedload(Task.project))
+                    .order_by(Task.created_at.desc(), Task.id.desc())
                     .offset(offset)
                     .limit(page_size)
                 )
@@ -343,7 +569,7 @@ class SearchService:
                 )
                 for task in tasks
             ],
-            int(total),
+            total,
         )
 
     async def _search_user_stories(
@@ -357,16 +583,19 @@ class SearchService:
             ),
             cast(UserStory.serial_number, String) == query,
         )
-        offset = max(0, (page - 1) * page_size)
         total_stmt = (
-            select(func.count(distinct(UserStory.id)))
+            select(func.count(UserStory.id))
             .where(
                 UserStory.project_id.in_(project_ids),
                 UserStory.deleted_at.is_(None),
                 predicate,
             )
         )
-        total = (await self.db.execute(total_stmt)).scalar() or 0
+        total = int((await self.db.execute(total_stmt)).scalar() or 0)
+        offset = max(0, (page - 1) * page_size)
+        if total == 0 or offset >= total:
+            return [], total
+
         stories = list(
             (
                 await self.db.execute(
@@ -380,6 +609,7 @@ class SearchService:
                         joinedload(UserStory.project),
                         joinedload(UserStory.status),
                     )
+                    .order_by(UserStory.created_at.desc(), UserStory.id.desc())
                     .offset(offset)
                     .limit(page_size)
                 )
@@ -401,7 +631,7 @@ class SearchService:
                 )
                 for story in stories
             ],
-            int(total),
+            total,
         )
 
     async def _search_projects(
@@ -412,16 +642,19 @@ class SearchService:
         predicate = self._search_predicate(
             query, Project.name, self._clean_rich_text(Project.description), Project.slug
         )
-        offset = max(0, (page - 1) * page_size)
         total_stmt = (
-            select(func.count(distinct(Project.id)))
+            select(func.count(Project.id))
             .where(
                 Project.id.in_(project_ids),
                 Project.deleted_at.is_(None),
                 predicate,
             )
         )
-        total = (await self.db.execute(total_stmt)).scalar() or 0
+        total = int((await self.db.execute(total_stmt)).scalar() or 0)
+        offset = max(0, (page - 1) * page_size)
+        if total == 0 or offset >= total:
+            return [], total
+
         projects = list(
             (
                 await self.db.execute(
@@ -431,6 +664,7 @@ class SearchService:
                         Project.deleted_at.is_(None),
                         predicate,
                     )
+                    .order_by(Project.created_at.desc(), Project.id.desc())
                     .offset(offset)
                     .limit(page_size)
                 )
@@ -451,7 +685,7 @@ class SearchService:
                 )
                 for project in projects
             ],
-            int(total),
+            total,
         )
 
     async def _search_members(
@@ -464,12 +698,6 @@ class SearchService:
         page: int = 1,
         page_size: int = 10,
     ) -> tuple[list[MemberSearchResult], int]:
-        logger.debug(
-            "Searching members in organization_id=%s with query=%r (is_org_admin=%s)",
-            organization_id,
-            query,
-            is_org_admin,
-        )
         predicate = self._search_predicate(
             query,
             User.full_name,
@@ -484,10 +712,6 @@ class SearchService:
         ]
 
         if not is_org_admin:
-            # Non-org_admin users can only view:
-            # 1. Themselves
-            # 2. Org admins
-            # 3. Teammates assigned to at least one of their accessible projects
             allowed_criteria = [
                 User.id == user_id,
                 func.lower(func.coalesce(Role.name, "")) == "org_admin",
@@ -503,13 +727,16 @@ class SearchService:
                 )
             base_conditions.append(or_(*allowed_criteria))
 
-        offset = max(0, (page - 1) * page_size)
         total_stmt = (
-            select(func.count(distinct(User.id)))
+            select(func.count(User.id))
             .outerjoin(Role, User.role_id == Role.id)
             .where(*base_conditions)
         )
-        total = (await self.db.execute(total_stmt)).scalar() or 0
+        total = int((await self.db.execute(total_stmt)).scalar() or 0)
+        offset = max(0, (page - 1) * page_size)
+        if total == 0 or offset >= total:
+            return [], total
+
         users = list(
             (
                 await self.db.execute(
@@ -517,6 +744,7 @@ class SearchService:
                     .outerjoin(Role, User.role_id == Role.id)
                     .where(*base_conditions)
                     .options(joinedload(User.role))
+                    .order_by(User.created_at.desc(), User.id.desc())
                     .offset(offset)
                     .limit(page_size)
                 )
@@ -524,7 +752,6 @@ class SearchService:
             .scalars()
             .unique()
         )
-        logger.debug("Found %d members for query=%r (total: %d)", len(users), query, total)
         results: list[MemberSearchResult] = []
         for user in users:
             role_name = (
@@ -543,7 +770,7 @@ class SearchService:
                     color=user.color or "",
                 )
             )
-        return results, int(total)
+        return results, total
 
     async def _search_sprints(
         self, project_ids: set[str], query: str, page: int = 1, page_size: int = 10
@@ -553,16 +780,19 @@ class SearchService:
         predicate = self._search_predicate(
             query, Sprint.name, self._clean_rich_text(Sprint.goal)
         )
-        offset = max(0, (page - 1) * page_size)
         total_stmt = (
-            select(func.count(distinct(Sprint.id)))
+            select(func.count(Sprint.id))
             .where(
                 Sprint.project_id.in_(project_ids),
                 Sprint.deleted_at.is_(None),
                 predicate,
             )
         )
-        total = (await self.db.execute(total_stmt)).scalar() or 0
+        total = int((await self.db.execute(total_stmt)).scalar() or 0)
+        offset = max(0, (page - 1) * page_size)
+        if total == 0 or offset >= total:
+            return [], total
+
         sprints = list(
             (
                 await self.db.execute(
@@ -573,6 +803,7 @@ class SearchService:
                         predicate,
                     )
                     .options(joinedload(Sprint.project))
+                    .order_by(Sprint.created_at.desc(), Sprint.id.desc())
                     .offset(offset)
                     .limit(page_size)
                 )
@@ -592,5 +823,5 @@ class SearchService:
                 )
                 for sprint in sprints
             ],
-            int(total),
+            total,
         )
