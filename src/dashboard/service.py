@@ -24,7 +24,7 @@ from src.dashboard.schemas import (
 from src.middleware.rbac import has_default_permission
 from src.organization.models import Role
 from src.project.models import Project, ProjectMember
-from src.sprint.models import Sprint
+from src.sprint.models import Sprint, SprintSnapshot
 from src.task.models import Task
 from src.utils.performance_cache import cache_get_json, cache_set_json, project_version
 
@@ -409,11 +409,15 @@ class DashboardService:
     def _generate_burndown_points(
         start_d: date,
         end_d: date,
-        total_estimated_hours: float,
-        total_actual_hours: float,
+        total_estimated_hours: float = 0.0,
+        total_actual_hours: float = 0.0,
+        tasks: Optional[List[Any]] = None,
+        snapshots: Optional[Dict[str, float]] = None,
     ) -> List[SprintBurndownPoint]:
-        total_estimated_hours = round(total_estimated_hours, 2)
-        total_actual_hours = round(total_actual_hours, 2)
+        if isinstance(start_d, datetime) or hasattr(start_d, "date"):
+            start_d = start_d.date()
+        if isinstance(end_d, datetime) or hasattr(end_d, "date"):
+            end_d = end_d.date()
 
         total_days = (end_d - start_d).days + 1
         if total_days <= 0:
@@ -422,24 +426,70 @@ class DashboardService:
                 detail="Invalid sprint duration",
             )
 
+        task_data = []
+        if tasks:
+            for t in tasks:
+                est = getattr(t, "estimated_hours", None)
+                sp = getattr(t, "story_points", None)
+                act = getattr(t, "actual_hours", None)
+                if est is not None and float(est) > 0:
+                    weight = float(est)
+                elif sp is not None and float(sp) > 0:
+                    weight = float(sp)
+                elif act is not None and float(act) > 0:
+                    weight = float(act)
+                else:
+                    weight = 0.0
+
+                is_final = bool(getattr(t, "is_final", False))
+                updated_at = getattr(t, "updated_at", None)
+                if updated_at:
+                    comp_d = updated_at.date() if isinstance(updated_at, datetime) or hasattr(updated_at, "date") else updated_at
+                else:
+                    comp_d = start_d
+
+                if isinstance(comp_d, datetime) or hasattr(comp_d, "date"):
+                    comp_d = comp_d.date()
+
+                task_data.append((weight, is_final, comp_d))
+
+        total_weight = sum(w for w, _, _ in task_data) if task_data else float(total_estimated_hours or 0.0)
+        if total_weight == 0.0 and task_data:
+            # Fallback to counting tasks if estimates were not set
+            task_data = [(1.0, is_f, c_d) for _, is_f, c_d in task_data]
+            total_weight = float(len(task_data))
+
+        total_weight = round(total_weight, 2)
+        today = datetime.now(timezone.utc).date()
+
         result: List[SprintBurndownPoint] = []
-        for day in range(total_days):
-            current_date = start_d + timedelta(days=day)
+        for day_idx in range(total_days):
+            current_date = start_d + timedelta(days=day_idx)
+            date_str = current_date.strftime("%Y-%m-%d")
+
             if total_days == 1:
                 ideal_hours = 0.0
             else:
-                ideal_hours = total_estimated_hours - (total_estimated_hours / float(total_days - 1)) * float(day)
+                ideal_hours = total_weight - (total_weight / float(total_days - 1)) * float(day_idx)
+            ideal_hours = max(0.0, round(ideal_hours, 2))
 
-            if ideal_hours < 0:
-                ideal_hours = 0.0
-
-            ideal_hours = round(ideal_hours, 2)
-            actual_hours = round(total_actual_hours, 2)
+            actual_hours: Optional[float] = None
+            if current_date <= today:
+                if snapshots and date_str in snapshots:
+                    actual_hours = round(float(snapshots[date_str]), 2)
+                elif task_data:
+                    completed_so_far = sum(
+                        w for w, is_final, c_d in task_data
+                        if is_final and c_d <= current_date
+                    )
+                    actual_hours = max(0.0, round(total_weight - completed_so_far, 2))
+                else:
+                    actual_hours = round(float(total_actual_hours or 0.0), 2)
 
             result.append(
                 SprintBurndownPoint(
-                    day=day + 1,
-                    date=current_date.strftime("%Y-%m-%d"),
+                    day=day_idx + 1,
+                    date=date_str,
                     ideal_hours=ideal_hours,
                     actual_hours=actual_hours,
                 )
@@ -456,8 +506,8 @@ class DashboardService:
                 detail="Sprint start date and end date must be set",
             )
 
-        start_d = sprint.start_date if isinstance(sprint.start_date, date) else sprint.start_date.date()
-        end_d = sprint.end_date if isinstance(sprint.end_date, date) else sprint.end_date.date()
+        start_d = sprint.start_date.date() if isinstance(sprint.start_date, datetime) or hasattr(sprint.start_date, "date") else sprint.start_date
+        end_d = sprint.end_date.date() if isinstance(sprint.end_date, datetime) or hasattr(sprint.end_date, "date") else sprint.end_date
 
         if end_d < start_d:
             raise HTTPException(
@@ -465,20 +515,39 @@ class DashboardService:
                 detail="Sprint end date cannot be before start date",
             )
 
-        hours_stmt = (
+        tasks_stmt = (
             select(
-                func.coalesce(func.sum(Task.estimated_hours), 0.0).label("est"),
-                func.coalesce(func.sum(Task.actual_hours), 0.0).label("act"),
+                Task.id,
+                Task.estimated_hours,
+                Task.actual_hours,
+                Task.story_points,
+                Task.updated_at,
+                CustomStatus.is_final,
             )
+            .outerjoin(CustomStatus, CustomStatus.id == Task.status_id)
             .where(
                 Task.project_id == project_id,
                 Task.sprint_id == sprint.id,
                 Task.deleted_at.is_(None),
             )
         )
-        row = (await self.db.execute(hours_stmt)).one()
+        task_rows = (await self.db.execute(tasks_stmt)).all()
+
+        snap_stmt = (
+            select(SprintSnapshot.date, SprintSnapshot.remaining_story_points)
+            .where(SprintSnapshot.sprint_id == sprint.id)
+        )
+        snap_rows = (await self.db.execute(snap_stmt)).all()
+        snapshots = {
+            row.date.strftime("%Y-%m-%d"): float(row.remaining_story_points)
+            for row in snap_rows if row.date
+        } if snap_rows else None
+
         return self._generate_burndown_points(
-            start_d, end_d, float(row.est or 0.0), float(row.act or 0.0)
+            start_d=start_d,
+            end_d=end_d,
+            tasks=task_rows,
+            snapshots=snapshots,
         )
 
     async def _get_sprint_burndown_data(
@@ -534,8 +603,8 @@ class DashboardService:
                 if not sp.start_date or not sp.end_date:
                     logger.warning("Skipping active sprint %s due to missing start or end date", sp.id)
                     continue
-                start_d = sp.start_date if isinstance(sp.start_date, date) else sp.start_date.date()
-                end_d = sp.end_date if isinstance(sp.end_date, date) else sp.end_date.date()
+                start_d = sp.start_date.date() if isinstance(sp.start_date, datetime) or hasattr(sp.start_date, "date") else sp.start_date
+                end_d = sp.end_date.date() if isinstance(sp.end_date, datetime) or hasattr(sp.end_date, "date") else sp.end_date
                 if end_d < start_d:
                     logger.warning("Skipping active sprint %s because end date is before start date", sp.id)
                     continue
@@ -544,28 +613,52 @@ class DashboardService:
             if not valid_sprints:
                 return DashboardSprintBurndownResponse(sprint_burndown=[])
 
-            # Batch query estimated and actual hours for all active sprints in ONE query
+            # Batch query tasks for all active sprints in ONE query
             sp_ids = [sp.id for sp, _, _ in valid_sprints]
-            hours_stmt = (
+            tasks_stmt = (
                 select(
                     Task.sprint_id,
-                    func.coalesce(func.sum(Task.estimated_hours), 0.0).label("est"),
-                    func.coalesce(func.sum(Task.actual_hours), 0.0).label("act"),
+                    Task.id,
+                    Task.estimated_hours,
+                    Task.actual_hours,
+                    Task.story_points,
+                    Task.updated_at,
+                    CustomStatus.is_final,
                 )
+                .outerjoin(CustomStatus, CustomStatus.id == Task.status_id)
                 .where(
                     Task.project_id == project_id,
                     Task.sprint_id.in_(sp_ids),
                     Task.deleted_at.is_(None),
                 )
-                .group_by(Task.sprint_id)
             )
-            hours_res = await self.db.execute(hours_stmt)
-            hours_map = {row.sprint_id: (float(row.est or 0.0), float(row.act or 0.0)) for row in hours_res.all()}
+            task_rows = (await self.db.execute(tasks_stmt)).all()
+            tasks_by_sprint: Dict[str, List[Any]] = {}
+            for row in task_rows:
+                tasks_by_sprint.setdefault(str(row.sprint_id), []).append(row)
+
+            # Batch query snapshots for all active sprints in ONE query
+            snap_stmt = (
+                select(SprintSnapshot.sprint_id, SprintSnapshot.date, SprintSnapshot.remaining_story_points)
+                .where(SprintSnapshot.sprint_id.in_(sp_ids))
+            )
+            snap_rows = (await self.db.execute(snap_stmt)).all()
+            snaps_by_sprint: Dict[str, Dict[str, float]] = {}
+            for s_row in snap_rows:
+                if s_row.date:
+                    d_str = s_row.date.strftime("%Y-%m-%d")
+                    snaps_by_sprint.setdefault(str(s_row.sprint_id), {})[d_str] = float(s_row.remaining_story_points)
 
             for sp, start_d, end_d in valid_sprints:
-                est, act = hours_map.get(sp.id, (0.0, 0.0))
+                s_tasks = tasks_by_sprint.get(str(sp.id), [])
+                s_snaps = snaps_by_sprint.get(str(sp.id))
                 try:
-                    burndown_points = self._generate_burndown_points(start_d, end_d, est, act)
+                    burndown_points = self._generate_burndown_points(
+                        start_d=start_d,
+                        end_d=end_d,
+                        tasks=s_tasks,
+                        snapshots=s_snaps,
+                    )
                     response_sprints.append(
                         SprintBurndownData(
                             sprint_id=UUID(sp.id),

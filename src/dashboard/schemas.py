@@ -21,7 +21,7 @@ class SprintBurndownPoint(BaseModel):
     day: int = Field(..., description="Day number starting from 1")
     date: str = Field(..., description="Date in YYYY-MM-DD format")
     ideal_hours: float = Field(..., description="Ideal remaining hours")
-    actual_hours: float = Field(..., description="Actual remaining hours")
+    actual_hours: Optional[float] = Field(default=None, description="Actual remaining hours")
 
 
 class SprintBurndownData(BaseModel):
