@@ -70,6 +70,20 @@ def query_counter():
     return QueryCounter(engine)
 
 
+@pytest.fixture(autouse=True)
+def mock_global_serial_number(monkeypatch):
+    """
+    Globally mock get_next_global_serial_number for every test across the entire suite.
+    Prevents PostgreSQL sequence inflation (global_work_item_serial_seq) across all tests.
+    """
+    _mock_serial = 800000
+    def fake_serial(*args, **kwargs):
+        nonlocal _mock_serial
+        _mock_serial += 1
+        return _mock_serial
+    monkeypatch.setattr("src.user_story.models.get_next_global_serial_number", fake_serial)
+
+
 @pytest.fixture
 async def db_session(monkeypatch) -> AsyncGenerator[AsyncSession, None]:
     async with engine.connect() as conn:
@@ -92,14 +106,6 @@ async def db_session(monkeypatch) -> AsyncGenerator[AsyncSession, None]:
         async def fake_close():
             pass
         monkeypatch.setattr(session, "close", fake_close)
-
-        # 2. Monkeypatch global serial sequences to prevent Postgres sequence inflation
-        _mock_serial = 800000
-        def fake_serial(*args, **kwargs):
-            nonlocal _mock_serial
-            _mock_serial += 1
-            return _mock_serial
-        monkeypatch.setattr("src.user_story.models.get_next_global_serial_number", fake_serial)
 
         # 3. Monkeypatch AsyncSessionLocal so any direct calls also use this session
         class _TestSessionContext:

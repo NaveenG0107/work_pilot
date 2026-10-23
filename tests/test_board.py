@@ -24,6 +24,13 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+async def _ensure_transactional_isolation(client: AsyncClient):
+    """Ensure all board tests run within an isolated transaction with commit monkeypatched."""
+    yield client
+
+
+
 class QueryCounter:
     def __init__(self, db_engine):
         self.engine = db_engine.sync_engine

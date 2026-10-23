@@ -134,5 +134,61 @@ async def test_search_rich_text_html_tags_and_urls_not_matched(client: AsyncClie
     assert task_id not in task_ids_tag
 
 
+async def test_search_unassigned_member_and_teammate_scoping(client: AsyncClient, app_context: dict):
+    from sqlalchemy import select
+    from src.database import AsyncSessionLocal
+    from src.auth.models import User
+    from src.organization.models import Role
+    from src.utils.core import create_jwt
+    import uuid
+
+    org_id = app_context["org_a_id"]
+    unassigned_id = str(uuid.uuid4())
+
+    async with AsyncSessionLocal() as session:
+        role_stmt = select(Role).where(Role.organization_id == org_id, Role.name != "org_admin").limit(1)
+        role = (await session.execute(role_stmt)).scalars().first()
+        role_id = role.id if role else None
+
+        unassigned_user = User(
+            id=unassigned_id,
+            organization_id=org_id,
+            username=f"unassigned_{uuid.uuid4().hex[:6]}",
+            email=f"unassigned_{uuid.uuid4().hex[:6]}@example.com",
+            full_name="Unassigned User Test",
+            role_id=role_id,
+            is_active=True,
+        )
+        session.add(unassigned_user)
+        await session.commit()
+
+    token_unassigned, _ = create_jwt(
+        role="member",
+        user_id=unassigned_id,
+        organization_id=org_id,
+        platform="web",
+    )
+    headers = {"Authorization": f"Bearer {token_unassigned}"}
+
+    # 1. Unassigned member searching tasks/projects/stories should see 0
+    resp = await client.get("/api/v1/search?q=task", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body.get("data", {})
+    assert len(data.get("tasks", [])) == 0
+    assert len(data.get("projects", [])) == 0
+    assert len(data.get("user_stories", [])) == 0
+    assert len(data.get("sprints", [])) == 0
+
+    # 2. Unassigned member searching members should only find self and org_admin, not other project members
+    resp_members = await client.get("/api/v1/search?q=User", headers=headers)
+    assert resp_members.status_code == 200
+    members_data = resp_members.json().get("data", {}).get("members", [])
+    for m in members_data:
+        assert m["id"] == unassigned_id or m["role"] == "org_admin"
+
+
+
 
 

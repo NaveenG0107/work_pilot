@@ -117,8 +117,9 @@ class SearchService:
                 )
             ).scalars()
         )
-        if (user.role.name if user.role else "").strip().lower() == "org_admin":
-            return project_ids
+        is_org_admin = (user.role.name if user.role else "").strip().lower() == "org_admin"
+        if is_org_admin:
+            return True, project_ids
 
         memberships = list(
             (
@@ -135,11 +136,12 @@ class SearchService:
                 )
             ).scalars()
         )
-        return {
+        accessible_ids = {
             str(member.project_id)
             for member in memberships
             if self._role_can_view_projects(member.role)
         }
+        return False, accessible_ids
 
     async def global_search(
         self,
@@ -177,13 +179,21 @@ class SearchService:
         )
 
         try:
-            project_ids = await self._accessible_project_ids(
+            is_org_admin, project_ids = await self._accessible_project_ids(
                 user_id, organization_id
             )
             tasks, tasks_total = await self._search_tasks(project_ids, query, page=page, page_size=page_size)
             stories, stories_total = await self._search_user_stories(project_ids, query, page=page, page_size=page_size)
             projects, projects_total = await self._search_projects(project_ids, query, page=page, page_size=page_size)
-            members, members_total = await self._search_members(organization_id, query, page=page, page_size=page_size)
+            members, members_total = await self._search_members(
+                organization_id,
+                user_id,
+                is_org_admin,
+                project_ids,
+                query,
+                page=page,
+                page_size=page_size,
+            )
             sprints, sprints_total = await self._search_sprints(project_ids, query, page=page, page_size=page_size)
         except SearchServiceError as exc:
             logger.warning(
@@ -445,12 +455,20 @@ class SearchService:
         )
 
     async def _search_members(
-        self, organization_id: str, query: str, page: int = 1, page_size: int = 10
+        self,
+        organization_id: str,
+        user_id: str,
+        is_org_admin: bool,
+        project_ids: set[str],
+        query: str,
+        page: int = 1,
+        page_size: int = 10,
     ) -> tuple[list[MemberSearchResult], int]:
         logger.debug(
-            "Searching members in organization_id=%s with query=%r",
+            "Searching members in organization_id=%s with query=%r (is_org_admin=%s)",
             organization_id,
             query,
+            is_org_admin,
         )
         predicate = self._search_predicate(
             query,
@@ -459,15 +477,37 @@ class SearchService:
             User.email,
             Role.name,
         )
+        base_conditions = [
+            User.organization_id == organization_id,
+            User.deleted_at.is_(None),
+            predicate,
+        ]
+
+        if not is_org_admin:
+            # Non-org_admin users can only view:
+            # 1. Themselves
+            # 2. Org admins
+            # 3. Teammates assigned to at least one of their accessible projects
+            allowed_criteria = [
+                User.id == user_id,
+                func.lower(func.coalesce(Role.name, "")) == "org_admin",
+            ]
+            if project_ids:
+                allowed_criteria.append(
+                    User.id.in_(
+                        select(ProjectMember.user_id).where(
+                            ProjectMember.project_id.in_(project_ids),
+                            ProjectMember.deleted_at.is_(None),
+                        )
+                    )
+                )
+            base_conditions.append(or_(*allowed_criteria))
+
         offset = max(0, (page - 1) * page_size)
         total_stmt = (
             select(func.count(distinct(User.id)))
             .outerjoin(Role, User.role_id == Role.id)
-            .where(
-                User.organization_id == organization_id,
-                User.deleted_at.is_(None),
-                predicate,
-            )
+            .where(*base_conditions)
         )
         total = (await self.db.execute(total_stmt)).scalar() or 0
         users = list(
@@ -475,11 +515,7 @@ class SearchService:
                 await self.db.execute(
                     select(User)
                     .outerjoin(Role, User.role_id == Role.id)
-                    .where(
-                        User.organization_id == organization_id,
-                        User.deleted_at.is_(None),
-                        predicate,
-                    )
+                    .where(*base_conditions)
                     .options(joinedload(User.role))
                     .offset(offset)
                     .limit(page_size)
