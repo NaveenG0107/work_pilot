@@ -64,7 +64,9 @@ def dump(value: Any) -> Any:
     "",
     response_model=SearchSuccessResponse,
     responses={
+        400: {"model": ErrorResponse},
         401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
         500: {"model": ErrorResponse},
     },
     summary="Global Search",
@@ -77,6 +79,10 @@ def dump(value: Any) -> Any:
 async def global_search(
     request: Request,
     q: str = Query(default="", description="Search query string"),
+    category: str = Query(
+        default="all",
+        description="Search category: all, tasks, user_stories, projects, members, sprints",
+    ),
     page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(
         default=10, ge=1, le=100, description="Items per category per page"
@@ -86,13 +92,15 @@ async def global_search(
     try:
         user_id = getattr(request.state, "user_id", None)
         organization_id = getattr(request.state, "organization_id", None)
+        request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
         logger.info(
-            "Global search requested: q=%r, page=%d, page_size=%d, user_id=%s, organization_id=%s",
-            q,
+            "Global search requested: category=%s, page=%d, page_size=%d, user_id=%s, organization_id=%s, req_id=%s",
+            category,
             page,
             page_size,
             user_id,
             organization_id,
+            request_id or "-",
         )
         if not user_id:
             raise SearchServiceError(
@@ -106,15 +114,18 @@ async def global_search(
             str(user_id),
             str(organization_id),
             q,
+            category=category,
             page=page,
             page_size=page_size,
+            request_id=str(request_id) if request_id else None,
         )
         logger.info(
-            "Global search succeeded for q=%r (user_id=%s, org_id=%s, total=%d)",
-            q,
+            "Global search response ready: category=%s, user_id=%s, org_id=%s, total=%d, req_id=%s",
+            category,
             user_id,
             organization_id,
             result.meta.total,
+            request_id or "-",
         )
         return JSONResponse(
             status_code=200,

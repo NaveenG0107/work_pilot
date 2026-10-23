@@ -42,27 +42,43 @@ class MemberSearchResult(SearchSchema):
     color: str = ""
 
 
+class CategoryPaginationMeta(SearchSchema):
+    page: int
+    page_size: int
+    has_next: bool
+    total: int
+
+
+class CategoryPaginationMap(SearchSchema):
+    tasks: CategoryPaginationMeta | None = Field(default=None, exclude_if=omit_empty)
+    user_stories: CategoryPaginationMeta | None = Field(default=None, exclude_if=omit_empty)
+    projects: CategoryPaginationMeta | None = Field(default=None, exclude_if=omit_empty)
+    members: CategoryPaginationMeta | None = Field(default=None, exclude_if=omit_empty)
+    sprints: CategoryPaginationMeta | None = Field(default=None, exclude_if=omit_empty)
+
+
 class SearchMeta(SearchSchema):
+    total: int = 0
     page: int = 1
     page_size: int = 10
     has_next: bool = False
-    total: int = 0
-    total_tasks: int = 0
-    total_projects: int = 0
-    total_members: int = 0
-    total_sprints: int = 0
-    total_user_stories: int = 0
+    total_tasks: int | None = Field(default=None, exclude_if=omit_empty)
+    total_user_stories: int | None = Field(default=None, exclude_if=omit_empty)
+    total_projects: int | None = Field(default=None, exclude_if=omit_empty)
+    total_members: int | None = Field(default=None, exclude_if=omit_empty)
+    total_sprints: int | None = Field(default=None, exclude_if=omit_empty)
+    pagination: CategoryPaginationMap = Field(default_factory=CategoryPaginationMap)
 
 
 SearchPaginationMeta = SearchMeta
 
 
 class GlobalSearchData(SearchSchema):
-    tasks: list[SearchResult] = Field(default_factory=list)
-    user_stories: list[SearchResult] = Field(default_factory=list)
-    projects: list[SearchResult] = Field(default_factory=list)
-    members: list[MemberSearchResult | SearchResult] = Field(default_factory=list)
-    sprints: list[SearchResult] = Field(default_factory=list)
+    tasks: list[SearchResult] | None = Field(default=None, exclude_if=omit_empty)
+    user_stories: list[SearchResult] | None = Field(default=None, exclude_if=omit_empty)
+    projects: list[SearchResult] | None = Field(default=None, exclude_if=omit_empty)
+    members: list[MemberSearchResult] | None = Field(default=None, exclude_if=omit_empty)
+    sprints: list[SearchResult] | None = Field(default=None, exclude_if=omit_empty)
 
 
 GlobalSearchResponse = GlobalSearchData

@@ -13,6 +13,25 @@ async def test_search_query_success(client: AsyncClient, app_context: dict):
     assert body.get("success") is True
     assert "data" in body
 
+    # Verify all 5 categories are present as lists in data
+    data = body["data"]
+    for cat in ["tasks", "user_stories", "projects", "members", "sprints"]:
+        assert cat in data
+        assert isinstance(data[cat], list)
+
+    # Verify nested pagination metadata
+    assert "meta" in body
+    meta = body["meta"]
+    assert "pagination" in meta
+    pagination = meta["pagination"]
+    for cat in ["tasks", "user_stories", "projects", "members", "sprints"]:
+        assert cat in pagination
+        cat_p = pagination[cat]
+        assert "page" in cat_p
+        assert "page_size" in cat_p
+        assert "has_next" in cat_p
+        assert "total" in cat_p
+
 
 async def test_search_empty_query(client: AsyncClient, app_context: dict):
     headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
@@ -21,6 +40,14 @@ async def test_search_empty_query(client: AsyncClient, app_context: dict):
     assert resp.status_code == 200
     body = resp.json()
     assert body.get("success") is True
+    assert body.get("meta", {}).get("total") == 0
+    data = body.get("data", {})
+    pagination = body.get("meta", {}).get("pagination", {})
+    for cat in ["tasks", "user_stories", "projects", "members", "sprints"]:
+        assert cat in data
+        assert data[cat] == []
+        assert pagination[cat]["total"] == 0
+        assert pagination[cat]["has_next"] is False
 
 
 async def test_search_tenant_isolation(client: AsyncClient, app_context: dict):
@@ -66,7 +93,7 @@ async def test_search_metadata_totals(client: AsyncClient, app_context: dict):
     assert body.get("success") is True
     data = body.get("data", {})
 
-    # Check meta fields
+    # Check overall meta fields
     assert "meta" in body
     meta = body["meta"]
     assert meta["page"] == 1
@@ -95,8 +122,15 @@ async def test_search_metadata_totals(client: AsyncClient, app_context: dict):
     assert "projects" in data
     assert "members" in data
     assert "sprints" in data
-    assert "tasks_total" not in data
-    assert "meta" not in data
+
+    # Check independent pagination map
+    assert "pagination" in meta
+    for cat in ["tasks", "user_stories", "projects", "members", "sprints"]:
+        assert cat in meta["pagination"]
+        assert meta["pagination"][cat]["page"] == 1
+        assert meta["pagination"][cat]["page_size"] == 10
+        assert isinstance(meta["pagination"][cat]["has_next"], bool)
+        assert isinstance(meta["pagination"][cat]["total"], int)
 
 
 async def test_search_rich_text_html_tags_and_urls_not_matched(client: AsyncClient, app_context: dict):
@@ -189,6 +223,153 @@ async def test_search_unassigned_member_and_teammate_scoping(client: AsyncClient
         assert m["id"] == unassigned_id or m["role"] == "org_admin"
 
 
+# =========================================================================
+# INDEPENDENT CATEGORY PAGINATION & ISOLATION TESTS
+# =========================================================================
+
+async def test_search_category_specific_tasks(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=test&category=tasks&page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
+
+    # ONLY tasks should be present in data
+    assert "tasks" in data
+    assert "user_stories" not in data
+    assert "projects" not in data
+    assert "members" not in data
+    assert "sprints" not in data
+    assert isinstance(data["tasks"], list)
+
+    # Check top-level meta and category pagination meta
+    meta = body["meta"]
+    assert meta["page"] == 1
+    assert meta["page_size"] == 5
+    assert meta["total"] == meta.get("total_tasks")
+    assert "pagination" in meta
+    assert "tasks" in meta["pagination"]
+    assert meta["pagination"]["tasks"]["page"] == 1
+    assert meta["pagination"]["tasks"]["page_size"] == 5
+    assert meta["pagination"]["tasks"]["total"] == meta["total"]
 
 
+async def test_search_category_specific_projects(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=Project&category=projects&page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
 
+    assert "projects" in data
+    assert "tasks" not in data
+    assert "user_stories" not in data
+    assert "members" not in data
+    assert "sprints" not in data
+    assert isinstance(data["projects"], list)
+
+    meta = body["meta"]
+    assert meta.get("total_projects") is not None
+    assert "total_tasks" not in meta
+    assert "projects" in meta["pagination"]
+
+
+async def test_search_category_specific_user_stories(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=test&category=user_stories&page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
+
+    assert "user_stories" in data
+    assert "tasks" not in data
+    assert "projects" not in data
+    assert "members" not in data
+    assert "sprints" not in data
+    assert "user_stories" in body["meta"]["pagination"]
+
+
+async def test_search_category_specific_members(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=admin&category=members&page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
+
+    assert "members" in data
+    assert "tasks" not in data
+    assert "user_stories" not in data
+    assert "projects" not in data
+    assert "sprints" not in data
+    assert "members" in body["meta"]["pagination"]
+
+
+async def test_search_category_specific_sprints(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=Sprint&category=sprints&page=1&page_size=5", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
+
+    assert "sprints" in data
+    assert "tasks" not in data
+    assert "user_stories" not in data
+    assert "projects" not in data
+    assert "members" not in data
+    assert "sprints" in body["meta"]["pagination"]
+
+
+async def test_search_category_out_of_range_page(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=test&category=tasks&page=9999&page_size=10", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    data = body["data"]
+    assert data["tasks"] == []
+    assert body["meta"]["page"] == 9999
+    assert body["meta"]["has_next"] is False
+    assert body["meta"]["pagination"]["tasks"]["has_next"] is False
+
+
+async def test_search_invalid_category(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=test&category=invalid_category", headers=headers)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body.get("success") is False
+    assert body.get("error", {}).get("code") == "BAD_REQUEST"
+
+
+async def test_search_invalid_pagination_parameters(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    # Page must be >= 1
+    resp_page = await client.get("/api/v1/search?q=test&page=0", headers=headers)
+    assert resp_page.status_code in [400, 422]
+
+    # Page size > 100 rejected
+    resp_size = await client.get("/api/v1/search?q=test&page_size=101", headers=headers)
+    assert resp_size.status_code in [400, 422]
+
+
+async def test_search_overall_pagination(client: AsyncClient, app_context: dict):
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    resp = await client.get("/api/v1/search?q=test&category=all&page=2&page_size=2", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("success") is True
+    meta = body["meta"]
+    assert meta["page"] == 2
+    assert meta["page_size"] == 2
+
+    data = body["data"]
+    for cat in ["tasks", "user_stories", "projects", "members", "sprints"]:
+        assert cat in data
+        assert isinstance(data[cat], list)
+        assert meta["pagination"][cat]["page"] == 2
+        assert meta["pagination"][cat]["page_size"] == 2
