@@ -49,6 +49,7 @@ from src.custom_status.models import CustomStatus
 from src.task.models import Task
 from src.utils.core import bcrypt_hash, create_jwt, generate_refresh_secret_64hex
 from src.utils.setting import get_settings
+from src.integrations.email import send_organization_invitation
 
 logger = logging.getLogger(__name__)
 
@@ -913,7 +914,7 @@ class OrganizationService:
                 temp_password = await self._create_temp_user(invite_email, str(org_id), item_role.id)
 
             try:
-                email_service.send_organization_invitation(
+                await send_organization_invitation(
                     invite_email,
                     org.name,
                     item_role.name,

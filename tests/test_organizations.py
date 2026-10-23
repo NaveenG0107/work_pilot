@@ -53,6 +53,33 @@ async def test_invite_member_validation(client: AsyncClient, app_context: dict):
 
 
 @pytest.mark.anyio
+async def test_invite_member_success_calls_email_service(client: AsyncClient, app_context: dict, monkeypatch):
+    import uuid
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    called_with = []
+    async def mock_send_invitation(email, organization_name, role_name, invite_link, temporary_password=""):
+        called_with.append({
+            "email": email,
+            "organization_name": organization_name,
+            "role_name": role_name,
+            "invite_link": invite_link,
+            "temporary_password": temporary_password,
+        })
+
+    monkeypatch.setattr("src.organization.service.send_organization_invitation", mock_send_invitation)
+
+    test_email = f"invite_{uuid.uuid4().hex[:6]}@example.com"
+    payload = {"members": [{"email": test_email, "role": "developer"}]}
+    resp = await client.post("/api/v1/organization/invite", json=payload, headers=headers)
+    assert resp.status_code == 201
+    assert len(called_with) == 1
+    assert called_with[0]["email"] == test_email
+    assert "token=" in called_with[0]["invite_link"]
+
+
+
+@pytest.mark.anyio
 async def test_get_organization_roles_excludes_member_and_admin(client: AsyncClient, app_context: dict):
     headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
     resp = await client.get("/api/v1/organization/roles", headers=headers)
