@@ -36,10 +36,29 @@ class DashboardSprintBurndownResponse(BaseModel):
     )
 
 
-class WeeklyProgress(BaseModel):
-    day: str = Field(..., description="Day abbreviation (e.g. Mon, Tue)")
+class RollingProgressPoint(BaseModel):
+    date: str = Field(..., description="Date in YYYY-MM-DD format")
+    day: str = Field(..., description="Day abbreviation (e.g. Sat, Sun, Mon)")
     planned: int = Field(default=0, description="Number of planned tasks")
     completed: int = Field(default=0, description="Number of completed tasks")
+
+
+WeeklyProgress = RollingProgressPoint
+
+
+class RollingProgressSummary(BaseModel):
+    total_planned: int = Field(default=0, description="Total planned tasks")
+    total_completed: int = Field(default=0, description="Total completed tasks")
+    remaining: int = Field(default=0, description="Remaining tasks (planned - completed)")
+    completion_rate: float = Field(default=0.0, description="Percentage of planned tasks completed")
+
+
+class RollingProgressData(BaseModel):
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    timezone: str = Field(default="UTC", description="Timezone used for reporting")
+    series: List[RollingProgressPoint] = Field(default_factory=list, description="Seven daily data points")
+    summary: RollingProgressSummary = Field(..., description="Summary metrics")
 
 
 class TeamWorkload(BaseModel):
@@ -94,7 +113,7 @@ class SuccessResponse(BaseModel):
     status_code: int
     message: str
     data: Any | None = Field(default=None, exclude_if=lambda value: value is None)
-    meta: PaginationResponse | None = Field(
+    meta: Any | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

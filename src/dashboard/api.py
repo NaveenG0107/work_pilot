@@ -1,7 +1,7 @@
 # src/dashboard/api.py
 import logging
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -11,6 +11,7 @@ from src.auth.deps import get_current_user
 from src.dashboard.schemas import (
     DashboardOverview,
     DashboardResponse,
+    RollingProgressData,
     SuccessResponse,
     TeamWorkload,
     UpcomingDeadline,
@@ -330,29 +331,29 @@ async def get_sprint_burndown(
         )
 
 
-@router.get(
-    "/{project_id}/weekly-progress",
-    status_code=status.HTTP_200_OK,
-    response_model=SuccessResponse,
-)
-async def get_weekly_progress(
-    project_id: str = Path(..., description="Project ID (UUID)"),
-    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    current_user: dict = Depends(get_current_user),
-    service: DashboardService = Depends(get_dashboard_service),
+async def _handle_weekly_progress(
+    project_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    sprint_id: Optional[str],
+    assignee_id: Optional[str],
+    page: Optional[int],
+    current_user: dict,
+    service: DashboardService,
 ):
-    """
-    Retrieve weekly task progress for a project within the specified date range.
-    """
     logger.info(
-        "Received request to get weekly progress for project %s (start_date: %s, end_date: %s)",
+        "Handling weekly rolling progress request (project_id: %s, start_date: %s, end_date: %s, sprint_id: %s, assignee_id: %s, page: %s)",
         project_id,
         start_date,
         end_date,
+        sprint_id,
+        assignee_id,
+        page,
     )
 
-    # 1. Validate project ID
+    # 1. Validate project ID presence and UUID
+    if not project_id:
+        return error("project_id is required", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
     valid_project_id = validate_uuid(project_id, "project ID")
 
     # 2. Validate authentication context
@@ -361,36 +362,56 @@ async def get_weekly_progress(
         logger.error("Authentication required for fetching weekly progress")
         return error("Authentication required", status_code=status.HTTP_401_UNAUTHORIZED, code="UNAUTHORIZED")
 
-    # 3. Validate presence of start_date and end_date
-    if not start_date or not end_date:
-        logger.warning("Missing start_date or end_date in weekly progress request")
-        return error("start_date and end_date are required", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
+    # 3. Validate optional sprint ID and assignee ID
+    valid_sprint_id: Optional[str] = None
+    if sprint_id:
+        valid_sprint_id = validate_uuid(sprint_id, "sprint ID")
 
-    # 4. Parse start_date
-    try:
-        parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        logger.warning("Invalid start_date format: %s", start_date)
-        return error("Invalid start_date format. Use YYYY-MM-DD", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
+    valid_assignee_id: Optional[str] = None
+    if assignee_id:
+        valid_assignee_id = validate_uuid(assignee_id, "assignee ID")
 
-    # 5. Parse end_date
-    try:
-        parsed_end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        logger.warning("Invalid end_date format: %s", end_date)
-        return error("Invalid end_date format. Use YYYY-MM-DD", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
+    # 4. Parse optional start_date
+    parsed_start_date: Optional[date] = None
+    if start_date:
+        try:
+            parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            logger.warning("Invalid start_date format: %s", start_date)
+            return error("Invalid start_date format. Use YYYY-MM-DD", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
 
-    # 6. Fetch weekly progress from service
+    # 5. Parse optional end_date
+    parsed_end_date: Optional[date] = None
+    if end_date:
+        try:
+            parsed_end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            logger.warning("Invalid end_date format: %s", end_date)
+            return error("Invalid end_date format. Use YYYY-MM-DD", status_code=status.HTTP_400_BAD_REQUEST, code="BAD_REQUEST")
+
+    # 6. Fetch rolling weekly progress from service
     try:
         weekly_progress_data = await service.get_weekly_progress(
             project_id=valid_project_id,
             user_id=user_id,
             start_date=parsed_start_date,
             end_date=parsed_end_date,
+            sprint_id=valid_sprint_id,
+            assignee_id=valid_assignee_id,
         )
         return success(
-            message="Task status fetched successfully",
-            data=weekly_progress_data,
+            message="Weekly progress fetched successfully",
+            data=weekly_progress_data.series,
+            meta={
+                "page": page if page is not None else 1,
+                "start_date": weekly_progress_data.start_date,
+                "end_date": weekly_progress_data.end_date,
+                "timezone": weekly_progress_data.timezone,
+                "total_planned": weekly_progress_data.summary.total_planned,
+                "total_completed": weekly_progress_data.summary.total_completed,
+                "remaining": weekly_progress_data.summary.remaining,
+                "completion_rate": weekly_progress_data.summary.completion_rate,
+            },
             status_code=status.HTTP_200_OK,
         )
     except HTTPException as exc:
@@ -407,6 +428,66 @@ async def get_weekly_progress(
             message="Something went wrong. Please try again later.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+@router.get(
+    "/dashboard/weekly/progress",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
+async def get_dashboard_weekly_progress(
+    project_id: Optional[str] = Query(None, description="Project ID (UUID)"),
+    start_date: Optional[str] = Query(None, description="Optional Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Optional End date (YYYY-MM-DD)"),
+    sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
+    assignee_id: Optional[str] = Query(None, description="Optional Assignee ID (UUID)"),
+    page: Optional[int] = Query(None, description="Optional page number"),
+    current_user: dict = Depends(get_current_user),
+    service: DashboardService = Depends(get_dashboard_service),
+):
+    """
+    Retrieve rolling seven-day task progress for a project.
+    """
+    return await _handle_weekly_progress(
+        project_id=project_id,
+        start_date=start_date,
+        end_date=end_date,
+        sprint_id=sprint_id,
+        assignee_id=assignee_id,
+        page=page,
+        current_user=current_user,
+        service=service,
+    )
+
+
+@router.get(
+    "/{project_id}/weekly-progress",
+    status_code=status.HTTP_200_OK,
+    response_model=SuccessResponse,
+)
+async def get_weekly_progress(
+    project_id: str = Path(..., description="Project ID (UUID)"),
+    start_date: Optional[str] = Query(None, description="Optional Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Optional End date (YYYY-MM-DD)"),
+    sprint_id: Optional[str] = Query(None, description="Optional Sprint ID (UUID)"),
+    assignee_id: Optional[str] = Query(None, description="Optional Assignee ID (UUID)"),
+    page: Optional[int] = Query(None, description="Optional page number"),
+    current_user: dict = Depends(get_current_user),
+    service: DashboardService = Depends(get_dashboard_service),
+):
+    """
+    Retrieve rolling seven-day task progress for a project.
+    """
+    return await _handle_weekly_progress(
+        project_id=project_id,
+        start_date=start_date,
+        end_date=end_date,
+        sprint_id=sprint_id,
+        assignee_id=assignee_id,
+        page=page,
+        current_user=current_user,
+        service=service,
+    )
 
 
 @router.get(

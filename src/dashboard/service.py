@@ -1,11 +1,14 @@
 # src/dashboard/service.py
 import logging
+import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, cast, Date, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -15,6 +18,9 @@ from src.dashboard.schemas import (
     DashboardOverview,
     DashboardResponse,
     DashboardSprintBurndownResponse,
+    RollingProgressData,
+    RollingProgressPoint,
+    RollingProgressSummary,
     SprintBurndownData,
     SprintBurndownPoint,
     TeamWorkload,
@@ -701,147 +707,199 @@ class DashboardService:
         self,
         project_id: str,
         user_id: str,
-        start_date: date,
-        end_date: date,
-    ) -> List[WeeklyProgress]:
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        sprint_id: Optional[str] = None,
+        assignee_id: Optional[str] = None,
+    ) -> RollingProgressData:
         """
-        Fetches daily weekly progress statistics (planned vs completed tasks)
-        within the specified date range for a project.
+        Fetches daily rolling progress statistics (planned vs completed tasks)
+        and summary metrics for a project within a rolling seven-day window.
         """
+        start_time = time.perf_counter()
         logger.info(
-            "Fetching weekly progress for project %s (user: %s, start_date: %s, end_date: %s)",
+            "Fetching rolling progress for project %s (user: %s, sprint: %s, assignee: %s, start_date: %s, end_date: %s)",
             project_id,
             user_id,
+            sprint_id,
+            assignee_id,
             start_date,
             end_date,
         )
 
-        # 1. Fetch user
-        user_stmt = (
-            select(User)
-            .where(User.id == user_id, User.deleted_at.is_(None))
-            .options(joinedload(User.role).selectinload(Role.permissions))
+        # 1. Validate user, tenant isolation, and project view permissions
+        await self._validate_user_project_and_permission(
+            user_id,
+            project_id,
+            "projects",
+            "view",
+            "You do not have permission to view weekly progress in this project",
         )
-        user_res = await self.db.execute(user_stmt)
-        user = user_res.scalar_one_or_none()
-        if not user:
-            logger.error("User not found: %s", user_id)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
 
-        if user.role and user.role.name == "super_admin":
-            logger.error("Super admins are not allowed to perform organization-level activities")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Super admins are not allowed to perform organization-level activities",
-            )
+        # 2. Resolve application configured timezone
+        tz_str = os.getenv("TIMEZONE") or os.getenv("APP_TIMEZONE") or "UTC"
+        try:
+            tz = ZoneInfo(tz_str)
+        except Exception:
+            tz = timezone.utc
+            tz_str = "UTC"
 
-        # 2. Fetch project
-        proj_stmt = (
-            select(Project)
-            .where(Project.id == project_id, Project.deleted_at.is_(None))
-        )
-        proj_res = await self.db.execute(proj_stmt)
-        project = proj_res.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found or is deleted", project_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
+        # 3. Determine reporting dates (defaults to rolling 7 calendar days: today - 6 to today)
+        today = datetime.now(tz).date()
+        if start_date is None and end_date is None:
+            end_date = today
+            start_date = today - timedelta(days=6)
+        elif start_date is None and end_date is not None:
+            start_date = end_date - timedelta(days=6)
+        elif start_date is not None and end_date is None:
+            end_date = start_date + timedelta(days=6)
+        else:
+            if start_date > end_date:
+                logger.warning(
+                    "Invalid date range for project %s: start_date (%s) is after end_date (%s)",
+                    project_id,
+                    start_date,
+                    end_date,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Start date must be before end date",
+                )
 
-        if str(project.organization_id) != str(user.organization_id):
-            logger.warning(
-                "Tenant isolation violation in weekly progress: user %s (org: %s) attempted to access project %s (org: %s)",
-                user_id,
-                user.organization_id,
-                project_id,
-                project.organization_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project",
-            )
+        # 4. Build timezone-aware datetime boundaries
+        start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
+        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=tz)
 
-        # 3. Check permission (requires projects:view)
-        can_view = await self._check_permission(user, project_id, "projects", "view")
-        if not can_view:
-            logger.warning(
-                "User %s not authorized to view weekly progress in project %s",
-                user_id,
-                project_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to view weekly progress in this project",
-            )
+        # 5. Database dialect expression for date grouping
+        dialect = self.db.bind.dialect.name if self.db.bind else "postgresql"
+        if dialect == "postgresql":
+            planned_date_expr = cast(func.timezone(literal(tz_str), Task.due_date), Date)
+            completed_date_expr = cast(func.timezone(literal(tz_str), Task.updated_at), Date)
+        else:
+            planned_date_expr = func.date(Task.due_date)
+            completed_date_expr = func.date(Task.updated_at)
 
-        # 4. Validate date range
-        if start_date > end_date:
-            logger.warning(
-                "Invalid date range for project %s: start_date (%s) is after end_date (%s)",
-                project_id,
-                start_date,
-                end_date,
+        # 6. Grouped query for planned tasks (by due_date)
+        planned_stmt = (
+            select(
+                planned_date_expr.label("d"),
+                func.count(Task.id).label("cnt"),
             )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Start date must be before end date",
-            )
-
-        # 5. Build datetime boundaries in UTC (inclusive of end_date full day)
-        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=timezone.utc)
-
-        # 6. Fetch tasks in date range
-        tasks_stmt = (
-            select(Task)
             .where(
                 Task.project_id == project_id,
                 Task.deleted_at.is_(None),
-                (
-                    ((Task.due_date >= start_dt) & (Task.due_date < end_dt))
-                    | ((Task.created_at >= start_dt) & (Task.created_at < end_dt))
+                Task.due_date >= start_dt,
+                Task.due_date < end_dt,
+            )
+        )
+        if sprint_id:
+            planned_stmt = planned_stmt.where(Task.sprint_id == sprint_id)
+        if assignee_id:
+            planned_stmt = planned_stmt.where(Task.assignee_id == assignee_id)
+        planned_stmt = planned_stmt.group_by(planned_date_expr)
+
+        # 7. Grouped query for completed tasks (terminal status by updated_at)
+        is_terminal_cond = or_(
+            CustomStatus.is_final.is_(True),
+            func.lower(Task.status).in_(["completed", "done", "closed"]),
+        )
+        completed_stmt = (
+            select(
+                completed_date_expr.label("d"),
+                func.count(Task.id).label("cnt"),
+            )
+            .outerjoin(
+                CustomStatus,
+                and_(
+                    CustomStatus.id == Task.status_id,
+                    CustomStatus.deleted_at.is_(None),
                 ),
             )
+            .where(
+                Task.project_id == project_id,
+                Task.deleted_at.is_(None),
+                is_terminal_cond,
+                Task.updated_at >= start_dt,
+                Task.updated_at < end_dt,
+            )
         )
-        tasks_res = await self.db.execute(tasks_stmt)
-        tasks = tasks_res.scalars().all()
+        if sprint_id:
+            completed_stmt = completed_stmt.where(Task.sprint_id == sprint_id)
+        if assignee_id:
+            completed_stmt = completed_stmt.where(Task.assignee_id == assignee_id)
+        completed_stmt = completed_stmt.group_by(completed_date_expr)
 
-        # 7. Aggregate planned and completed counts by date
-        planned: Dict[str, int] = {}
-        completed: Dict[str, int] = {}
+        # 8. Execute queries and record query duration
+        q_start = time.perf_counter()
+        planned_res = await self.db.execute(planned_stmt)
+        completed_res = await self.db.execute(completed_stmt)
+        planned_rows = planned_res.all()
+        completed_rows = completed_res.all()
+        q_duration_ms = (time.perf_counter() - q_start) * 1000
 
-        for task in tasks:
-            if task.due_date is not None:
-                d_str = task.due_date.strftime("%Y-%m-%d")
-                planned[d_str] = planned.get(d_str, 0) + 1
-                if task.status == "completed":
-                    completed[d_str] = completed.get(d_str, 0) + 1
+        # 9. Map counts to date strings (YYYY-MM-DD)
+        planned_map: Dict[str, int] = {}
+        for d_val, cnt in planned_rows:
+            d_key = d_val.strftime("%Y-%m-%d") if isinstance(d_val, (date, datetime)) else str(d_val)
+            planned_map[d_key] = cnt
 
-        # 8. Construct day-by-day response list
-        result: List[WeeklyProgress] = []
-        curr_date = start_date
-        while curr_date <= end_date:
-            d_str = curr_date.strftime("%Y-%m-%d")
-            result.append(
-                WeeklyProgress(
-                    day=curr_date.strftime("%a"),
-                    planned=planned.get(d_str, 0),
-                    completed=completed.get(d_str, 0),
+        completed_map: Dict[str, int] = {}
+        for d_val, cnt in completed_rows:
+            d_key = d_val.strftime("%Y-%m-%d") if isinstance(d_val, (date, datetime)) else str(d_val)
+            completed_map[d_key] = cnt
+
+        # 10. Construct daily series in chronological order (including zero-count days)
+        series: List[RollingProgressPoint] = []
+        curr = start_date
+        while curr <= end_date:
+            d_str = curr.strftime("%Y-%m-%d")
+            day_name = curr.strftime("%a")
+            series.append(
+                RollingProgressPoint(
+                    date=d_str,
+                    day=day_name,
+                    planned=planned_map.get(d_str, 0),
+                    completed=completed_map.get(d_str, 0),
                 )
             )
-            curr_date += timedelta(days=1)
+            curr += timedelta(days=1)
 
-        logger.info(
-            "Weekly progress fetched successfully for project %s (%d days)",
-            project_id,
-            len(result),
+        # 11. Compute summary metrics
+        total_planned = sum(item.planned for item in series)
+        total_completed = sum(item.completed for item in series)
+        remaining = max(0, total_planned - total_completed)
+        completion_rate = (
+            round((total_completed / total_planned) * 100, 2)
+            if total_planned > 0
+            else 0.0
         )
 
-        return result
+        summary = RollingProgressSummary(
+            total_planned=total_planned,
+            total_completed=total_completed,
+            remaining=remaining,
+            completion_rate=completion_rate,
+        )
+
+        total_duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            "Rolling progress fetched successfully for project %s (start: %s, end: %s, planned: %d, completed: %d, query_ms: %.2f, total_ms: %.2f)",
+            project_id,
+            start_date,
+            end_date,
+            total_planned,
+            total_completed,
+            q_duration_ms,
+            total_duration_ms,
+        )
+
+        return RollingProgressData(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+            timezone=tz_str,
+            series=series,
+            summary=summary,
+        )
 
     async def _get_team_workload_data(
         self,
