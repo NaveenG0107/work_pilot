@@ -1638,6 +1638,439 @@ async def test_conflicting_repeated_task_types_detected_without_pending_action(
     assert "which task type" in msg
 
 
+@pytest.mark.anyio
+async def test_create_task_with_sprint_name(
+    client: AsyncClient, app_context: dict, reset_provider: MockLLMProvider
+):
+    """Verify that specifying a sprint by name resolves the sprint ID and includes sprint name."""
+    project_id = app_context["project_a_id"]
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    # Fetch existing active sprint in project A
+    sprint_resp = await client.get(
+        f"/api/v1/projects/{project_id}/sprint",
+        headers=headers,
+    )
+    assert sprint_resp.status_code == 200
+    sprints = sprint_resp.json()["data"]
+    assert len(sprints) > 0, "Project A must have at least one sprint"
+    target_sprint = next((s for s in sprints if s.get("status") != "completed"), sprints[0])
+    sprint_name = target_sprint["name"]
+    sprint_id = target_sprint["id"]
+
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_sprint_1",
+                    name="create_task",
+                    arguments={
+                        "project_id": project_id,
+                        "title": "Fix the login API throttling",
+                        "type": "bug",
+                        "priority": "high",
+                        "sprint_name": sprint_name,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+
+    resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": f"Create a high-priority bug task to fix the login API throttling in sprint {sprint_name}",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+
+    assert data["action_state"] == "REQUIRES_CONFIRMATION"
+    assert "pending_action" in data
+    proposed = data["pending_action"]["proposed_task"]
+    assert proposed["title"] == "Fix the login API throttling"
+    assert proposed["priority"] == "high"
+    assert proposed["type"] == "bug"
+    assert proposed["sprint_id"] == sprint_id
+    assert proposed["sprint_name"] == sprint_name
+    assert f"in sprint '{sprint_name}'" in data["message"]
+
+    action_id = data["pending_action"]["action_id"]
+
+    # Confirm action
+    confirm_resp = await client.post(
+        f"/api/v1/ai-assistant/actions/{action_id}/confirm",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_resp.status_code == 200
+    created_task = confirm_resp.json()["data"]["task"]
+    assert created_task["title"] == "Fix the login API throttling"
+
+    # Verify task in Task service has sprint_id attached
+    task_get = await client.get(
+        f"/api/v1/projects/{project_id}/tasks/{created_task['task_id']}",
+        headers=headers,
+    )
+    assert task_get.status_code == 200
+    assert task_get.json()["data"]["sprint_id"] == sprint_id
+
+
+@pytest.mark.anyio
+async def test_create_task_with_user_story_name(
+    client: AsyncClient, app_context: dict, reset_provider: MockLLMProvider
+):
+    """Verify that specifying a user story by name resolves the story ID and includes story name."""
+    project_id = app_context["project_a_id"]
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    # Fetch existing user story in project A
+    story_resp = await client.get(
+        f"/api/v1/projects/{project_id}/user-stories",
+        headers=headers,
+    )
+    assert story_resp.status_code == 200
+    stories = story_resp.json()["data"]
+    assert len(stories) > 0, "Project A must have at least one user story"
+    target_story = stories[0]
+    story_name = target_story["title"]
+    story_id = target_story["id"]
+
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_story_1",
+                    name="create_task",
+                    arguments={
+                        "project_id": project_id,
+                        "title": "Fix the login API throttling",
+                        "type": "bug",
+                        "priority": "high",
+                        "user_story_name": story_name,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+
+    resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": f"Create a high-priority bug task to fix the login API throttling in userstory {story_name}",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+
+    assert data["action_state"] == "REQUIRES_CONFIRMATION"
+    assert "pending_action" in data
+    proposed = data["pending_action"]["proposed_task"]
+    assert proposed["title"] == "Fix the login API throttling"
+    assert proposed["priority"] == "high"
+    assert proposed["type"] == "bug"
+    assert proposed["user_story_id"] == story_id
+    assert proposed["user_story_name"] == story_name
+    assert f"in user story '{story_name}'" in data["message"]
+
+    action_id = data["pending_action"]["action_id"]
+
+    # Confirm action
+    confirm_resp = await client.post(
+        f"/api/v1/ai-assistant/actions/{action_id}/confirm",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_resp.status_code == 200
+    created_task = confirm_resp.json()["data"]["task"]
+    assert created_task["title"] == "Fix the login API throttling"
+
+    # Verify task in Task service has user_story_id attached
+    task_get = await client.get(
+        f"/api/v1/projects/{project_id}/tasks/{created_task['task_id']}",
+        headers=headers,
+    )
+    assert task_get.status_code == 200
+    assert task_get.json()["data"]["user_story_id"] == story_id
+
+
+@pytest.mark.anyio
+async def test_update_task_flow_requires_confirmation(
+    client: AsyncClient,
+    app_context: dict,
+    reset_provider: MockLLMProvider,
+):
+    """Test updating an existing task via update_task tool and confirming it."""
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    project_id = app_context["project_a_id"]
+
+    # 1. Create a task via AI assistant to update later
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_create_init",
+                    name="create_task",
+                    arguments={
+                        "project_id": project_id,
+                        "title": "Initial Task For Update",
+                        "type": "task",
+                        "priority": "low",
+                        "story_points": 1,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+    chat_init = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={"message": "Create task Initial Task For Update"},
+        headers=headers,
+    )
+    assert chat_init.status_code == 200
+    init_action_id = chat_init.json()["data"]["pending_action"]["action_id"]
+    confirm_init = await client.post(
+        f"/api/v1/ai-assistant/actions/{init_action_id}/confirm",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_init.status_code == 200
+    task_data = confirm_init.json()["data"]["task"]
+    task_key = task_data["key"]
+    task_id = task_data["task_id"]
+
+    # 2. Mock LLM calling update_task
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_update_1",
+                    name="update_task",
+                    arguments={
+                        "task_key": task_key,
+                        "title": "Updated Task Title",
+                        "priority": "critical",
+                        "story_points": 5,
+                        "status": "in_progress",
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+
+    chat_resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={"message": f"Update task {task_key} title to Updated Task Title, priority to critical, and points to 5"},
+        headers=headers,
+    )
+    assert chat_resp.status_code == 200
+    body = chat_resp.json()
+    assert body["success"] is True
+    data = body["data"]
+
+    assert data["action_state"] == "REQUIRES_CONFIRMATION"
+    assert "pending_action" in data
+    pending = data["pending_action"]
+    assert pending["action_type"] == "update_task"
+    proposed = pending["proposed_task"]
+    assert proposed["task_id"] == task_id
+    assert proposed["key"] == task_key
+    assert proposed["title"] == "Updated Task Title"
+    assert proposed["priority"] == "critical"
+    assert proposed["story_points"] == 5
+    assert proposed["status"] in ["in_progress", "In Progress"]
+    assert f"updates for task '{task_key}'" in data["message"]
+
+    action_id = pending["action_id"]
+
+    # 3. Confirm the update
+    confirm_resp = await client.post(
+        f"/api/v1/ai-assistant/actions/{action_id}/confirm",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_resp.status_code == 200
+    c_data = confirm_resp.json()["data"]
+    assert c_data["status"] == "completed"
+    assert f"Task '{task_key}' updated successfully." in c_data["message"]
+    assert c_data["task"]["title"] == "Updated Task Title"
+    assert c_data["task"]["priority"] == "critical"
+
+    # 4. Verify updated task in project API
+    get_resp = await client.get(
+        f"/api/v1/projects/{project_id}/tasks/{task_id}",
+        headers=headers,
+    )
+    assert get_resp.status_code == 200
+    updated_db = get_resp.json()["data"]
+    assert updated_db["title"] == "Updated Task Title"
+    assert updated_db["priority"] == "critical"
+    assert updated_db["story_points"] == 5
+    assert updated_db["status"] in ["in_progress", "In Progress"]
+
+
+@pytest.mark.anyio
+async def test_update_task_unassign_and_sprint(
+    client: AsyncClient,
+    app_context: dict,
+    reset_provider: MockLLMProvider,
+):
+    """Test updating task to unassign assignee and clear sprint."""
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+    project_id = app_context["project_a_id"]
+    sprint_id = app_context["sprint_a_id"]
+
+    # 1. Create task with assignee 'me' and sprint
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_create_sprint_task",
+                    name="create_task",
+                    arguments={
+                        "project_id": project_id,
+                        "title": "Implement payment gateway webhooks",
+                        "type": "task",
+                        "priority": "medium",
+                        "assignee": "me",
+                        "sprint_id": sprint_id,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+    chat_init = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": "Create a task titled 'Implement payment gateway webhooks' assigned to me in sprint",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert chat_init.status_code == 200
+    assert chat_init.json()["data"]["pending_action"] is not None, f"Expected pending_action but got: {chat_init.json()['data']}"
+    init_action_id = chat_init.json()["data"]["pending_action"]["action_id"]
+    confirm_init = await client.post(
+        f"/api/v1/ai-assistant/actions/{init_action_id}/confirm",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_init.status_code == 200
+    task_data = confirm_init.json()["data"]["task"]
+    task_key = task_data["key"]
+    task_id = task_data["task_id"]
+    assert task_data["assignee_id"] is not None
+
+    # 2. Mock LLM calling update_task to unassign and clear sprint
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_update_2",
+                    name="update_task",
+                    arguments={
+                        "task_key": task_key,
+                        "clear_assignee": True,
+                        "clear_sprint": True,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+
+    chat_resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={
+            "message": f"Unassign {task_key} and remove it from sprint",
+            "context": {"project_id": project_id},
+        },
+        headers=headers,
+    )
+    assert chat_resp.status_code == 200
+    pending = chat_resp.json()["data"]["pending_action"]
+    assert pending["proposed_task"]["assignee_id"] is None
+    assert pending["proposed_task"]["sprint_id"] is None
+
+    action_id = pending["action_id"]
+
+    # Confirm
+    confirm_resp = await client.post(
+        f"/api/v1/ai-assistant/confirm/{action_id}",
+        json={"confirmed": True},
+        headers=headers,
+    )
+    assert confirm_resp.status_code == 200
+
+    # Verify task in project API has null assignee and null sprint
+    get_resp = await client.get(
+        f"/api/v1/projects/{project_id}/tasks/{task_id}",
+        headers=headers,
+    )
+    assert get_resp.status_code == 200
+    data = get_resp.json()["data"]
+    assert data.get("assignee_id") is None
+    assert data.get("assignee") is None
+    assert data.get("sprint_id") is None
+
+
+@pytest.mark.anyio
+async def test_update_task_validation_not_found_and_cross_org(
+    client: AsyncClient,
+    app_context: dict,
+    reset_provider: MockLLMProvider,
+):
+    """Test update_task with unknown task_key and cross-org access protection."""
+    headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
+
+    # Non-existent task key
+    reset_provider.set_response(
+        ProviderResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_update_3",
+                    name="update_task",
+                    arguments={
+                        "task_key": "NONEXISTENT-9999",
+                        "priority": "high",
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+
+    chat_resp = await client.post(
+        "/api/v1/ai-assistant/chat",
+        json={"message": "Update NONEXISTENT-9999 to high priority"},
+        headers=headers,
+    )
+    assert chat_resp.status_code in [400, 404]
+
+
+
+
+
 
 
 

@@ -962,19 +962,35 @@ class AIOrchestrationService:
 
                 proposed = tool_result.data
                 p_task = ProposedTask(**proposed)
+                proj_id = str(args.get("project_id") or proposed.get("project_id") or "")
                 pending_action = PendingAction(
                     action_id=action_id,
-                    action_type="create_task",
-                    project_id=str(args.get("project_id")),
+                    action_type=first_call.name,
+                    project_id=proj_id,
                     proposed_task=p_task,
                     expires_at=expires_at.isoformat(),
                 )
 
-                confirmation_msg = (
-                    f"I've prepared the {p_task.priority}-priority {p_task.type} "
-                    f"'{p_task.title}' for project '{p_task.project_name or p_task.project_id}'. "
-                    f"Please confirm to create it."
-                )
+                extras = []
+                if p_task.sprint_name:
+                    extras.append(f"sprint '{p_task.sprint_name}'")
+                if p_task.user_story_name:
+                    extras.append(f"user story '{p_task.user_story_name}'")
+                extras_str = f" in {', '.join(extras)}" if extras else ""
+
+                if first_call.name == "update_task":
+                    task_identifier = p_task.key or p_task.title
+                    confirmation_msg = (
+                        f"I've prepared updates for task '{task_identifier}' "
+                        f"in project '{p_task.project_name or p_task.project_id}'{extras_str}. "
+                        f"Please confirm to apply these changes."
+                    )
+                else:
+                    confirmation_msg = (
+                        f"I've prepared the {p_task.priority}-priority {p_task.type} "
+                        f"'{p_task.title}' for project '{p_task.project_name or p_task.project_id}'{extras_str}. "
+                        f"Please confirm to create it."
+                    )
 
                 return ChatResponseData(
                     conversation_id=conversation_id,
@@ -1125,10 +1141,11 @@ class AIOrchestrationService:
         await self.action_store.complete_action(action_id, claim_token, tool_result.data)
 
         task_res = CreatedTaskResult(**tool_result.data)
+        verb = "updated" if tool_name == "update_task" else "created"
         return {
             "action_id": action_id,
             "status": "completed",
-            "message": f"Task '{task_res.key}' created successfully.",
+            "message": f"Task '{task_res.key}' {verb} successfully.",
             "task": task_res.model_dump(),
         }
 

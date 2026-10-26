@@ -15,6 +15,8 @@ class DashboardOverview(BaseModel):
 class TaskStatusItem(BaseModel):
     count: int = Field(default=0, description="Task count")
     color: str = Field(default="", description="Status color in hex")
+    percentage: float = Field(default=0.0, description="Percentage of tasks with this status")
+    # total: int = Field(default=0, description="Total number of tasks")
 
 
 class SprintBurndownPoint(BaseModel):
@@ -93,10 +95,6 @@ class UpcomingDeadline(BaseModel):
 class DashboardResponse(BaseModel):
     overview: DashboardOverview = Field(..., description="Task overview counts")
     task_status: dict = Field(..., description="Task status counts by custom status")
-    sprint_burndown: Union[SprintBurndownData, List[SprintBurndownData], None] = Field(
-        default=None, description="Sprint burndown data"
-    )
-    team_workload: List[TeamWorkload] = Field(default_factory=list, description="Team workload data")
 
 
 class PaginationResponse(BaseModel):

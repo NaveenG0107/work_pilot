@@ -45,12 +45,15 @@ class ProposedTask(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    task_id: str | None = None
+    key: str | None = None
     project_id: str
     project_name: str | None = None
     title: str
     description: str = ""
     type: str = "task"
     priority: str = "medium"
+    status: str | None = None
     story_points: int = 0
     assignee_id: str | None = None
     assignee_name: str | None = None
@@ -59,7 +62,10 @@ class ProposedTask(BaseModel):
     sprint_id: str | None = None
     sprint_name: str | None = None
     user_story_id: str | None = None
+    user_story_name: str | None = None
     due_date: str | None = None
+    estimated_hours: float | None = None
+    actual_hours: float | None = None
 
 
 class PendingAction(BaseModel):
@@ -68,7 +74,7 @@ class PendingAction(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     action_id: str = Field(description="Unique action token required for confirmation.")
-    action_type: Literal["create_task"] = "create_task"
+    action_type: Literal["create_task", "update_task"] = "create_task"
     project_id: str
     proposed_task: ProposedTask
     expires_at: str
@@ -99,7 +105,7 @@ class ChatResponseData(BaseModel):
     message: str
     action_state: Literal["NONE", "REQUIRES_CONFIRMATION", "COMPLETED", "ERROR"] = "NONE"
     pending_action: PendingAction | None = None
-    task: CreatedTaskResult | None = None
+    # task: CreatedTaskResult | None = None
 
 
 class ActionConfirmationRequest(BaseModel):

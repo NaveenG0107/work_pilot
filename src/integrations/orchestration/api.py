@@ -98,6 +98,11 @@ async def chat_with_assistant(
     status_code=status.HTTP_200_OK,
     summary="Confirm or cancel a pending AI action",
 )
+@router.post(
+    "/confirm/{action_id}",
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
 @require_jwt
 async def confirm_action(
     action_id: str,

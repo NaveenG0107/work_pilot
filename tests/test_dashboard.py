@@ -23,6 +23,17 @@ async def test_dashboard_task_status_success(client: AsyncClient, app_context: d
     assert resp.status_code == 200
     body = resp.json()
     assert body.get("success") is True
+    data = body.get("data", {})
+    assert "total" in data
+    assert isinstance(data["total"], int)
+    for key, val in data.items():
+        if key != "total":
+            assert isinstance(val, dict)
+            assert "count" in val
+            assert "color" in val
+            assert "percentage" in val
+            assert "total" not in val
+            assert isinstance(val["percentage"], (int, float))
 
 
 async def test_dashboard_team_workload_success(client: AsyncClient, app_context: dict):
@@ -43,6 +54,15 @@ async def test_dashboard_full_data_success(client: AsyncClient, app_context: dic
     assert resp.status_code == 200
     body = resp.json()
     assert body.get("success") is True
+    task_status = body.get("data", {}).get("task_status", {})
+    assert "total" in task_status
+    assert isinstance(task_status["total"], int)
+    for key, val in task_status.items():
+        if key != "total":
+            assert isinstance(val, dict)
+            assert "percentage" in val
+            assert "total" not in val
+            assert isinstance(val["percentage"], (int, float))
 
 
 async def test_dashboard_tenant_isolation(client: AsyncClient, app_context: dict):
