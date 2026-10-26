@@ -394,8 +394,6 @@ class DashboardService:
                     else 0.0
                 )
 
-        result_task_status = {"total": total_tasks, **task_status}
-
         logger.info(
             "Task status fetched successfully for project %s (%d statuses, total=%d)",
             project_id,
@@ -403,7 +401,7 @@ class DashboardService:
             total_tasks,
         )
 
-        return result_task_status
+        return task_status
 
     async def get_task_status(
         self,

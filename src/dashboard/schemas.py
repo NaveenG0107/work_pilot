@@ -16,8 +16,6 @@ class TaskStatusItem(BaseModel):
     count: int = Field(default=0, description="Task count")
     color: str = Field(default="", description="Status color in hex")
     percentage: float = Field(default=0.0, description="Percentage of tasks with this status")
-    # total: int = Field(default=0, description="Total number of tasks")
-
 
 class SprintBurndownPoint(BaseModel):
     day: int = Field(..., description="Day number starting from 1")
