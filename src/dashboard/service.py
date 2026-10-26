@@ -382,13 +382,28 @@ class DashboardService:
                     "color": "",
                 }
 
+        total_tasks = sum(
+            item["count"] for item in task_status.values() if isinstance(item, dict)
+        )
+        for item in task_status.values():
+            if isinstance(item, dict):
+                count_val = item.get("count", 0)
+                item["percentage"] = (
+                    round((count_val / total_tasks * 100), 2)
+                    if total_tasks > 0
+                    else 0.0
+                )
+
+        result_task_status = {"total": total_tasks, **task_status}
+
         logger.info(
-            "Task status fetched successfully for project %s (%d statuses)",
+            "Task status fetched successfully for project %s (%d statuses, total=%d)",
             project_id,
             len(task_status),
+            total_tasks,
         )
 
-        return task_status
+        return result_task_status
 
     async def get_task_status(
         self,

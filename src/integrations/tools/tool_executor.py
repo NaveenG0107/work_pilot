@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_logger
-from src.integrations.tools.task_tools import CreateTaskTool
+from src.integrations.tools.task_tools import CreateTaskTool, UpdateTaskTool
 from src.task.service import TaskServiceError
 
 logger = get_logger(__name__)
@@ -71,6 +71,7 @@ class ToolExecutor:
         self._tools: dict[str, Any] = {}
         # Register default permitted tools
         self.register(CreateTaskTool())
+        self.register(UpdateTaskTool())
 
     def register(self, tool: Any) -> None:
         """Register a tool instance."""

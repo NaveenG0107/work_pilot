@@ -17,14 +17,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_logger
+from src.task.models import DEFAULT_STATUS_COLORS, Task, normalize_task_status
 from src.task.schema import (
     TASK_PRIORITIES,
     TASK_TYPES,
     CreateTaskRequest,
+    UpdateTaskRequest,
     TaskPriority,
     TaskType,
 )
-from src.task.service import TaskService, TaskServiceError
+from src.task.service import TaskService, TaskServiceError, _is_backdated
 
 logger = get_logger(__name__)
 
@@ -224,9 +226,17 @@ class CreateTaskToolArgs(BaseModel):
         default=None,
         description="Optional UUID of the sprint this task belongs to.",
     )
+    sprint_name: str | None = Field(
+        default=None,
+        description="Optional name of the sprint this task belongs to (e.g. 'TestModule').",
+    )
     user_story_id: UUID | None = Field(
         default=None,
         description="Optional UUID of the user story this task is linked to.",
+    )
+    user_story_name: str | None = Field(
+        default=None,
+        description="Optional name or title of the user story this task is linked to (e.g. 'Mithun').",
     )
     story_points: int = Field(
         default=0,
@@ -307,6 +317,34 @@ class CreateTaskToolArgs(BaseModel):
                 data["reporter"] = None
             if data.get("reporter_id") and str(data["reporter_id"]).strip().lower() == p_clean:
                 data["reporter_id"] = None
+
+        # Normalize sprint arguments (sprint / sprint_name / sprint_id)
+        if "sprint" in data and not data.get("sprint_name"):
+            data["sprint_name"] = data["sprint"]
+        if data.get("sprint_id") is not None:
+            val = str(data["sprint_id"]).strip()
+            try:
+                UUID(val)
+            except ValueError:
+                if not data.get("sprint_name"):
+                    data["sprint_name"] = val
+                data["sprint_id"] = None
+
+        # Normalize user story arguments (user_story / userstory / user_story_name / user_story_id)
+        if "user_story" in data and not data.get("user_story_name"):
+            data["user_story_name"] = data["user_story"]
+        if "userstory" in data and not data.get("user_story_name"):
+            data["user_story_name"] = data["userstory"]
+        if "story" in data and not data.get("user_story_name") and data.get("type") != "story":
+            data["user_story_name"] = data["story"]
+        if data.get("user_story_id") is not None:
+            val = str(data["user_story_id"]).strip()
+            try:
+                UUID(val)
+            except ValueError:
+                if not data.get("user_story_name"):
+                    data["user_story_name"] = val
+                data["user_story_id"] = None
 
         # Normalize story_points
         sp = data.get("story_points")
@@ -482,9 +520,17 @@ class CreateTaskTool:
                             "type": "string",
                             "description": "Optional UUID of the sprint to attach this task to.",
                         },
+                        "sprint_name": {
+                            "type": "string",
+                            "description": "Optional name of the sprint to attach this task to (e.g. 'TestModule' or 'Sprint 1').",
+                        },
                         "user_story_id": {
                             "type": "string",
                             "description": "Optional UUID of the parent user story.",
+                        },
+                        "user_story_name": {
+                            "type": "string",
+                            "description": "Optional name or title of the parent user story (e.g. 'Mithun' or 'Auth Flow').",
                         },
                         "story_points": {
                             "type": "integer",
@@ -636,6 +682,137 @@ class CreateTaskTool:
 
         return user
 
+    async def _resolve_sprint(
+        self,
+        identifier: str,
+        project_id: str,
+        db: AsyncSession,
+    ) -> Any:
+        """Resolve a sprint by UUID or name within the project."""
+        from src.sprint.models import Sprint
+        from sqlalchemy import select, func
+        import uuid
+
+        clean = str(identifier).strip()
+        # 1. Try UUID
+        try:
+            target_uuid = str(uuid.UUID(clean))
+            stmt = select(Sprint).where(
+                Sprint.id == target_uuid,
+                Sprint.project_id == project_id,
+                Sprint.deleted_at.is_(None),
+            )
+            sprint = (await db.execute(stmt)).scalar_one_or_none()
+            if sprint:
+                return sprint
+        except ValueError:
+            pass
+
+        # 2. Try exact case-insensitive match by name
+        stmt = select(Sprint).where(
+            Sprint.project_id == project_id,
+            Sprint.deleted_at.is_(None),
+            func.lower(Sprint.name) == clean.lower(),
+        )
+        sprints = (await db.execute(stmt)).scalars().all()
+        if len(sprints) == 1:
+            return sprints[0]
+        if len(sprints) > 1:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Multiple sprints match '{clean}'. Please provide a specific sprint ID.",
+            )
+
+        # 3. Try substring/ilike match by name
+        stmt_like = select(Sprint).where(
+            Sprint.project_id == project_id,
+            Sprint.deleted_at.is_(None),
+            Sprint.name.ilike(f"%{clean}%"),
+        )
+        sprints_like = (await db.execute(stmt_like)).scalars().all()
+        if len(sprints_like) == 1:
+            return sprints_like[0]
+        if len(sprints_like) > 1:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Multiple sprints match '{clean}'. Please provide a specific sprint ID.",
+            )
+
+        raise TaskServiceError(
+            404,
+            "NOT_FOUND",
+            f"Sprint '{clean}' not found in this project",
+        )
+
+    async def _resolve_user_story(
+        self,
+        identifier: str,
+        project_id: str,
+        db: AsyncSession,
+    ) -> Any:
+        """Resolve a user story by UUID, key, or title within the project."""
+        from src.user_story.models import UserStory
+        from sqlalchemy import select, func, or_
+        import uuid
+
+        clean = str(identifier).strip()
+        # 1. Try UUID
+        try:
+            target_uuid = str(uuid.UUID(clean))
+            stmt = select(UserStory).where(
+                UserStory.id == target_uuid,
+                UserStory.project_id == project_id,
+                UserStory.deleted_at.is_(None),
+            )
+            story = (await db.execute(stmt)).scalar_one_or_none()
+            if story:
+                return story
+        except ValueError:
+            pass
+
+        # 2. Try exact case-insensitive match by key or title
+        stmt = select(UserStory).where(
+            UserStory.project_id == project_id,
+            UserStory.deleted_at.is_(None),
+            or_(
+                func.lower(UserStory.key) == clean.lower(),
+                func.lower(UserStory.title) == clean.lower(),
+            ),
+        )
+        stories = (await db.execute(stmt)).scalars().all()
+        if len(stories) == 1:
+            return stories[0]
+        if len(stories) > 1:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Multiple user stories match '{clean}'. Please provide a specific user story ID or key.",
+            )
+
+        # 3. Try substring match by title
+        stmt_like = select(UserStory).where(
+            UserStory.project_id == project_id,
+            UserStory.deleted_at.is_(None),
+            UserStory.title.ilike(f"%{clean}%"),
+        )
+        stories_like = (await db.execute(stmt_like)).scalars().all()
+        if len(stories_like) == 1:
+            return stories_like[0]
+        if len(stories_like) > 1:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Multiple user stories match '{clean}'. Please provide a specific user story ID or key.",
+            )
+
+        raise TaskServiceError(
+            404,
+            "NOT_FOUND",
+            f"User story '{clean}' not found in this project",
+        )
+
     async def validate_preconditions(
         self,
         args: CreateTaskToolArgs,
@@ -757,21 +934,27 @@ class CreateTaskTool:
             args.reporter_id = UUID(str(reporter_user.id))
             reporter_name = reporter_user.full_name or reporter_user.username
 
-        # 5. Check sprint if provided
+        # 5. Check sprint if provided by ID or name
         sprint_name: str | None = None
-        if args.sprint_id:
-            sprint = await task_service._validate_sprint(str(args.sprint_id), proj_id_str)
+        sprint_target = args.sprint_name or (str(args.sprint_id) if args.sprint_id else None)
+        if sprint_target:
+            sprint = await self._resolve_sprint(sprint_target, proj_id_str, db)
             if sprint.status == "completed":
                 raise TaskServiceError(
                     400,
                     "VALIDATION_ERROR",
                     "Cannot assign a task to a completed sprint",
                 )
+            args.sprint_id = UUID(str(sprint.id))
             sprint_name = sprint.name
 
-        # 6. Check user story if provided
-        if args.user_story_id:
-            await task_service._validate_story(str(args.user_story_id), proj_id_str)
+        # 6. Check user story if provided by ID or name
+        user_story_name: str | None = None
+        story_target = args.user_story_name or (str(args.user_story_id) if args.user_story_id else None)
+        if story_target:
+            user_story = await self._resolve_user_story(story_target, proj_id_str, db)
+            args.user_story_id = UUID(str(user_story.id))
+            user_story_name = user_story.title
 
         # Build clean proposed dictionary
         proposed = {
@@ -789,6 +972,7 @@ class CreateTaskTool:
             "sprint_id": str(args.sprint_id) if args.sprint_id else None,
             "sprint_name": sprint_name,
             "user_story_id": str(args.user_story_id) if args.user_story_id else None,
+            "user_story_name": user_story_name,
             "due_date": args.due_date.isoformat() if args.due_date else None,
         }
         logger.info(
@@ -874,4 +1058,596 @@ class CreateTaskTool:
             "priority": task.priority,
             "assignee_id": str(task.assignee_id) if task.assignee_id else None,
             "reporter_id": str(task.reporter_id) if task.reporter_id else None,
+        }
+
+
+class UpdateTaskToolArgs(BaseModel):
+    """Strictly typed and normalized arguments for the update_task tool."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    task_id: UUID | None = None
+    task_key: str | None = None
+    project_id: UUID | None = None
+    project_name: str | None = None
+
+    title: str | None = None
+    description: str | None = None
+    type: TaskType | None = None
+    priority: TaskPriority | None = None
+    status: str | None = None
+    status_id: UUID | None = None
+
+    assignee: str | None = None
+    assignee_id: UUID | None = None
+    clear_assignee: bool = False
+
+    reporter: str | None = None
+    reporter_id: UUID | None = None
+
+    sprint: str | None = None
+    sprint_name: str | None = None
+    sprint_id: UUID | None = None
+    clear_sprint: bool = False
+
+    user_story: str | None = None
+    user_story_name: str | None = None
+    user_story_id: UUID | None = None
+    clear_user_story: bool = False
+
+    story_points: int | None = None
+    due_date: datetime | None = None
+    clear_due_date: bool = False
+
+    estimated_hours: float | None = None
+    actual_hours: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+
+        # Aliases for task identification
+        if "key" in data and not data.get("task_key"):
+            data["task_key"] = data["key"]
+        if "id" in data and not data.get("task_id"):
+            data["task_id"] = data["id"]
+
+        # Aliases for sprint
+        for alias in ("sprint", "sprint_name"):
+            if alias in data and data[alias] is not None:
+                val = str(data[alias]).strip().lower()
+                if val in ("none", "clear", "remove", "null", "unassign"):
+                    data["clear_sprint"] = True
+                    data["sprint_name"] = None
+                    data["sprint_id"] = None
+                elif not data.get("sprint_name") and not data.get("sprint_id"):
+                    try:
+                        data["sprint_id"] = UUID(str(data[alias]))
+                    except (ValueError, TypeError):
+                        data["sprint_name"] = str(data[alias])
+                break
+
+        # Aliases for user story
+        for alias in ("story", "user_story", "story_name", "user_story_name"):
+            if alias in data and data[alias] is not None:
+                val = str(data[alias]).strip().lower()
+                if val in ("none", "clear", "remove", "null", "unassign"):
+                    data["clear_user_story"] = True
+                    data["user_story_name"] = None
+                    data["user_story_id"] = None
+                elif not data.get("user_story_name") and not data.get("user_story_id"):
+                    try:
+                        data["user_story_id"] = UUID(str(data[alias]))
+                    except (ValueError, TypeError):
+                        data["user_story_name"] = str(data[alias])
+                break
+
+        # Aliases for assignee
+        if "assignee" in data and data["assignee"] is not None:
+            val = str(data["assignee"]).strip().lower()
+            if val in ("none", "clear", "unassign", "unassigned", "null"):
+                data["clear_assignee"] = True
+                data["assignee"] = None
+                data["assignee_id"] = None
+
+        # Aliases for due date
+        if "due_date" in data and data["due_date"] is not None:
+            val = str(data["due_date"]).strip().lower()
+            if val in ("none", "clear", "remove", "null"):
+                data["clear_due_date"] = True
+                data["due_date"] = None
+
+        return data
+
+    @field_validator("due_date", mode="before")
+    @classmethod
+    def validate_due_date(cls, v: Any) -> datetime | None:
+        if v is None or v == "":
+            return None
+        dt, ok = parse_due_date(v)
+        if not ok:
+            raise ValueError(f"Invalid due date '{v}'. Please provide a valid date (e.g. YYYY-MM-DD).")
+        return dt
+
+
+class UpdateTaskTool:
+    """Encapsulates the 'update_task' AI tool."""
+
+    name: str = "update_task"
+    description: str = (
+        "Update an existing task in WorkPilot. "
+        "Requires task_key (e.g. 'DEM-12') or task_id to identify the task, "
+        "and any fields to update (title, description, type, priority, status, assignee, sprint_name, user_story_name, story_points, due_date)."
+    )
+    is_write: bool = True
+
+    @classmethod
+    def get_tool_declaration(cls) -> dict[str, Any]:
+        """Return the tool schema formatted for LLM function calling."""
+        return {
+            "type": "function",
+            "function": {
+                "name": cls.name,
+                "description": cls.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_key": {
+                            "type": "string",
+                            "description": "The key of the task to update (e.g. 'DEM-12' or 'WP-5'). Highly recommended if known.",
+                        },
+                        "task_id": {
+                            "type": "string",
+                            "description": "The UUID of the task to update (if task_key is not known).",
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the project for verification.",
+                        },
+                        "project_name": {
+                            "type": "string",
+                            "description": "Optional name of the project.",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Updated task title (between 3 and 200 characters).",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Updated details or instructions for the task.",
+                        },
+                        "type": {
+                            "type": "string",
+                            "enum": TASK_TYPES,
+                            "description": "Updated task work-item type (bug, feature, task, chore, story).",
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": TASK_PRIORITIES,
+                            "description": "Updated priority level (low, medium, high, critical).",
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "Updated workflow status name (e.g. 'in_progress', 'todo', 'testing', 'completed', 'blocked').",
+                        },
+                        "status_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the target status.",
+                        },
+                        "assignee": {
+                            "type": "string",
+                            "description": "Team member to assign the task to (e.g. 'alex', 'me'). Pass 'none' or 'unassigned' to unassign.",
+                        },
+                        "assignee_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the assigned team member.",
+                        },
+                        "clear_assignee": {
+                            "type": "boolean",
+                            "description": "Set to true to unassign the task.",
+                        },
+                        "reporter": {
+                            "type": "string",
+                            "description": "Optional name or email of the reporter.",
+                        },
+                        "reporter_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the reporter.",
+                        },
+                        "sprint_name": {
+                            "type": "string",
+                            "description": "Name of the sprint to move this task to. Pass 'none' or 'clear' to remove from sprint.",
+                        },
+                        "sprint_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the sprint.",
+                        },
+                        "clear_sprint": {
+                            "type": "boolean",
+                            "description": "Set to true to remove the task from its current sprint.",
+                        },
+                        "user_story_name": {
+                            "type": "string",
+                            "description": "Name or title of the parent user story. Pass 'none' or 'clear' to remove.",
+                        },
+                        "user_story_id": {
+                            "type": "string",
+                            "description": "Optional UUID of the parent user story.",
+                        },
+                        "clear_user_story": {
+                            "type": "boolean",
+                            "description": "Set to true to detach the task from its user story.",
+                        },
+                        "story_points": {
+                            "type": "integer",
+                            "description": "Updated Fibonacci story points (0, 1, 2, 3, 5, 8, ...).",
+                        },
+                        "due_date": {
+                            "type": "string",
+                            "description": "Updated due date/time in ISO 8601 format (e.g. 'YYYY-MM-DD'). Pass 'none' or 'clear' to remove due date.",
+                        },
+                        "clear_due_date": {
+                            "type": "boolean",
+                            "description": "Set to true to clear the task's due date.",
+                        },
+                        "estimated_hours": {
+                            "type": "number",
+                            "description": "Estimated hours for the task.",
+                        },
+                        "actual_hours": {
+                            "type": "number",
+                            "description": "Actual hours spent on the task.",
+                        },
+                    },
+                },
+            },
+        }
+
+    @staticmethod
+    def parse_arguments(raw_args: dict[str, Any]) -> UpdateTaskToolArgs:
+        """Parse and validate raw tool arguments strictly."""
+        return UpdateTaskToolArgs.model_validate(raw_args)
+
+    async def _find_task(
+        self,
+        args: UpdateTaskToolArgs,
+        db: AsyncSession,
+    ) -> Task:
+        """Find the task by task_id or task_key."""
+        from sqlalchemy import func, select
+        from sqlalchemy.orm import joinedload
+
+        if not args.task_id and not args.task_key:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                "Must provide task_key (e.g. 'DEM-12') or task_id to identify the task to update.",
+            )
+
+        stmt = (
+            select(Task)
+            .options(
+                joinedload(Task.project),
+                joinedload(Task.assignee),
+                joinedload(Task.reporter),
+                joinedload(Task.sprint),
+                joinedload(Task.user_story),
+            )
+            .where(Task.deleted_at.is_(None))
+        )
+        if args.task_id:
+            stmt = stmt.where(Task.id == str(args.task_id))
+        elif args.task_key:
+            clean_key = args.task_key.strip()
+            stmt = stmt.where(func.lower(Task.key) == clean_key.lower())
+
+        task = (await db.execute(stmt)).scalar_one_or_none()
+        if not task:
+            ident = str(args.task_id) if args.task_id else args.task_key
+            raise TaskServiceError(404, "NOT_FOUND", f"Task '{ident}' not found.")
+        return task
+
+    async def validate_preconditions(
+        self,
+        args: UpdateTaskToolArgs,
+        *,
+        user_id: str,
+        organization_id: str,
+        role: str,
+        db: AsyncSession,
+        redis: Any = None,
+    ) -> dict[str, Any]:
+        """Validate user permissions, tenant isolation, and related entities for updating."""
+        task_service = TaskService(db, redis)
+
+        # 1. Locate task
+        task = await self._find_task(args, db)
+        proj_id_str = str(task.project_id)
+        project = task.project
+
+        # 2. Check organization isolation
+        if str(project.organization_id) != str(organization_id):
+            raise TaskServiceError(
+                403,
+                "FORBIDDEN",
+                "Task belongs to a project in a different organization",
+            )
+
+        # 3. Check authorization & permissions
+        project_model, actor = await task_service._check_authorization(
+            proj_id_str,
+            user_id,
+            "You do not have permission to view tasks in this project",
+        )
+        if not await task_service._has_permission(project_model, actor, "tasks", "modify"):
+            raise TaskServiceError(
+                403,
+                "FORBIDDEN",
+                "You do not have permission to update tasks in this project",
+            )
+        is_pm_or_admin = await task_service._has_permission(project_model, actor, "projects", "modify")
+
+        # 4. Validate fields
+        if args.title is not None and not (3 <= len(args.title) <= 200):
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                "Task title must be between 3 and 200 characters",
+            )
+
+        if args.priority is not None and args.priority.lower() not in TASK_PRIORITIES:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                f"Priority '{args.priority}' is not supported. Allowed priorities are: {', '.join(TASK_PRIORITIES)}.",
+            )
+
+        if args.story_points is not None:
+            if args.story_points < 0 or not _is_fibonacci(args.story_points):
+                raise TaskServiceError(
+                    400,
+                    "VALIDATION_ERROR",
+                    "Story points must follow the Fibonacci scale",
+                )
+
+        if args.due_date is not None and _is_backdated(args.due_date) and not is_pm_or_admin:
+            raise TaskServiceError(
+                400,
+                "VALIDATION_ERROR",
+                "Due date cannot be backdated unless set by a PM or Admin",
+            )
+
+        # Assignee resolution
+        helper = CreateTaskTool()
+        resolved_assignee_id: str | None = None
+        assignee_name: str | None = None
+        if args.clear_assignee:
+            resolved_assignee_id = None
+            assignee_name = None
+        elif args.assignee is not None or args.assignee_id is not None:
+            target = args.assignee or str(args.assignee_id)
+            user = await helper._resolve_user(
+                target, project_model, organization_id, db, field_name="assignee", current_user_id=user_id
+            )
+            resolved_assignee_id = str(user.id)
+            assignee_name = user.full_name or user.username
+        else:
+            resolved_assignee_id = str(task.assignee_id) if task.assignee_id else None
+            assignee_name = (task.assignee.full_name or task.assignee.username) if task.assignee else None
+
+        # Reporter resolution
+        resolved_reporter_id: str | None = None
+        reporter_name: str | None = None
+        if args.reporter is not None or args.reporter_id is not None:
+            target = args.reporter or str(args.reporter_id)
+            user = await helper._resolve_user(
+                target, project_model, organization_id, db, field_name="reporter", current_user_id=user_id
+            )
+            resolved_reporter_id = str(user.id)
+            reporter_name = user.full_name or user.username
+        else:
+            resolved_reporter_id = str(task.reporter_id) if task.reporter_id else None
+            reporter_name = (task.reporter.full_name or task.reporter.username) if getattr(task, "reporter", None) else None
+
+        # Sprint resolution
+        resolved_sprint_id: str | None = None
+        sprint_name: str | None = None
+        if args.clear_sprint:
+            resolved_sprint_id = None
+            sprint_name = None
+        elif args.sprint_name is not None or args.sprint_id is not None or args.sprint is not None:
+            target = args.sprint_name or (str(args.sprint_id) if args.sprint_id else args.sprint)
+            sprint = await helper._resolve_sprint(target, proj_id_str, db)
+            if sprint.status == "completed":
+                raise TaskServiceError(
+                    400,
+                    "VALIDATION_ERROR",
+                    "Cannot assign a task to a completed sprint",
+                )
+            resolved_sprint_id = str(sprint.id)
+            sprint_name = sprint.name
+        else:
+            resolved_sprint_id = str(task.sprint_id) if task.sprint_id else None
+            sprint_name = task.sprint.name if task.sprint else None
+
+        # User story resolution
+        resolved_user_story_id: str | None = None
+        user_story_name: str | None = None
+        if args.clear_user_story:
+            resolved_user_story_id = None
+            user_story_name = None
+        elif args.user_story_name is not None or args.user_story_id is not None or args.user_story is not None:
+            target = args.user_story_name or (str(args.user_story_id) if args.user_story_id else args.user_story)
+            story = await helper._resolve_user_story(target, proj_id_str, db)
+            resolved_user_story_id = str(story.id)
+            user_story_name = story.title
+        else:
+            resolved_user_story_id = str(task.user_story_id) if task.user_story_id else None
+            user_story_name = task.user_story.title if task.user_story else None
+
+        # Status resolution
+        resolved_status_name = task.status
+        if args.status is not None or args.status_id is not None:
+            statuses = await task_service._statuses(proj_id_str)
+            new_status_id, new_status_name = await task_service._resolve_status(
+                proj_id_str, args.status_id, args.status, statuses
+            )
+            if new_status_id != str(task.status_id) and not is_pm_or_admin:
+                old_status = normalize_task_status(task.status)
+                new_status = normalize_task_status(new_status_name)
+                transition_map = {
+                    "todo": {"in_progress", "blocked"},
+                    "in_progress": {"in_review", "blocked"},
+                    "in_review": {"testing", "blocked"},
+                    "testing": {"completed", "blocked"},
+                    "completed": {"blocked"},
+                    "blocked": {"in_progress", "todo"},
+                }
+                both_default = old_status in DEFAULT_STATUS_COLORS and new_status in DEFAULT_STATUS_COLORS
+                if both_default and new_status not in transition_map.get(old_status, set()):
+                    raise TaskServiceError(
+                        400,
+                        "INVALID_STATUS_TRANSITION",
+                        f"Invalid status transition from {old_status} to {new_status} for developers",
+                    )
+            resolved_status_name = new_status_name
+
+        # Due date resolution
+        if args.clear_due_date:
+            due_date_iso = None
+        elif args.due_date is not None:
+            due_date_iso = args.due_date.isoformat()
+        else:
+            due_date_iso = task.due_date.isoformat() if task.due_date else None
+
+        proposed = {
+            "task_id": str(task.id),
+            "key": task.key,
+            "project_id": proj_id_str,
+            "project_name": project.name,
+            "title": args.title if args.title is not None else task.title,
+            "description": args.description if args.description is not None else (task.description or ""),
+            "type": args.type if args.type is not None else task.type,
+            "priority": args.priority if args.priority is not None else task.priority,
+            "status": resolved_status_name,
+            "story_points": args.story_points if args.story_points is not None else task.story_points,
+            "assignee_id": resolved_assignee_id,
+            "assignee_name": assignee_name,
+            "reporter_id": resolved_reporter_id,
+            "reporter_name": reporter_name,
+            "sprint_id": resolved_sprint_id,
+            "sprint_name": sprint_name,
+            "user_story_id": resolved_user_story_id,
+            "user_story_name": user_story_name,
+            "due_date": due_date_iso,
+            "estimated_hours": float(args.estimated_hours) if args.estimated_hours is not None else (float(task.estimated_hours) if task.estimated_hours is not None else None),
+            "actual_hours": float(args.actual_hours) if args.actual_hours is not None else (float(task.actual_hours) if task.actual_hours is not None else None),
+        }
+        return proposed
+
+    async def execute(
+        self,
+        args: UpdateTaskToolArgs,
+        *,
+        user_id: str,
+        organization_id: str,
+        role: str,
+        db: AsyncSession,
+        redis: Any = None,
+    ) -> dict[str, Any]:
+        """Execute task update using TaskService.update method."""
+        task_service = TaskService(db, redis)
+        task = await self._find_task(args, db)
+        proj_id_str = str(task.project_id)
+        project = task.project
+        helper = CreateTaskTool()
+
+        update_kwargs: dict[str, Any] = {}
+        if args.title is not None:
+            update_kwargs["title"] = args.title
+        if args.description is not None:
+            update_kwargs["description"] = args.description
+        if args.type is not None:
+            update_kwargs["type"] = args.type
+        if args.priority is not None:
+            update_kwargs["priority"] = args.priority
+        if args.status is not None:
+            update_kwargs["status"] = args.status
+        if args.status_id is not None:
+            update_kwargs["status_id"] = args.status_id
+
+        if args.clear_assignee:
+            update_kwargs["assignee_id"] = None
+        elif args.assignee_id is not None:
+            update_kwargs["assignee_id"] = args.assignee_id
+        elif args.assignee is not None:
+            user = await helper._resolve_user(
+                args.assignee, project, organization_id, db, field_name="assignee", current_user_id=user_id
+            )
+            update_kwargs["assignee_id"] = UUID(str(user.id))
+
+        if args.reporter_id is not None:
+            update_kwargs["reporter_id"] = args.reporter_id
+        elif args.reporter is not None:
+            user = await helper._resolve_user(
+                args.reporter, project, organization_id, db, field_name="reporter", current_user_id=user_id
+            )
+            update_kwargs["reporter_id"] = UUID(str(user.id))
+
+        if args.clear_sprint:
+            update_kwargs["sprint_id"] = None
+        elif args.sprint_id is not None:
+            update_kwargs["sprint_id"] = args.sprint_id
+        elif args.sprint_name is not None or args.sprint is not None:
+            target_s = args.sprint_name or args.sprint
+            sprint = await helper._resolve_sprint(target_s, proj_id_str, db)
+            update_kwargs["sprint_id"] = UUID(str(sprint.id))
+
+        if args.clear_user_story:
+            update_kwargs["user_story_id"] = None
+        elif args.user_story_id is not None:
+            update_kwargs["user_story_id"] = args.user_story_id
+        elif args.user_story_name is not None or args.user_story is not None:
+            target_st = args.user_story_name or args.user_story
+            story = await helper._resolve_user_story(target_st, proj_id_str, db)
+            update_kwargs["user_story_id"] = UUID(str(story.id))
+
+        if args.story_points is not None:
+            update_kwargs["story_points"] = args.story_points
+
+        if args.clear_due_date:
+            update_kwargs["due_date"] = None
+        elif args.due_date is not None:
+            update_kwargs["due_date"] = args.due_date
+
+        if args.estimated_hours is not None:
+            update_kwargs["estimated_hours"] = args.estimated_hours
+        if args.actual_hours is not None:
+            update_kwargs["actual_hours"] = args.actual_hours
+
+        req = UpdateTaskRequest(**update_kwargs)
+
+        await task_service.update(
+            proj_id_str,
+            str(task.id),
+            req,
+            user_id,
+            organization_id,
+            role,
+        )
+
+        updated_task = await task_service._task(str(task.id), proj_id_str)
+        return {
+            "task_id": str(updated_task.id),
+            "key": updated_task.key,
+            "title": updated_task.title,
+            "status": updated_task.status,
+            "project_id": str(updated_task.project_id),
+            "type": updated_task.type,
+            "priority": updated_task.priority,
+            "assignee_id": str(updated_task.assignee_id) if updated_task.assignee_id else None,
+            "reporter_id": str(updated_task.reporter_id) if updated_task.reporter_id else None,
         }
