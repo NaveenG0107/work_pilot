@@ -42,8 +42,10 @@ logger = get_logger(__name__)
 
 # Fallback in-memory store for pending actions if Redis is not configured or offline
 _MEMORY_ACTION_STORE: dict[str, dict[str, Any]] = {}
+_MEMORY_CONV_STORE: dict[str, list[dict[str, str]]] = {}
 _MEMORY_STORE_LOCK = asyncio.Lock()
 CONFIRMATION_TTL_SECONDS = 900  # 15 minutes
+CONVERSATION_TTL_SECONDS = 3600  # 1 hour
 DEFAULT_CLAIM_TTL_SECONDS = 30  # 30 seconds claim execution lock
 
 FOLLOW_UP_TITLE_PROMPT = (
@@ -280,6 +282,70 @@ def extract_user_due_date(user_message: str) -> str | None:
         val = m5.group(1).strip()
         if val not in {"to", "in", "at", "for", "the", "a", "an", "date", "on", "by", "before"}:
             return val
+
+    return None
+
+
+def extract_task_key_from_message(user_message: str) -> str | None:
+    """Extract an explicit task key like DEM-12, DEM 12, dem12, WP-5, or DEM2-10 from user message.
+    
+    Returns the canonicalized format with uppercase letters and hyphen (e.g. 'DEM-280').
+    """
+    # 1. Hyphenated: DEM-280, dem-280
+    match = re.search(r"\b([A-Za-z][A-Za-z0-9]*)-(\d+)\b", user_message)
+    if match:
+        return f"{match.group(1).upper()}-{match.group(2)}"
+
+    # 2. Space separated: DEM 280, dem 280
+    match_space = re.search(r"\b([A-Za-z][A-Za-z0-9]*)\s+(\d+)\b", user_message)
+    if match_space:
+        prefix = match_space.group(1)
+        # Avoid matching common words + numbers like 'november 5', 'points 5'
+        if prefix.lower() not in METADATA_COMMAND_WORDS and prefix.lower() not in (
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+            "version", "v", "step", "page", "top", "rank",
+        ):
+            return f"{prefix.upper()}-{match_space.group(2)}"
+
+    # 3. Concatenated: DEM280, dem280 (prefix must be at least 2 chars to avoid e.g. 'a2' or 'p1')
+    match_cat = re.search(r"\b([A-Za-z]{2,10})(\d+)\b", user_message)
+    if match_cat:
+        prefix = match_cat.group(1)
+        if prefix.lower() not in METADATA_COMMAND_WORDS and prefix.lower() not in (
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+            "sp", "pts", "point", "points",
+        ):
+            return f"{prefix.upper()}-{match_cat.group(2)}"
+
+    return None
+
+
+def extract_task_identifier_from_message(user_message: str) -> str | None:
+    """Extract a task key or referenced task title from user message."""
+    key = extract_task_key_from_message(user_message)
+    if key:
+        return key
+
+    m_quote = re.search(r"['\"`“”‘’]([^'\"`“”‘’]{2,100})['\"`“”‘’]", user_message)
+    if m_quote:
+        return m_quote.group(1).strip()
+
+    m_for_task = re.search(r"\bfor\s+task\s+([A-Za-z0-9_\-\s]{2,80})$", user_message, re.IGNORECASE)
+    if m_for_task:
+        return m_for_task.group(1).strip()
+
+    m_for = re.search(r"\bfor\s+([A-Za-z0-9_\-\s]{2,80})$", user_message, re.IGNORECASE)
+    if m_for:
+        cand = m_for.group(1).strip()
+        if cand.lower() not in ("me", "myself", "today", "tomorrow", "yesterday", "next week"):
+            return cand
+
+    m_task = re.search(r"\btask\s+([A-Za-z0-9_\-\s]{2,80}?)(?:\s+to|\s+priority|\s+status|\s+type|$)", user_message, re.IGNORECASE)
+    if m_task:
+        cand = m_task.group(1).strip()
+        if cand.lower() not in ("type", "priority", "status", "to", "from", "title", "description"):
+            return cand
 
     return None
 
@@ -602,6 +668,49 @@ class ActionStore:
             action["status"] = "expired"
             await self.update_action(action_id, action)
 
+    async def get_conversation_history(self, conversation_id: str, *, user_id: str, organization_id: str) -> list[dict[str, str]]:
+        """Retrieve recent conversation history securely scoped to organization and user."""
+        key = f"ai_conv:{organization_id}:{user_id}:{conversation_id}"
+        if self.redis is not None:
+            try:
+                raw = await self.redis.get(key)
+                if raw:
+                    return json.loads(raw)
+            except Exception as exc:
+                logger.warning("Redis get_conversation_history failed: %s", exc)
+
+        async with _MEMORY_STORE_LOCK:
+            return list(_MEMORY_CONV_STORE.get(key, []))
+
+    async def append_conversation_turn(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+        organization_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """Append user and assistant turns to conversation history."""
+        key = f"ai_conv:{organization_id}:{user_id}:{conversation_id}"
+        async with _MEMORY_STORE_LOCK:
+            hist = _MEMORY_CONV_STORE.setdefault(key, [])
+            hist.append({"role": "user", "content": user_message})
+            hist.append({"role": "assistant", "content": assistant_message})
+            # Keep at most last 10 messages (5 turns)
+            if len(hist) > 10:
+                _MEMORY_CONV_STORE[key] = hist[-10:]
+
+        if self.redis is not None:
+            try:
+                await self.redis.set(
+                    key,
+                    json.dumps(_MEMORY_CONV_STORE.get(key, [])),
+                    ex=CONVERSATION_TTL_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning("Redis append_conversation_turn failed: %s", exc)
+
 
 class AIOrchestrationService:
     """Coordinates chat, LLM responses, tool calling, and action confirmation."""
@@ -652,6 +761,13 @@ class AIOrchestrationService:
                            f"Use project_id='{context_proj_id}' if the user asks to create a task in the current project without specifying another project. "
                            f"CRITICAL: Never put the project name in the assignee field. If the user does not specify an assignee, leave assignee null or omitted."
             })
+
+        # Load multi-turn conversation history for this session, securely scoped
+        prior_history = await self.action_store.get_conversation_history(
+            conversation_id, user_id=str(user_id), organization_id=str(organization_id)
+        )
+        for h in prior_history:
+            messages.append({"role": h["role"], "content": h["content"]})
 
         messages.append({"role": "user", "content": request.message})
 
@@ -927,6 +1043,112 @@ class AIOrchestrationService:
                 else:
                     args["due_date"] = None
 
+            if tool_name == "update_task":
+                if not args.get("project_id") and context_proj_id:
+                    args["project_id"] = context_proj_id
+                    if context_project and not args.get("project_name"):
+                        args["project_name"] = context_project.name
+
+                raw_tkey = args.get("task_key")
+                raw_tid = args.get("task_id")
+                explicit_key = extract_task_key_from_message(request.message)
+
+                if not raw_tkey and not raw_tid:
+                    user_target = extract_task_identifier_from_message(request.message)
+                    if user_target:
+                        args["task_key"] = user_target
+                    else:
+                        resp = ChatResponseData(
+                            conversation_id=conversation_id,
+                            message="Which task would you like to update? Please provide the task key (e.g. 'DEM-1') or task title.",
+                            action_state="NONE",
+                        )
+                        await self.action_store.append_conversation_turn(
+                            conversation_id,
+                            user_id=str(user_id),
+                            organization_id=str(organization_id),
+                            user_message=request.message,
+                            assistant_message=resp.message,
+                        )
+                        return resp
+
+                # Check if the LLM hallucinated a key (e.g. TEST-1 when user never mentioned it)
+                # But allow if the key was mentioned in preceding conversation turns (follow-up context)
+                key_in_history = False
+                if raw_tkey and not raw_tid and not explicit_key:
+                    for h in prior_history:
+                        hist_key = extract_task_key_from_message(h.get("content", ""))
+                        if hist_key and hist_key.upper() == str(raw_tkey).strip().upper():
+                            key_in_history = True
+                            explicit_key = hist_key
+                            break
+
+                if raw_tkey and not raw_tid and not explicit_key and not key_in_history:
+                    user_target = extract_task_identifier_from_message(request.message)
+                    if user_target:
+                        args["task_key"] = user_target
+                    else:
+                        resp = ChatResponseData(
+                            conversation_id=conversation_id,
+                            message="Which task would you like to update? Please provide the task key (e.g. 'DEM-1') or task title.",
+                            action_state="NONE",
+                        )
+                        await self.action_store.append_conversation_turn(
+                            conversation_id,
+                            user_id=str(user_id),
+                            organization_id=str(organization_id),
+                            user_message=request.message,
+                            assistant_message=resp.message,
+                        )
+                        return resp
+
+                # If task_key is a title (not an explicit key like DEM-1), check if it exists:
+                check_key = args.get("task_key")
+                if check_key and not raw_tid and not explicit_key:
+                    from src.task.models import Task
+                    from sqlalchemy import select, func
+                    t_stmt = select(Task).where(
+                        Task.deleted_at.is_(None),
+                        func.lower(Task.title) == str(check_key).strip().lower(),
+                    )
+                    if args.get("project_id"):
+                        t_stmt = t_stmt.where(Task.project_id == str(args["project_id"]))
+                    found_tasks = (await self.db.execute(t_stmt)).scalars().all()
+                    if len(found_tasks) == 1:
+                        args["task_id"] = str(found_tasks[0].id)
+                        args["task_key"] = found_tasks[0].key
+                    elif len(found_tasks) > 1:
+                        matching_keys = ", ".join(f"'{t.key}'" for t in found_tasks[:5])
+                        resp = ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"Multiple tasks found with title '{check_key}' ({matching_keys}). Please specify the task key (e.g. 'DEM-1').",
+                            action_state="NONE",
+                        )
+                        await self.action_store.append_conversation_turn(
+                            conversation_id,
+                            user_id=str(user_id),
+                            organization_id=str(organization_id),
+                            user_message=request.message,
+                            assistant_message=resp.message,
+                        )
+                        return resp
+                    else:
+                        p_name = args.get("project_name") or (context_project.name if context_project else "")
+                        p_str = f" in project '{p_name}'" if p_name else ""
+                        resp = ChatResponseData(
+                            conversation_id=conversation_id,
+                            message=f"I couldn't find a task named '{check_key}'{p_str}. Please provide the task key (e.g. 'DEM-1') or the exact title of the task you would like to update.",
+                            action_state="NONE",
+                        )
+                        await self.action_store.append_conversation_turn(
+                            conversation_id,
+                            user_id=str(user_id),
+                            organization_id=str(organization_id),
+                            user_message=request.message,
+                            assistant_message=resp.message,
+                        )
+                        return resp
+
             logger.info("Calling %s with validated tool arguments: %s", tool_name, args)
             tool_result = await self.executor.execute_or_prepare(
                 tool_name,
@@ -992,12 +1214,20 @@ class AIOrchestrationService:
                         f"Please confirm to create it."
                     )
 
-                return ChatResponseData(
+                resp_data = ChatResponseData(
                     conversation_id=conversation_id,
                     message=confirmation_msg,
                     action_state="REQUIRES_CONFIRMATION",
                     pending_action=pending_action,
                 )
+                await self.action_store.append_conversation_turn(
+                    conversation_id,
+                    user_id=str(user_id),
+                    organization_id=str(organization_id),
+                    user_message=request.message,
+                    assistant_message=confirmation_msg,
+                )
+                return resp_data
 
             elif tool_result.status == ToolExecutionStatus.PERMISSION_DENIED:
                 raise TaskServiceError(
@@ -1059,9 +1289,17 @@ class AIOrchestrationService:
                 )
 
         # Default conversational response
+        conv_msg = llm_response.content or "How can I assist you with WorkPilot today?"
+        await self.action_store.append_conversation_turn(
+            conversation_id,
+            user_id=str(user_id),
+            organization_id=str(organization_id),
+            user_message=request.message,
+            assistant_message=conv_msg,
+        )
         return ChatResponseData(
             conversation_id=conversation_id,
-            message=llm_response.content or "How can I assist you with WorkPilot today?",
+            message=conv_msg,
             action_state="NONE",
         )
 

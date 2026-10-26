@@ -46,12 +46,33 @@ def parse_due_date(val: Any) -> tuple[datetime | None, bool]:
         if clean in ("none", "null", "undefined"):
             return None, True
         now = datetime.now(timezone.utc)
-        if clean == "today":
+        if clean in ("today", "tod"):
             return now, True
-        if clean == "tomorrow":
+        if clean in ("tomorrow", "tmrw", "tmr", "2moro"):
             return now + timedelta(days=1), True
-        if clean == "yesterday":
+        if clean in ("yesterday", "yest"):
             return now - timedelta(days=1), True
+        if clean == "next week":
+            return now + timedelta(days=7), True
+
+        # Handle 'next <day_of_week>' e.g. 'next friday'
+        days_of_week = {
+            "monday": 0, "mon": 0,
+            "tuesday": 1, "tue": 1,
+            "wednesday": 2, "wed": 2,
+            "thursday": 3, "thu": 3,
+            "friday": 4, "fri": 4,
+            "saturday": 5, "sat": 5,
+            "sunday": 6, "sun": 6,
+        }
+        for dname, target_weekday in days_of_week.items():
+            if clean in (f"next {dname}", f"this {dname}", dname):
+                current_weekday = now.weekday()
+                days_ahead = (target_weekday - current_weekday) % 7
+                if days_ahead == 0 or clean.startswith("next "):
+                    days_ahead += 7
+                return now + timedelta(days=days_ahead), True
+
         try:
             dt = date_parser.parse(val)
             if dt.tzinfo is None:
@@ -1114,6 +1135,68 @@ class UpdateTaskToolArgs(BaseModel):
             data["task_key"] = data["key"]
         if "id" in data and not data.get("task_id"):
             data["task_id"] = data["id"]
+        if "task" in data and not data.get("task_key") and not data.get("task_id"):
+            data["task_key"] = data["task"]
+        if "task_name" in data and not data.get("task_key") and not data.get("task_id"):
+            data["task_key"] = data["task_name"]
+
+        # Normalize task_key format (e.g. 'dem 280' -> 'DEM-280', 'dem280' -> 'DEM-280', 'dem-280' -> 'DEM-280')
+        if data.get("task_key") and isinstance(data["task_key"], str):
+            raw_tk = data["task_key"].strip()
+            # 1. Hyphenated: dem-280 -> DEM-280
+            m_hyphen = re.match(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$", raw_tk)
+            if m_hyphen:
+                data["task_key"] = f"{m_hyphen.group(1).upper()}-{m_hyphen.group(2)}"
+            else:
+                # 2. Space-separated: dem 280 -> DEM-280
+                m_space = re.match(r"^([A-Za-z][A-Za-z0-9]*)\s+(\d+)$", raw_tk)
+                if m_space:
+                    data["task_key"] = f"{m_space.group(1).upper()}-{m_space.group(2)}"
+                else:
+                    # 3. Concatenated: dem280 -> DEM-280
+                    m_cat = re.match(r"^([A-Za-z]{2,10})(\d+)$", raw_tk)
+                    if m_cat:
+                        data["task_key"] = f"{m_cat.group(1).upper()}-{m_cat.group(2)}"
+
+        # Normalize common priority typos & shorthand
+        if "priority" in data and data["priority"] is not None:
+            p_val = str(data["priority"]).strip().lower()
+            p_val = re.sub(r"^(?:priorty|priority)\s*[:=]?\s*", "", p_val).strip()
+            p_val = re.sub(r"[-\s]+(?:priority|priorty|level)$", "", p_val).strip()
+            priority_typo_map = {
+                "priorty": "priority",
+                "critcal": "critical",
+                "critial": "critical",
+                "crtical": "critical",
+                "med": "medium",
+                "hi": "high",
+            }
+            p_val = priority_typo_map.get(p_val, p_val)
+            data["priority"] = p_val
+
+        # Normalize common status shorthand & typos (e.g. inprogress, in-progress, done)
+        if "status" in data and data["status"] is not None:
+            s_val = str(data["status"]).strip()
+            s_clean = s_val.lower().replace("-", " ").replace("_", " ")
+            status_map = {
+                "inprogress": "In Progress",
+                "in progress": "In Progress",
+                "todo": "Todo",
+                "to do": "Todo",
+                "done": "completed",
+                "complete": "completed",
+                "completed": "completed",
+                "ready for qa": "Ready For QA",
+                "readyforqa": "Ready For QA",
+                "in review": "In Review",
+                "inreview": "In Review",
+                "uat": "UAT",
+                "blocked": "Blocked",
+            }
+            if s_clean in status_map:
+                data["status"] = status_map[s_clean]
+            elif s_val.lower() in status_map:
+                data["status"] = status_map[s_val.lower()]
 
         # Aliases for sprint
         for alias in ("sprint", "sprint_name"):
@@ -1159,6 +1242,12 @@ class UpdateTaskToolArgs(BaseModel):
             if val in ("none", "clear", "remove", "null"):
                 data["clear_due_date"] = True
                 data["due_date"] = None
+
+        # Aliases for description (clear / empty)
+        if "description" in data and data["description"] is not None:
+            val = str(data["description"]).strip().lower()
+            if val in ("none", "clear", "remove", "null", "empty", "blank"):
+                data["description"] = ""
 
         return data
 
@@ -1338,13 +1427,49 @@ class UpdateTaskTool:
             )
             .where(Task.deleted_at.is_(None))
         )
+        task = None
         if args.task_id:
             stmt = stmt.where(Task.id == str(args.task_id))
+            task = (await db.execute(stmt)).scalar_one_or_none()
         elif args.task_key:
             clean_key = args.task_key.strip()
-            stmt = stmt.where(func.lower(Task.key) == clean_key.lower())
+            # 1. Try matching by exact task key
+            key_stmt = stmt.where(func.lower(Task.key) == clean_key.lower())
+            task = (await db.execute(key_stmt)).scalar_one_or_none()
 
-        task = (await db.execute(stmt)).scalar_one_or_none()
+            # If not found directly, try canonicalizing e.g. "dem 280" or "dem280" to "DEM-280"
+            if not task:
+                m_space = re.match(r"^([A-Za-z][A-Za-z0-9]*)\s+(\d+)$", clean_key)
+                m_cat = re.match(r"^([A-Za-z]{2,10})(\d+)$", clean_key) if not m_space else None
+                m_hyphen = re.match(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$", clean_key) if not m_space and not m_cat else None
+                canon = None
+                if m_space:
+                    canon = f"{m_space.group(1).upper()}-{m_space.group(2)}"
+                elif m_cat:
+                    canon = f"{m_cat.group(1).upper()}-{m_cat.group(2)}"
+                elif m_hyphen:
+                    canon = f"{m_hyphen.group(1).upper()}-{m_hyphen.group(2)}"
+
+                if canon and canon.lower() != clean_key.lower():
+                    canon_stmt = stmt.where(func.lower(Task.key) == canon.lower())
+                    task = (await db.execute(canon_stmt)).scalar_one_or_none()
+
+            # 2. If not found by key, try matching by task title
+            if not task:
+                title_stmt = stmt.where(func.lower(Task.title) == clean_key.lower())
+                if args.project_id:
+                    title_stmt = title_stmt.where(Task.project_id == str(args.project_id))
+                title_res = (await db.execute(title_stmt)).scalars().all()
+                if len(title_res) == 1:
+                    task = title_res[0]
+                elif len(title_res) > 1:
+                    matching_keys = ", ".join(f"'{t.key}'" for t in title_res[:5])
+                    raise TaskServiceError(
+                        400,
+                        "AMBIGUOUS_TASK",
+                        f"Multiple tasks found with title '{clean_key}' ({matching_keys}). Please specify the task key (e.g. 'DEM-12').",
+                    )
+
         if not task:
             ident = str(args.task_id) if args.task_id else args.task_key
             raise TaskServiceError(404, "NOT_FOUND", f"Task '{ident}' not found.")
