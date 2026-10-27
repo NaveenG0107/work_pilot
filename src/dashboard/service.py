@@ -448,20 +448,43 @@ class DashboardService:
         task_data = []
         if tasks:
             for t in tasks:
-                est = getattr(t, "estimated_hours", None)
-                sp = getattr(t, "story_points", None)
-                act = getattr(t, "actual_hours", None)
-                if est is not None and float(est) > 0:
-                    weight = float(est)
-                elif sp is not None and float(sp) > 0:
-                    weight = float(sp)
-                elif act is not None and float(act) > 0:
-                    weight = float(act)
+                if isinstance(t, dict):
+                    est = t.get("estimated_hours")
+                    sp = t.get("story_points")
+                    act = t.get("actual_hours")
+                    is_final = bool(t.get("is_final", False))
+                    updated_at = t.get("updated_at")
+                else:
+                    est = getattr(t, "estimated_hours", None)
+                    sp = getattr(t, "story_points", None)
+                    act = getattr(t, "actual_hours", None)
+                    is_final = bool(getattr(t, "is_final", False))
+                    updated_at = getattr(t, "updated_at", None)
+
+                try:
+                    est_val = float(est) if est is not None else 0.0
+                except (ValueError, TypeError):
+                    est_val = 0.0
+
+                try:
+                    sp_val = float(sp) if sp is not None else 0.0
+                except (ValueError, TypeError):
+                    sp_val = 0.0
+
+                try:
+                    act_val = float(act) if act is not None else 0.0
+                except (ValueError, TypeError):
+                    act_val = 0.0
+
+                if est_val > 0:
+                    weight = est_val
+                elif sp_val > 0:
+                    weight = sp_val
+                elif act_val > 0:
+                    weight = act_val
                 else:
                     weight = 0.0
 
-                is_final = bool(getattr(t, "is_final", False))
-                updated_at = getattr(t, "updated_at", None)
                 if updated_at:
                     comp_d = updated_at.date() if isinstance(updated_at, datetime) or hasattr(updated_at, "date") else updated_at
                 else:
@@ -470,12 +493,20 @@ class DashboardService:
                 if isinstance(comp_d, datetime) or hasattr(comp_d, "date"):
                     comp_d = comp_d.date()
 
-                task_data.append((weight, is_final, comp_d))
+                task_data.append({
+                    "estimated_hours": est_val,
+                    "actual_hours": act_val,
+                    "weight": weight,
+                    "is_final": is_final,
+                    "comp_d": comp_d,
+                })
 
-        total_weight = sum(w for w, _, _ in task_data) if task_data else float(total_estimated_hours or 0.0)
+        total_weight = sum(t["weight"] for t in task_data) if task_data else float(total_estimated_hours or 0.0)
         if total_weight == 0.0 and task_data:
             # Fallback to counting tasks if estimates were not set
-            task_data = [(1.0, is_f, c_d) for _, is_f, c_d in task_data]
+            for t in task_data:
+                t["weight"] = 1.0
+                t["estimated_hours"] = 1.0
             total_weight = float(len(task_data))
 
         total_weight = round(total_weight, 2)
@@ -497,11 +528,19 @@ class DashboardService:
                 if snapshots and date_str in snapshots:
                     actual_hours = round(float(snapshots[date_str]), 2)
                 elif task_data:
-                    completed_so_far = sum(
-                        w for w, is_final, c_d in task_data
-                        if is_final and c_d <= current_date
-                    )
-                    actual_hours = max(0.0, round(total_weight - completed_so_far, 2))
+                    remaining_for_day = 0.0
+                    for t in task_data:
+                        # For completed tasks on or before current_date: remaining hours = 0.0
+                        if t["is_final"] and t["comp_d"] <= current_date:
+                            continue
+
+                        # For tasks in progress (or completed after current_date):
+                        # remaining = max(0.0, estimated_hours - actual_hours)
+                        planned = t["estimated_hours"] if t["estimated_hours"] > 0 else t["weight"]
+                        remaining_task = max(0.0, planned - t["actual_hours"])
+                        remaining_for_day += remaining_task
+
+                    actual_hours = round(remaining_for_day, 2)
                 else:
                     actual_hours = round(float(total_actual_hours or 0.0), 2)
 
