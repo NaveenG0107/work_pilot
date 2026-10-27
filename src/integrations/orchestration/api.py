@@ -138,6 +138,7 @@ async def confirm_action(
             organization_id=organization_id,
             role=role,
         )
-        return success("Task created successfully", res, status_code=200)
+        msg = res.get("message") or "Action completed successfully"
+        return success(msg, res, status_code=200)
     except Exception as exc:
         return _handle_exception(exc)

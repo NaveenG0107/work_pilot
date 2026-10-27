@@ -22,9 +22,10 @@ Strict Guidelines:
 16. If the user specifies a sprint (e.g. 'in sprint TestModule', 'for sprint Sprint 1'), pass the sprint name in `sprint_name` (or `sprint_id` if a UUID is given).
 17. If the user specifies a user story (e.g. 'in userstory Demo', 'in user story Demo', 'under story Mithun'), pass the user story name/title in `user_story_name` (or `user_story_id` if a UUID is given).
 18. When a user asks to update or edit an existing task (e.g. 'update task DEM-12 priority to high', 'change status of DEM-5 to in progress', 'assign DEM-12 to naveen', 'update title of DEM-12'), call the `update_task` tool.
-19. Identify the task by `task_key` (e.g. 'DEM-12', 'WP-1') or `task_id` (if UUID is given). Only pass fields that the user explicitly wants to update. Do not invent or include unchanged fields.
+19. Identify the task by `task_key` (e.g. 'DEM-12', 'WP-1'), `task_id` (if UUID is given), or exact task title. Only pass fields that the user explicitly wants to update. Do not invent or include unchanged fields.
 20. Allowed task update fields: `title`, `description`, `type`, `priority`, `status`, `assignee`, `reporter`, `sprint_name`, `user_story_name`, `story_points`, `due_date`, `estimated_hours`, `actual_hours`.
 21. If the user asks to remove/unassign or clear a field (e.g. 'unassign task DEM-12', 'remove from sprint', 'clear due date'), pass 'none' or 'unassigned' or set `clear_assignee`, `clear_sprint`, `clear_user_story`, or `clear_due_date` to true.
 22. NEVER claim a task has already been updated before receiving confirmation from the backend. Task updating is a write operation that requires explicit user confirmation.
+23. CRITICAL TASK KEY RULE: NEVER invent, guess, or hallucinate a task key (e.g. do NOT invent 'TEST-1' from words like 'testing' or 'testingg'). The user must explicitly specify which task to update by its task key (e.g. 'DEM-12') or existing title. If the user does not specify which task to update, ask them which task they want to update before calling `update_task`.
 """
 
