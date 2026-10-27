@@ -144,6 +144,56 @@ def test_dashboard_sprint_burndown_calculation_unit():
     assert points_dt[1].actual_hours == 50.0
 
 
+def test_dashboard_sprint_burndown_partial_progress_unit():
+    from datetime import date, datetime, timezone
+    from src.dashboard.service import DashboardService
+
+    start = date(2026, 10, 20)
+    end = date(2026, 10, 24)
+
+    class DummyTask:
+        def __init__(self, estimated_hours, actual_hours, is_final, updated_at=None):
+            self.estimated_hours = estimated_hours
+            self.actual_hours = actual_hours
+            self.story_points = None
+            self.is_final = is_final
+            self.updated_at = updated_at
+
+    tasks = [
+        # Task 1: Completed on Oct 21 -> on Oct 20: remaining = 10 - 2 = 8; on Oct 21+: remaining = 0
+        DummyTask(10.0, 2.0, True, datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)),
+        # Task 2: In-progress -> remaining = max(0, 20 - 5) = 15
+        DummyTask(20.0, 5.0, False),
+        # Task 3: Over-logged -> remaining = max(0, 10 - 15) = 0
+        DummyTask(10.0, 15.0, False),
+        # Task 4: In-progress without actual hours logged -> remaining = 15 - 0 = 15
+        DummyTask(15.0, 0.0, False),
+    ]
+
+    points = DashboardService._generate_burndown_points(start, end, tasks=tasks)
+    assert len(points) == 5
+    # Total initial weight = 10 + 20 + 10 + 15 = 55.0
+    assert points[0].ideal_hours == 55.0
+    assert points[-1].ideal_hours == 0.0
+
+    # Day 1 (Oct 20):
+    # Task 1: not yet completed -> max(0, 10 - 2) = 8.0
+    # Task 2: in progress -> max(0, 20 - 5) = 15.0
+    # Task 3: over-logged -> max(0, 10 - 15) = 0.0
+    # Task 4: in progress -> max(0, 15 - 0) = 15.0
+    # Sum: 8.0 + 15.0 + 0.0 + 15.0 = 38.0
+    assert points[0].actual_hours == 38.0
+
+    # Day 2 (Oct 21):
+    # Task 1: completed on Oct 21 -> 0.0
+    # Task 2: 15.0
+    # Task 3: 0.0
+    # Task 4: 15.0
+    # Sum: 0.0 + 15.0 + 0.0 + 15.0 = 30.0
+    assert points[1].actual_hours == 30.0
+
+
+
 
 async def test_dashboard_sprint_burndown_api(client: AsyncClient, app_context: dict):
     headers = {"Authorization": f"Bearer {app_context['token_org_a_admin']}"}
